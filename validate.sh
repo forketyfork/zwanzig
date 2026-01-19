@@ -81,7 +81,7 @@ else
     ERRORS=$((ERRORS + 1))
 fi
 
-GOOD_EMPTY=$(grep "catch {}" examples/good_example.zig 2>/dev/null | wc -l)
+GOOD_EMPTY=$(grep -c "catch {}" examples/good_example.zig 2>/dev/null)
 if [ "$GOOD_EMPTY" = "0" ]; then
     echo "✓ good_example.zig has no empty catch blocks"
 else

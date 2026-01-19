@@ -30,7 +30,13 @@ pub const Analyzer = struct {
         defer file.close();
 
         const max_size = 10 * 1024 * 1024;
-        const content = try file.readToEndAllocOptions(self.allocator, max_size, null, @alignOf(u8), 0);
+        const content = try file.readToEndAllocOptions(
+            self.allocator,
+            max_size,
+            null,
+            std.mem.Alignment.of(u8),
+            0,
+        );
         defer self.allocator.free(content);
 
         var source = Source.init(self.allocator, file_path, content);
