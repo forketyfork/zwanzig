@@ -4,12 +4,16 @@ pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
 
-    // Create the main executable
-    const exe = b.addExecutable(.{
-        .name = "zwanzig",
+    const exe_module = b.createModule(.{
         .root_source_file = b.path("src/main.zig"),
         .target = target,
         .optimize = optimize,
+    });
+
+    // Create the main executable
+    const exe = b.addExecutable(.{
+        .name = "zwanzig",
+        .root_module = exe_module,
     });
     b.installArtifact(exe);
 
@@ -23,11 +27,15 @@ pub fn build(b: *std.Build) void {
     const run_step = b.step("run", "Run the analyzer");
     run_step.dependOn(&run_cmd.step);
 
-    // Create tests
-    const tests = b.addTest(.{
+    const test_module = b.createModule(.{
         .root_source_file = b.path("src/main.zig"),
         .target = target,
         .optimize = optimize,
+    });
+
+    // Create tests
+    const tests = b.addTest(.{
+        .root_module = test_module,
     });
 
     const run_tests = b.addRunArtifact(tests);

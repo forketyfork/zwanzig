@@ -38,7 +38,7 @@ pub fn main() !void {
 }
 
 fn printUsage() !void {
-    const stderr = std.io.getStdErr().writer();
+    const stderr = std.fs.File.stderr().deprecatedWriter();
     try stderr.writeAll("Usage: zwanzig <file.zig> [file.zig...]\n");
     try stderr.writeAll("\nA static analyzer for Zig code.\n");
     try stderr.writeAll("\nOptions:\n");

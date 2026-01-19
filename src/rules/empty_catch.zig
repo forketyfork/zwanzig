@@ -1,5 +1,6 @@
 const std = @import("std");
 const Rule = @import("../rule.zig").Rule;
+const RuleError = @import("../rule.zig").RuleError;
 const Violation = @import("../rule.zig").Violation;
 
 /// Rule that detects empty catch blocks in Zig code
@@ -10,22 +11,29 @@ pub const EmptyCatchRule = struct {
         .checkFn = check,
     };
 
-    fn check(source: []const u8, file_path: []const u8, violations: *std.ArrayList(Violation)) !void {
+    fn check(
+        source: []const u8,
+        file_path: []const u8,
+        allocator: std.mem.Allocator,
+        violations: *std.ArrayList(Violation),
+    ) RuleError!void {
         var line: usize = 1;
         var column: usize = 1;
         var i: usize = 0;
 
-        while (i < source.len) : (i += 1) {
+        while (i < source.len) {
+            const current = source[i];
+
             // Track line and column
-            if (source[i] == '\n') {
+            if (current == '\n') {
                 line += 1;
                 column = 1;
+                i += 1;
                 continue;
             }
-            column += 1;
 
             // Look for "catch" keyword
-            if (i + 5 <= source.len and std.mem.eql(u8, source[i..][0..5], "catch")) {
+            if (i + 5 <= source.len and std.mem.eql(u8, source[i .. i + 5], "catch")) {
                 // Make sure it's a whole word (not part of another identifier)
                 const is_word_start = i == 0 or !isIdentifierChar(source[i - 1]);
                 const is_word_end = i + 5 >= source.len or !isIdentifierChar(source[i + 5]);
@@ -37,7 +45,7 @@ pub const EmptyCatchRule = struct {
                     var j = i + 5;
 
                     // Skip whitespace and potential |err| capture
-                    while (j < source.len and (source[j] == ' ' or source[j] == '\t' or source[j] == '\n' or source[j] == '\r')) : (j += 1) {}
+                    while (j < source.len and isWhitespace(source[j])) : (j += 1) {}
 
                     // Check for optional error capture |err|
                     if (j < source.len and source[j] == '|') {
@@ -51,23 +59,23 @@ pub const EmptyCatchRule = struct {
                         j += 1; // Skip the closing |
 
                         // Skip more whitespace
-                        while (j < source.len and (source[j] == ' ' or source[j] == '\t' or source[j] == '\n' or source[j] == '\r')) : (j += 1) {}
+                        while (j < source.len and isWhitespace(source[j])) : (j += 1) {}
                     }
 
                     // Now we should be at the opening brace
                     if (j < source.len and source[j] == '{') {
-                        j += 1;
-
                         // Check if the block is empty (only whitespace between { and })
                         var is_empty = true;
                         var found_closing_brace = false;
-                        while (j < source.len) : (j += 1) {
-                            if (source[j] == '}') {
+                        var k = j + 1;
+                        while (k < source.len) {
+                            const ch = source[k];
+                            if (ch == '}') {
                                 // Found closing brace
                                 found_closing_brace = true;
                                 if (is_empty) {
                                     // Report violation
-                                    try violations.append(Violation{
+                                    try violations.append(allocator, Violation{
                                         .file_path = file_path,
                                         .line = catch_line,
                                         .column = catch_column,
@@ -76,19 +84,63 @@ pub const EmptyCatchRule = struct {
                                     });
                                 }
                                 break;
-                            } else if (source[j] != ' ' and source[j] != '\t' and source[j] != '\n' and source[j] != '\r') {
-                                // Found non-whitespace content
-                                is_empty = false;
                             }
+
+                            if (isWhitespace(ch)) {
+                                k += 1;
+                                continue;
+                            }
+
+                            if (ch == '/' and k + 1 < source.len) {
+                                const next = source[k + 1];
+                                if (next == '/') {
+                                    k += 2;
+                                    while (k < source.len and source[k] != '\n') : (k += 1) {}
+                                    continue;
+                                }
+                                if (next == '*') {
+                                    k += 2;
+                                    while (k + 1 < source.len and !(source[k] == '*' and source[k + 1] == '/')) : (k += 1) {}
+                                    if (k + 1 < source.len) {
+                                        k += 2;
+                                    } else {
+                                        k = source.len;
+                                    }
+                                    continue;
+                                }
+                            }
+
+                            // Found non-whitespace content
+                            is_empty = false;
+                            k += 1;
                         }
 
                         // If we found a closing brace, move main loop past it
                         // If not (malformed code), j is already at end of source, which is safe
                         if (found_closing_brace) {
-                            i = j;
+                            const skip_to = k + 1;
+                            advancePosition(source, i, skip_to, &line, &column);
+                            i = skip_to;
+                            continue;
                         }
                     }
                 }
+            }
+
+            i += 1;
+            column += 1;
+        }
+    }
+
+    fn advancePosition(source: []const u8, start: usize, target: usize, line: *usize, column: *usize) void {
+        var idx = start;
+        const end = @min(target, source.len);
+        while (idx < end) : (idx += 1) {
+            if (source[idx] == '\n') {
+                line.* += 1;
+                column.* = 1;
+            } else {
+                column.* += 1;
             }
         }
     }
@@ -99,21 +151,27 @@ pub const EmptyCatchRule = struct {
             (c >= '0' and c <= '9') or
             c == '_';
     }
+
+    fn isWhitespace(c: u8) bool {
+        return c == ' ' or c == '\t' or c == '\n' or c == '\r';
+    }
 };
 
 test "empty catch block detection" {
     const testing = std.testing;
     const allocator = testing.allocator;
 
-    var violations = std.ArrayList(Violation).init(allocator);
-    defer violations.deinit();
+    var violations: std.ArrayList(Violation) = .empty;
+    defer violations.deinit(allocator);
 
     // Test case 1: Empty catch block
     const code1 =
         \\const x = try_func() catch {};
     ;
-    try EmptyCatchRule.rule.check(code1, "test.zig", &violations);
+    try EmptyCatchRule.rule.check(code1, "test.zig", allocator, &violations);
     try testing.expectEqual(@as(usize, 1), violations.items.len);
+    try testing.expectEqual(@as(usize, 1), violations.items[0].line);
+    try testing.expectEqual(@as(usize, 22), violations.items[0].column);
 
     violations.clearRetainingCapacity();
 
@@ -123,46 +181,70 @@ test "empty catch block detection" {
         \\    std.debug.print("Error occurred\n", .{});
         \\};
     ;
-    try EmptyCatchRule.rule.check(code2, "test.zig", &violations);
+    try EmptyCatchRule.rule.check(code2, "test.zig", allocator, &violations);
     try testing.expectEqual(@as(usize, 0), violations.items.len);
 
     violations.clearRetainingCapacity();
 
-    // Test case 3: Catch with error capture but empty body
+    // Test case 3: Comment-only catch block
     const code3 =
-        \\const x = try_func() catch |err| {};
+        \\const x = try_func() catch {
+        \\    // intentionally ignored
+        \\};
     ;
-    try EmptyCatchRule.rule.check(code3, "test.zig", &violations);
+    try EmptyCatchRule.rule.check(code3, "test.zig", allocator, &violations);
     try testing.expectEqual(@as(usize, 1), violations.items.len);
 
     violations.clearRetainingCapacity();
 
-    // Test case 4: Multiple catches
+    // Test case 4: Catch with error capture but empty body
     const code4 =
+        \\const x = try_func() catch |err| {};
+    ;
+    try EmptyCatchRule.rule.check(code4, "test.zig", allocator, &violations);
+    try testing.expectEqual(@as(usize, 1), violations.items.len);
+
+    violations.clearRetainingCapacity();
+
+    // Test case 5: Multiple catches
+    const code5 =
         \\const x = try_func() catch {};
         \\const y = another_func() catch {
         \\    return error.Failed;
         \\};
         \\const z = third_func() catch {};
     ;
-    try EmptyCatchRule.rule.check(code4, "test.zig", &violations);
+    try EmptyCatchRule.rule.check(code5, "test.zig", allocator, &violations);
     try testing.expectEqual(@as(usize, 2), violations.items.len);
 
     violations.clearRetainingCapacity();
 
-    // Test case 5: Malformed code - missing closing brace (should not crash)
-    const code5 =
+    // Test case 6: Line tracking after skipping a block
+    const code6 =
+        \\const x = try_func() catch {
+        \\    // intentionally ignored
+        \\};
+        \\const y = another_func() catch {};
+    ;
+    try EmptyCatchRule.rule.check(code6, "test.zig", allocator, &violations);
+    try testing.expectEqual(@as(usize, 2), violations.items.len);
+    try testing.expectEqual(@as(usize, 4), violations.items[1].line);
+
+    violations.clearRetainingCapacity();
+
+    // Test case 7: Malformed code - missing closing brace (should not crash)
+    const code7 =
         \\const x = try_func() catch {
     ;
-    try EmptyCatchRule.rule.check(code5, "test.zig", &violations);
+    try EmptyCatchRule.rule.check(code7, "test.zig", allocator, &violations);
     // Should handle gracefully without reporting violation
 
     violations.clearRetainingCapacity();
 
-    // Test case 6: Malformed code - missing closing pipe (should not crash)
-    const code6 =
+    // Test case 8: Malformed code - missing closing pipe (should not crash)
+    const code8 =
         \\const x = try_func() catch |err
     ;
-    try EmptyCatchRule.rule.check(code6, "test.zig", &violations);
+    try EmptyCatchRule.rule.check(code8, "test.zig", allocator, &violations);
     // Should handle gracefully without crashing
 }

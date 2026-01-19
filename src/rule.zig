@@ -8,7 +8,7 @@ pub const Violation = struct {
     rule_name: []const u8,
     message: []const u8,
 
-    pub fn format(self: Violation, comptime _: []const u8, _: std.fmt.FormatOptions, writer: anytype) !void {
+    pub fn format(self: Violation, writer: *std.Io.Writer) !void {
         try writer.print("{s}:{d}:{d}: {s}: {s}\n", .{
             self.file_path,
             self.line,
@@ -19,12 +19,25 @@ pub const Violation = struct {
     }
 };
 
+pub const RuleError = error{OutOfMemory};
+
 /// Base interface that all rules must implement
 pub const Rule = struct {
     name: []const u8,
-    checkFn: *const fn (source: []const u8, file_path: []const u8, violations: *std.ArrayList(Violation)) anyerror!void,
+    checkFn: *const fn (
+        source: []const u8,
+        file_path: []const u8,
+        allocator: std.mem.Allocator,
+        violations: *std.ArrayList(Violation),
+    ) RuleError!void,
 
-    pub fn check(self: *const Rule, source: []const u8, file_path: []const u8, violations: *std.ArrayList(Violation)) !void {
-        try self.checkFn(source, file_path, violations);
+    pub fn check(
+        self: *const Rule,
+        source: []const u8,
+        file_path: []const u8,
+        allocator: std.mem.Allocator,
+        violations: *std.ArrayList(Violation),
+    ) RuleError!void {
+        try self.checkFn(source, file_path, allocator, violations);
     }
 };

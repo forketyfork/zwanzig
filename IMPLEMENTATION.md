@@ -90,7 +90,7 @@ The rule implements a state machine that:
 - ✅ Detects `catch {}`
 - ✅ Detects `catch |err| {}`
 - ✅ Ignores `catch { code }`
-- ✅ Ignores "catch" in strings/comments (basic)
+- [!] Does not parse full Zig syntax; may report false positives in strings/comments
 - ✅ Accurate line/column reporting
 - ✅ Comprehensive test coverage
 

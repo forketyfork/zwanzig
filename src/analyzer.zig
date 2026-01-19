@@ -10,18 +10,18 @@ pub const Analyzer = struct {
     pub fn init(allocator: std.mem.Allocator) Analyzer {
         return Analyzer{
             .allocator = allocator,
-            .rules = std.ArrayList(*const Rule).init(allocator),
-            .violations = std.ArrayList(Violation).init(allocator),
+            .rules = .empty,
+            .violations = .empty,
         };
     }
 
     pub fn deinit(self: *Analyzer) void {
-        self.rules.deinit();
-        self.violations.deinit();
+        self.rules.deinit(self.allocator);
+        self.violations.deinit(self.allocator);
     }
 
     pub fn registerRule(self: *Analyzer, rule: *const Rule) !void {
-        try self.rules.append(rule);
+        try self.rules.append(self.allocator, rule);
     }
 
     pub fn analyzeFile(self: *Analyzer, file_path: []const u8) !void {
@@ -35,12 +35,12 @@ pub const Analyzer = struct {
 
         // Run all registered rules
         for (self.rules.items) |rule| {
-            try rule.check(source, file_path, &self.violations);
+            try rule.check(source, file_path, self.allocator, &self.violations);
         }
     }
 
     pub fn printResults(self: *Analyzer) !void {
-        const stdout = std.io.getStdOut().writer();
+        const stdout = std.fs.File.stdout().deprecatedWriter();
 
         if (self.violations.items.len == 0) {
             try stdout.writeAll("No violations found.\n");
@@ -49,7 +49,7 @@ pub const Analyzer = struct {
 
         try stdout.print("Found {d} violation(s):\n", .{self.violations.items.len});
         for (self.violations.items) |violation| {
-            try stdout.print("{}", .{violation});
+            try stdout.print("{f}", .{violation});
         }
     }
 
