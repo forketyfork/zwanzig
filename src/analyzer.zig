@@ -2,7 +2,7 @@ const std = @import("std");
 const Rule = @import("rule.zig").Rule;
 const Violation = @import("rule.zig").Violation;
 const Source = @import("source.zig").Source;
-const RuleFilter = @import("main.zig").RuleFilter;
+const RuleFilter = @import("rule_filter.zig").RuleFilter;
 
 pub const Analyzer = struct {
     allocator: std.mem.Allocator,

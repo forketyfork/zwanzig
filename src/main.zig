@@ -2,12 +2,7 @@ const std = @import("std");
 const Analyzer = @import("analyzer.zig").Analyzer;
 const Rule = @import("rule.zig").Rule;
 const EmptyCatchRule = @import("rules/empty_catch.zig").EmptyCatchRule;
-
-pub const RuleFilter = union(enum) {
-    none,
-    allowlist: []const []const u8,
-    blocklist: []const []const u8,
-};
+const RuleFilter = @import("rule_filter.zig").RuleFilter;
 
 pub const CliArgs = struct {
     files: []const []const u8,
@@ -36,13 +31,13 @@ pub fn parseArgs(allocator: std.mem.Allocator, args: []const []const u8) CliErro
         const arg = args[i];
 
         if (std.mem.eql(u8, arg, "--do")) {
-            if (i + 1 >= args.len) {
+            if (i + 1 >= args.len or std.mem.startsWith(u8, args[i + 1], "--")) {
                 return CliError.MissingFlagValue;
             }
             i += 1;
             try do_rules.append(allocator, args[i]);
         } else if (std.mem.eql(u8, arg, "--skip")) {
-            if (i + 1 >= args.len) {
+            if (i + 1 >= args.len or std.mem.startsWith(u8, args[i + 1], "--")) {
                 return CliError.MissingFlagValue;
             }
             i += 1;
@@ -248,6 +243,22 @@ test "parseArgs: --do without value" {
 test "parseArgs: --skip without value" {
     const allocator = std.testing.allocator;
     const args = [_][]const u8{ "zwanzig", "--skip" };
+    const result = parseArgs(allocator, &args);
+
+    try std.testing.expectError(CliError.MissingFlagValue, result);
+}
+
+test "parseArgs: --do with flag as value" {
+    const allocator = std.testing.allocator;
+    const args = [_][]const u8{ "zwanzig", "--do", "--skip", "rule" };
+    const result = parseArgs(allocator, &args);
+
+    try std.testing.expectError(CliError.MissingFlagValue, result);
+}
+
+test "parseArgs: --skip with flag as value" {
+    const allocator = std.testing.allocator;
+    const args = [_][]const u8{ "zwanzig", "--skip", "--do", "rule" };
     const result = parseArgs(allocator, &args);
 
     try std.testing.expectError(CliError.MissingFlagValue, result);
