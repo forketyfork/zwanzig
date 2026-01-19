@@ -140,7 +140,7 @@ pub fn main() !void {
 
     try analyzer.printResults();
 
-    if (analyzer.hasViolations()) {
+    if (analyzer.hasDiagnostics()) {
         std.process.exit(1);
     }
 }

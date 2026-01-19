@@ -1,24 +1,10 @@
 const std = @import("std");
 const Source = @import("source.zig").Source;
-
-/// Represents a single violation found by a rule
-pub const Violation = struct {
-    file_path: []const u8,
-    line: usize,
-    column: usize,
-    rule_name: []const u8,
-    message: []const u8,
-
-    pub fn format(self: Violation, writer: *std.Io.Writer) !void {
-        try writer.print("{s}:{d}:{d}: {s}: {s}\n", .{
-            self.file_path,
-            self.line,
-            self.column,
-            self.rule_name,
-            self.message,
-        });
-    }
-};
+const diagnostic_mod = @import("diagnostic.zig");
+pub const Diagnostic = diagnostic_mod.Diagnostic;
+pub const Severity = diagnostic_mod.Severity;
+pub const Location = diagnostic_mod.Location;
+pub const SourceRange = diagnostic_mod.SourceRange;
 
 pub const RuleError = error{
     OutOfMemory,
@@ -29,18 +15,19 @@ pub const RuleError = error{
 /// Base interface that all rules must implement
 pub const Rule = struct {
     name: []const u8,
+    default_severity: Severity = .err,
     checkFn: *const fn (
         source: *Source,
         allocator: std.mem.Allocator,
-        violations: *std.ArrayList(Violation),
+        diagnostics: *std.ArrayList(Diagnostic),
     ) RuleError!void,
 
     pub fn check(
         self: *const Rule,
         source: *Source,
         allocator: std.mem.Allocator,
-        violations: *std.ArrayList(Violation),
+        diagnostics: *std.ArrayList(Diagnostic),
     ) RuleError!void {
-        try self.checkFn(source, allocator, violations);
+        try self.checkFn(source, allocator, diagnostics);
     }
 };

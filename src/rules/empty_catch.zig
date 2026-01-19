@@ -1,7 +1,8 @@
 const std = @import("std");
 const Rule = @import("../rule.zig").Rule;
 const RuleError = @import("../rule.zig").RuleError;
-const Violation = @import("../rule.zig").Violation;
+const Diagnostic = @import("../rule.zig").Diagnostic;
+const Severity = @import("../rule.zig").Severity;
 const Source = @import("../source.zig").Source;
 
 /// Rule that detects empty catch blocks in Zig code
@@ -9,13 +10,14 @@ const Source = @import("../source.zig").Source;
 pub const EmptyCatchRule = struct {
     pub const rule: Rule = Rule{
         .name = "empty-catch",
+        .default_severity = .warning,
         .checkFn = check,
     };
 
     fn check(
         src: *Source,
         allocator: std.mem.Allocator,
-        violations: *std.ArrayList(Violation),
+        diagnostics: *std.ArrayList(Diagnostic),
     ) RuleError!void {
         const source = src.getContent();
         const file_path = src.getFilePath();
@@ -76,14 +78,14 @@ pub const EmptyCatchRule = struct {
                                 // Found closing brace
                                 found_closing_brace = true;
                                 if (is_empty) {
-                                    // Report violation
-                                    try violations.append(allocator, Violation{
-                                        .file_path = file_path,
-                                        .line = catch_line,
-                                        .column = catch_column,
-                                        .rule_name = "empty-catch",
-                                        .message = "Empty catch block detected. Consider handling the error or using '_' to explicitly ignore it.",
-                                    });
+                                    try diagnostics.append(allocator, Diagnostic.initAtLocation(
+                                        file_path,
+                                        "empty-catch",
+                                        .warning,
+                                        "Empty catch block detected. Consider handling the error or using '_' to explicitly ignore it.",
+                                        catch_line,
+                                        catch_column,
+                                    ));
                                 }
                                 break;
                             }
@@ -163,8 +165,8 @@ test "empty catch block detection" {
     const testing = std.testing;
     const allocator = testing.allocator;
 
-    var violations: std.ArrayList(Violation) = .empty;
-    defer violations.deinit(allocator);
+    var diagnostics: std.ArrayList(Diagnostic) = .empty;
+    defer diagnostics.deinit(allocator);
 
     // Test case 1: Empty catch block
     const code1: [:0]const u8 =
@@ -172,12 +174,14 @@ test "empty catch block detection" {
     ;
     var source1 = Source.init(allocator, "test.zig", code1);
     defer source1.deinit();
-    try EmptyCatchRule.rule.check(&source1, allocator, &violations);
-    try testing.expectEqual(@as(usize, 1), violations.items.len);
-    try testing.expectEqual(@as(usize, 1), violations.items[0].line);
-    try testing.expectEqual(@as(usize, 22), violations.items[0].column);
+    try EmptyCatchRule.rule.check(&source1, allocator, &diagnostics);
+    try testing.expectEqual(@as(usize, 1), diagnostics.items.len);
+    try testing.expectEqual(@as(usize, 1), diagnostics.items[0].range.start.line);
+    try testing.expectEqual(@as(usize, 22), diagnostics.items[0].range.start.column);
+    try testing.expectEqual(Severity.warning, diagnostics.items[0].severity);
+    try testing.expectEqualStrings("empty-catch", diagnostics.items[0].rule_id);
 
-    violations.clearRetainingCapacity();
+    diagnostics.clearRetainingCapacity();
 
     // Test case 2: Non-empty catch block
     const code2: [:0]const u8 =
@@ -187,10 +191,10 @@ test "empty catch block detection" {
     ;
     var source2 = Source.init(allocator, "test.zig", code2);
     defer source2.deinit();
-    try EmptyCatchRule.rule.check(&source2, allocator, &violations);
-    try testing.expectEqual(@as(usize, 0), violations.items.len);
+    try EmptyCatchRule.rule.check(&source2, allocator, &diagnostics);
+    try testing.expectEqual(@as(usize, 0), diagnostics.items.len);
 
-    violations.clearRetainingCapacity();
+    diagnostics.clearRetainingCapacity();
 
     // Test case 3: Comment-only catch block
     const code3: [:0]const u8 =
@@ -200,10 +204,10 @@ test "empty catch block detection" {
     ;
     var source3 = Source.init(allocator, "test.zig", code3);
     defer source3.deinit();
-    try EmptyCatchRule.rule.check(&source3, allocator, &violations);
-    try testing.expectEqual(@as(usize, 1), violations.items.len);
+    try EmptyCatchRule.rule.check(&source3, allocator, &diagnostics);
+    try testing.expectEqual(@as(usize, 1), diagnostics.items.len);
 
-    violations.clearRetainingCapacity();
+    diagnostics.clearRetainingCapacity();
 
     // Test case 4: Catch with error capture but empty body
     const code4: [:0]const u8 =
@@ -211,10 +215,10 @@ test "empty catch block detection" {
     ;
     var source4 = Source.init(allocator, "test.zig", code4);
     defer source4.deinit();
-    try EmptyCatchRule.rule.check(&source4, allocator, &violations);
-    try testing.expectEqual(@as(usize, 1), violations.items.len);
+    try EmptyCatchRule.rule.check(&source4, allocator, &diagnostics);
+    try testing.expectEqual(@as(usize, 1), diagnostics.items.len);
 
-    violations.clearRetainingCapacity();
+    diagnostics.clearRetainingCapacity();
 
     // Test case 5: Multiple catches
     const code5: [:0]const u8 =
@@ -226,10 +230,10 @@ test "empty catch block detection" {
     ;
     var source5 = Source.init(allocator, "test.zig", code5);
     defer source5.deinit();
-    try EmptyCatchRule.rule.check(&source5, allocator, &violations);
-    try testing.expectEqual(@as(usize, 2), violations.items.len);
+    try EmptyCatchRule.rule.check(&source5, allocator, &diagnostics);
+    try testing.expectEqual(@as(usize, 2), diagnostics.items.len);
 
-    violations.clearRetainingCapacity();
+    diagnostics.clearRetainingCapacity();
 
     // Test case 6: Line tracking after skipping a block
     const code6: [:0]const u8 =
@@ -240,11 +244,11 @@ test "empty catch block detection" {
     ;
     var source6 = Source.init(allocator, "test.zig", code6);
     defer source6.deinit();
-    try EmptyCatchRule.rule.check(&source6, allocator, &violations);
-    try testing.expectEqual(@as(usize, 2), violations.items.len);
-    try testing.expectEqual(@as(usize, 4), violations.items[1].line);
+    try EmptyCatchRule.rule.check(&source6, allocator, &diagnostics);
+    try testing.expectEqual(@as(usize, 2), diagnostics.items.len);
+    try testing.expectEqual(@as(usize, 4), diagnostics.items[1].range.start.line);
 
-    violations.clearRetainingCapacity();
+    diagnostics.clearRetainingCapacity();
 
     // Test case 7: Malformed code - missing closing brace (should not crash)
     const code7: [:0]const u8 =
@@ -252,9 +256,9 @@ test "empty catch block detection" {
     ;
     var source7 = Source.init(allocator, "test.zig", code7);
     defer source7.deinit();
-    try EmptyCatchRule.rule.check(&source7, allocator, &violations);
+    try EmptyCatchRule.rule.check(&source7, allocator, &diagnostics);
 
-    violations.clearRetainingCapacity();
+    diagnostics.clearRetainingCapacity();
 
     // Test case 8: Malformed code - missing closing pipe (should not crash)
     const code8: [:0]const u8 =
@@ -262,5 +266,5 @@ test "empty catch block detection" {
     ;
     var source8 = Source.init(allocator, "test.zig", code8);
     defer source8.deinit();
-    try EmptyCatchRule.rule.check(&source8, allocator, &violations);
+    try EmptyCatchRule.rule.check(&source8, allocator, &diagnostics);
 }

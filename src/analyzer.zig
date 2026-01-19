@@ -1,27 +1,27 @@
 const std = @import("std");
 const Rule = @import("rule.zig").Rule;
-const Violation = @import("rule.zig").Violation;
+const Diagnostic = @import("rule.zig").Diagnostic;
 const Source = @import("source.zig").Source;
 const RuleFilter = @import("rule_filter.zig").RuleFilter;
 
 pub const Analyzer = struct {
     allocator: std.mem.Allocator,
     rules: std.ArrayList(*const Rule),
-    violations: std.ArrayList(Violation),
+    diagnostics: std.ArrayList(Diagnostic),
     rule_filter: RuleFilter,
 
     pub fn init(allocator: std.mem.Allocator) Analyzer {
         return Analyzer{
             .allocator = allocator,
             .rules = .empty,
-            .violations = .empty,
+            .diagnostics = .empty,
             .rule_filter = .none,
         };
     }
 
     pub fn deinit(self: *Analyzer) void {
         self.rules.deinit(self.allocator);
-        self.violations.deinit(self.allocator);
+        self.diagnostics.deinit(self.allocator);
     }
 
     pub fn registerRule(self: *Analyzer, rule: *const Rule) !void {
@@ -73,7 +73,7 @@ pub const Analyzer = struct {
 
         for (self.rules.items) |rule| {
             if (self.isRuleEnabled(rule.name)) {
-                try rule.check(&source, self.allocator, &self.violations);
+                try rule.check(&source, self.allocator, &self.diagnostics);
             }
         }
     }
@@ -81,18 +81,18 @@ pub const Analyzer = struct {
     pub fn printResults(self: *Analyzer) !void {
         const stdout = std.fs.File.stdout().deprecatedWriter();
 
-        if (self.violations.items.len == 0) {
-            try stdout.writeAll("No violations found.\n");
+        if (self.diagnostics.items.len == 0) {
+            try stdout.writeAll("No issues found.\n");
             return;
         }
 
-        try stdout.print("Found {d} violation(s):\n", .{self.violations.items.len});
-        for (self.violations.items) |violation| {
-            try stdout.print("{f}", .{violation});
+        try stdout.print("Found {d} issue(s):\n", .{self.diagnostics.items.len});
+        for (self.diagnostics.items) |diag| {
+            try diag.format(stdout);
         }
     }
 
-    pub fn hasViolations(self: *Analyzer) bool {
-        return self.violations.items.len > 0;
+    pub fn hasDiagnostics(self: *Analyzer) bool {
+        return self.diagnostics.items.len > 0;
     }
 };

@@ -6,7 +6,7 @@ A static analyzer and linter for Zig code.
 
 - **Extensible Architecture**: Easy to add new rules and checks
 - **Fast Analysis**: Efficient source code scanning
-- **Clear Error Messages**: Helpful diagnostics with line and column information
+- **Structured Diagnostics**: Rich diagnostic output with severity levels, source ranges, and rule identifiers
 
 ## Implemented Rules
 
@@ -112,7 +112,8 @@ See the `examples/` directory for sample code demonstrating both violations and 
 
 The analyzer is built with extensibility and performance in mind:
 
-- **`source.zig`**: Source parsing cache that provides lazy, cached access to AST and tokens
+- **`source.zig`**: Source parsing cache that provides lazy, cached access to AST, tokens, and location mapping
+- **`diagnostic.zig`**: Structured diagnostic model with severity levels and source ranges
 - **`analyzer.zig`**: Core analysis engine that coordinates file reading and rule execution
 - **`rule.zig`**: Base rule interface that all checks implement
 - **`rules/`**: Directory containing individual rule implementations
@@ -129,6 +130,19 @@ Zwanzig uses a smart caching strategy to avoid redundant parsing. When analyzing
 4. Subsequent accesses by other rules reuse the cached parse results
 
 This ensures efficient analysis even with many rules, as each file is parsed at most once.
+
+### Diagnostics
+
+Zwanzig uses a structured diagnostic model for reporting issues:
+
+- **Severity**: Each diagnostic has a severity level (`hint`, `warning`, or `error`)
+- **Source Range**: Diagnostics include precise source locations with line and column information
+- **Rule ID**: Each diagnostic identifies the rule that detected the issue
+
+Output format:
+```
+file.zig:5:10: warning: [empty-catch] Empty catch block detected.
+```
 
 ## Adding New Rules
 

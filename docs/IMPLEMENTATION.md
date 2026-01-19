@@ -23,6 +23,10 @@ The `Source` abstraction (`src/source.zig`) provides lazy, cached access to pars
 - `tokens()`: Returns the cached token list, parsing if necessary
 - `getContent()`: Returns the raw source text
 - `getFilePath()`: Returns the file path
+- `locationMapper()`: Returns the cached location mapper for byte-to-line/column conversion
+- `byteToLocation(byte_offset)`: Converts a byte offset to a `Location` (line, column)
+- `byteRangeToSourceRange(start, end)`: Converts a byte range to a `SourceRange`
+- `tokenLocation(token_index)`: Gets the location of a token by its index
 - `deinit()`: Releases cached resources
 
 **Usage Pattern:**
@@ -72,12 +76,20 @@ Rules receive a `Source` pointer, allowing them to:
 - Examine tokens via `tokens()`
 - Avoid redundant parsing when multiple rules access the same representations
 
-#### Violations
+#### Diagnostics
 
-Violations represent issues found by rules. Each violation includes:
-- File path and location (line, column)
-- Rule name that detected the issue
-- Descriptive message
+Diagnostics represent issues found by rules. Each diagnostic includes:
+- **File path**: The source file containing the issue
+- **Source range**: Start and end locations (line, column) for precise highlighting
+- **Rule ID**: The identifier of the rule that detected the issue
+- **Severity**: The importance level (`hint`, `warning`, or `error`)
+- **Message**: A descriptive message explaining the issue
+
+The `Diagnostic` type (`src/diagnostic.zig`) provides:
+- `Severity` enum with `hint`, `warning`, and `error` levels
+- `Location` struct for line/column positions (1-based)
+- `SourceRange` struct for start/end location pairs
+- `LocationMapper` for converting byte offsets to line/column positions
 
 ## Parsing Strategy
 
@@ -106,23 +118,27 @@ To add a new rule:
    fn check(
        source: *Source,
        allocator: std.mem.Allocator,
-       violations: *std.ArrayList(Violation),
+       diagnostics: *std.ArrayList(Diagnostic),
    ) RuleError!void
    ```
 4. Register the rule in `main.zig`
 
 Example:
 ```zig
+const Diagnostic = @import("../rule.zig").Diagnostic;
+const Severity = @import("../rule.zig").Severity;
+
 pub const MyRule = struct {
     pub const rule: Rule = Rule{
         .name = "my-rule",
+        .default_severity = .warning,
         .checkFn = check,
     };
 
     fn check(
         src: *Source,
         allocator: std.mem.Allocator,
-        violations: *std.ArrayList(Violation),
+        diagnostics: *std.ArrayList(Diagnostic),
     ) RuleError!void {
         // Access the AST
         const ast = try src.ast();
@@ -130,14 +146,25 @@ pub const MyRule = struct {
         // Traverse nodes and detect issues
         // ...
 
-        // Report violations
-        try violations.append(allocator, Violation{
-            .file_path = src.getFilePath(),
-            .line = line,
-            .column = column,
-            .rule_name = "my-rule",
-            .message = "Issue description",
-        });
+        // Report diagnostics with location
+        try diagnostics.append(allocator, Diagnostic.initAtLocation(
+            src.getFilePath(),
+            "my-rule",
+            .warning,
+            "Issue description",
+            line,
+            column,
+        ));
+
+        // Or with a source range for better highlighting
+        const range = try src.byteRangeToSourceRange(start_byte, end_byte);
+        try diagnostics.append(allocator, Diagnostic.init(
+            src.getFilePath(),
+            "my-rule",
+            .warning,
+            "Issue description",
+            range,
+        ));
     }
 };
 ```
@@ -146,9 +173,8 @@ pub const MyRule = struct {
 
 The current implementation provides a foundation for more sophisticated analysis:
 
-- **Rule Selection**: CLI flags to enable/disable specific rules
-- **File Discovery**: Recursive directory traversal with ignore patterns
-- **Structured Diagnostics**: Rich diagnostic model with severity levels and ranges
 - **AST-Based Rules**: Migration from text-based to AST-based rule implementations
 - **Control Flow Analysis**: CFG construction for inter-procedural analysis
 - **Semantic Analysis**: Integration with typed IR for deeper checks
+- **Multiple Output Formats**: JSON, SARIF for CI/CD integration
+- **Configuration Files**: Project-specific rule configuration
