@@ -50,30 +50,59 @@ pub const EmptyCatchRule = struct {
     }
 
     fn hasEmptyCatchBody(tree: *const std.zig.Ast, catch_node_idx: u32) bool {
-        // For catch nodes, the AST data.rhs contains the catch body node.
-        // We check if this body is an empty block (no statements).
-        const data = tree.nodes.items(.data);
-        const tags = tree.nodes.items(.tag);
+        // For catch nodes, we need to find the RHS which is the catch body.
+        // The catch node's main_token points to "catch", and we scan forward
+        // to find the block. An empty block has only { and } tokens.
+        const main_tokens = tree.nodes.items(.main_token);
+        const token_tags = tree.tokens.items(.tag);
 
-        // Get the RHS (catch body) node index
-        const catch_body_idx = data[catch_node_idx].rhs;
+        // Get the catch token index
+        const catch_token = main_tokens[catch_node_idx];
 
-        // Check if the body is a block node
-        const body_tag = tags[catch_body_idx];
-        if (body_tag == .block_two or body_tag == .block_two_semicolon) {
-            // block_two has lhs and rhs as statement indices (0 means no statement)
-            const body_data = data[catch_body_idx];
-            return body_data.lhs == 0 and body_data.rhs == 0;
+        // Scan forward from catch token to find the block
+        var token_idx = catch_token + 1;
+        const num_tokens = token_tags.len;
+
+        // Skip whitespace, comments, and potential |err| capture
+        while (token_idx < num_tokens) {
+            const tok_tag = token_tags[token_idx];
+
+            if (tok_tag == .l_brace) {
+                // Found the opening brace of the catch block
+                // Check if the next token is the closing brace
+                const next_token_idx = token_idx + 1;
+                if (next_token_idx < num_tokens and token_tags[next_token_idx] == .r_brace) {
+                    // Empty block - { immediately followed by }
+                    return true;
+                }
+                // Any other token means the block has content
+                return false;
+            }
+
+            // Skip pipe for |err| capture
+            if (tok_tag == .pipe) {
+                token_idx += 1;
+                // Skip identifier if present
+                if (token_idx < num_tokens and token_tags[token_idx] == .identifier) {
+                    token_idx += 1;
+                }
+                // Skip closing pipe
+                if (token_idx < num_tokens and token_tags[token_idx] == .pipe) {
+                    token_idx += 1;
+                }
+                continue;
+            }
+
+            // Skip identifiers (capture variable)
+            if (tok_tag == .identifier) {
+                token_idx += 1;
+                continue;
+            }
+
+            // Any other significant token before finding brace
+            token_idx += 1;
         }
 
-        if (body_tag == .block or body_tag == .block_semicolon) {
-            // block uses extra data for statements; check if empty
-            const body_data = data[catch_body_idx];
-            const extra = tree.extraData(body_data.lhs, std.zig.Ast.Node.SubRange);
-            return extra.start == extra.end;
-        }
-
-        // If the body is not a block (e.g., a single expression), it's not empty
         return false;
     }
 };
