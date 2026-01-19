@@ -207,6 +207,43 @@ The rule:
 2. For each catch node, examines the following tokens to determine if the block is empty
 3. Uses token positions to compute accurate source ranges for diagnostics
 
+### Example: dupe-import Rule
+
+The `dupe-import` rule demonstrates token-based analysis for detecting duplicate imports:
+
+```zig
+fn check(src: *Source, allocator: std.mem.Allocator, diagnostics: *std.ArrayList(Diagnostic)) RuleError!void {
+    const tree = try src.ast();
+    const token_tags = tree.tokens.items(.tag);
+    const token_starts = tree.tokens.items(.start);
+
+    var seen_imports = std.StringHashMap(ImportInfo).init(allocator);
+    defer seen_imports.deinit();
+
+    var i: usize = 0;
+    while (i < token_tags.len) : (i += 1) {
+        if (token_tags[i] == .builtin) {
+            // Check if this is @import followed by ("...")
+            if (isImportPattern(token_tags, i)) {
+                const import_path = getStringLiteralContent(...);
+                if (seen_imports.get(import_path)) |first_import| {
+                    // Report duplicate
+                    try diagnostics.append(allocator, Diagnostic.init(...));
+                } else {
+                    try seen_imports.put(import_path, ...);
+                }
+            }
+        }
+    }
+}
+```
+
+The rule:
+1. Scans tokens looking for builtin identifiers (`@import`)
+2. Checks for the pattern `@import("...")` by examining following tokens
+3. Tracks seen import paths in a hash map
+4. Reports duplicates with reference to the first occurrence
+
 ## Future Enhancements
 
 The current implementation provides a foundation for more sophisticated analysis:

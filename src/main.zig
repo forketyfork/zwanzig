@@ -2,6 +2,7 @@ const std = @import("std");
 const Analyzer = @import("analyzer.zig").Analyzer;
 const Rule = @import("rule.zig").Rule;
 const EmptyCatchRule = @import("rules/empty_catch.zig").EmptyCatchRule;
+const DupeImportRule = @import("rules/dupe_import.zig").DupeImportRule;
 const RuleFilter = @import("rule_filter.zig").RuleFilter;
 const file_discovery = @import("file_discovery.zig");
 
@@ -131,6 +132,7 @@ pub fn main() !void {
     defer analyzer.deinit();
 
     try analyzer.registerRule(&EmptyCatchRule.rule);
+    try analyzer.registerRule(&DupeImportRule.rule);
 
     analyzer.setRuleFilter(cli_args.rule_filter);
 

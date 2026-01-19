@@ -27,6 +27,22 @@ const file = std.fs.cwd().openFile("test.txt", .{}) catch |err| {
 };
 ```
 
+### dupe-import
+
+Detects duplicate `@import` statements in Zig code. Duplicate imports can indicate copy-paste errors or redundant code. The rule scans tokens to find `@import("...")` patterns and reports when the same module is imported multiple times.
+
+**Bad:**
+```zig
+const std = @import("std");
+const mem = @import("std");  // Duplicate import of "std"
+```
+
+**Good:**
+```zig
+const std = @import("std");
+const mem = std.mem;  // Use the already imported std
+```
+
 ## Building
 
 ```bash
