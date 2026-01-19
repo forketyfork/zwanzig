@@ -31,13 +31,7 @@ pub fn discoverFiles(allocator: std.mem.Allocator, paths: []const []const u8) Fi
             const stat = std.fs.cwd().statFile(path) catch |err| switch (err) {
                 error.FileNotFound => return FileDiscoveryError.FileNotFound,
                 error.AccessDenied => return FileDiscoveryError.AccessDenied,
-                error.NotDir => {
-                    if (isZigFile(path)) {
-                        const owned = try allocator.dupe(u8, path);
-                        try files.append(allocator, owned);
-                    }
-                    continue;
-                },
+                error.NotDir => return FileDiscoveryError.NotDir,
                 else => return FileDiscoveryError.AccessDenied,
             };
 
@@ -54,7 +48,24 @@ pub fn discoverFiles(allocator: std.mem.Allocator, paths: []const []const u8) Fi
 }
 
 fn walkDirectory(allocator: std.mem.Allocator, files: *std.ArrayList([]const u8), base_path: []const u8) FileDiscoveryError!void {
-    var dir = std.fs.cwd().openDir(base_path, .{ .iterate = true }) catch |err| switch (err) {
+    try walkDirectoryRecursive(allocator, files, base_path, null);
+}
+
+fn walkDirectoryRecursive(
+    allocator: std.mem.Allocator,
+    files: *std.ArrayList([]const u8),
+    base_path: []const u8,
+    relative_path: ?[]const u8,
+) FileDiscoveryError!void {
+    const open_path = if (relative_path) |rel|
+        std.fmt.allocPrint(allocator, "{s}/{s}", .{ base_path, rel }) catch return FileDiscoveryError.OutOfMemory
+    else
+        null;
+    defer if (open_path) |p| allocator.free(p);
+
+    const dir_to_open = open_path orelse base_path;
+
+    var dir = std.fs.cwd().openDir(dir_to_open, .{ .iterate = true }) catch |err| switch (err) {
         error.AccessDenied => return FileDiscoveryError.AccessDenied,
         error.FileNotFound => return FileDiscoveryError.FileNotFound,
         error.NotDir => return FileDiscoveryError.NotDir,
@@ -62,22 +73,43 @@ fn walkDirectory(allocator: std.mem.Allocator, files: *std.ArrayList([]const u8)
     };
     defer dir.close();
 
-    var walker = dir.walk(allocator) catch return FileDiscoveryError.OutOfMemory;
-    defer walker.deinit();
-
+    var iter = dir.iterate();
     while (true) {
-        const entry = walker.next() catch return FileDiscoveryError.AccessDenied;
+        const entry = iter.next() catch return FileDiscoveryError.AccessDenied;
         if (entry) |e| {
-            if (shouldIgnore(e.path)) {
-                continue;
-            }
+            if (e.kind == .directory) {
+                if (shouldIgnoreDir(e.name)) {
+                    continue;
+                }
+                const new_relative = if (relative_path) |rel|
+                    std.fmt.allocPrint(allocator, "{s}/{s}", .{ rel, e.name }) catch return FileDiscoveryError.OutOfMemory
+                else
+                    allocator.dupe(u8, e.name) catch return FileDiscoveryError.OutOfMemory;
+                defer allocator.free(new_relative);
 
-            if (e.kind == .file and isZigFile(e.basename)) {
-                const full_path = buildPath(allocator, base_path, e.path) catch return FileDiscoveryError.OutOfMemory;
-                files.append(allocator, full_path) catch {
+                try walkDirectoryRecursive(allocator, files, base_path, new_relative);
+            } else if (e.kind == .file and isZigFile(e.name)) {
+                const full_path = if (relative_path) |rel|
+                    std.fmt.allocPrint(allocator, "{s}/{s}/{s}", .{ base_path, rel, e.name }) catch return FileDiscoveryError.OutOfMemory
+                else
+                    std.fmt.allocPrint(allocator, "{s}/{s}", .{ base_path, e.name }) catch return FileDiscoveryError.OutOfMemory;
+
+                if (std.mem.eql(u8, base_path, ".")) {
                     allocator.free(full_path);
-                    return FileDiscoveryError.OutOfMemory;
-                };
+                    const simple_path = if (relative_path) |rel|
+                        std.fmt.allocPrint(allocator, "{s}/{s}", .{ rel, e.name }) catch return FileDiscoveryError.OutOfMemory
+                    else
+                        allocator.dupe(u8, e.name) catch return FileDiscoveryError.OutOfMemory;
+                    files.append(allocator, simple_path) catch {
+                        allocator.free(simple_path);
+                        return FileDiscoveryError.OutOfMemory;
+                    };
+                } else {
+                    files.append(allocator, full_path) catch {
+                        allocator.free(full_path);
+                        return FileDiscoveryError.OutOfMemory;
+                    };
+                }
             }
         } else {
             break;
@@ -85,42 +117,17 @@ fn walkDirectory(allocator: std.mem.Allocator, files: *std.ArrayList([]const u8)
     }
 }
 
-fn buildPath(allocator: std.mem.Allocator, base: []const u8, relative: []const u8) ![]const u8 {
-    if (std.mem.eql(u8, base, ".")) {
-        return allocator.dupe(u8, relative);
+fn shouldIgnoreDir(name: []const u8) bool {
+    for (ignored_dirs) |ignored| {
+        if (std.mem.eql(u8, name, ignored)) {
+            return true;
+        }
     }
-    return std.fmt.allocPrint(allocator, "{s}/{s}", .{ base, relative });
+    return false;
 }
 
 fn isZigFile(name: []const u8) bool {
     return std.mem.endsWith(u8, name, ".zig");
-}
-
-fn shouldIgnore(path: []const u8) bool {
-    for (ignored_dirs) |ignored| {
-        if (pathContainsComponent(path, ignored)) {
-            return true;
-        }
-    }
-    return false;
-}
-
-fn pathContainsComponent(path: []const u8, component: []const u8) bool {
-    var it = std.mem.splitScalar(u8, path, '/');
-    while (it.next()) |part| {
-        if (std.mem.eql(u8, part, component)) {
-            return true;
-        }
-    }
-
-    var it_backslash = std.mem.splitScalar(u8, path, '\\');
-    while (it_backslash.next()) |part| {
-        if (std.mem.eql(u8, part, component)) {
-            return true;
-        }
-    }
-
-    return false;
 }
 
 pub fn freeDiscoveredFiles(allocator: std.mem.Allocator, files: []const []const u8) void {
@@ -138,21 +145,14 @@ test "isZigFile" {
     try std.testing.expect(!isZigFile(""));
 }
 
-test "shouldIgnore" {
-    try std.testing.expect(shouldIgnore("zig-cache/file.zig"));
-    try std.testing.expect(shouldIgnore("zig-out/bin/main.zig"));
-    try std.testing.expect(shouldIgnore(".zigmod/deps/file.zig"));
-    try std.testing.expect(shouldIgnore(".gyro/cache/file.zig"));
-    try std.testing.expect(shouldIgnore("src/zig-cache/file.zig"));
-    try std.testing.expect(!shouldIgnore("src/main.zig"));
-    try std.testing.expect(!shouldIgnore("zig-cache-not/file.zig"));
-}
-
-test "pathContainsComponent" {
-    try std.testing.expect(pathContainsComponent("zig-cache/file.zig", "zig-cache"));
-    try std.testing.expect(pathContainsComponent("src/zig-cache/file.zig", "zig-cache"));
-    try std.testing.expect(!pathContainsComponent("zig-cache-extra/file.zig", "zig-cache"));
-    try std.testing.expect(!pathContainsComponent("notzig-cache/file.zig", "zig-cache"));
+test "shouldIgnoreDir" {
+    try std.testing.expect(shouldIgnoreDir("zig-cache"));
+    try std.testing.expect(shouldIgnoreDir("zig-out"));
+    try std.testing.expect(shouldIgnoreDir(".zigmod"));
+    try std.testing.expect(shouldIgnoreDir(".gyro"));
+    try std.testing.expect(!shouldIgnoreDir("src"));
+    try std.testing.expect(!shouldIgnoreDir("zig-cache-extra"));
+    try std.testing.expect(!shouldIgnoreDir("notzig-cache"));
 }
 
 test "discoverFiles: explicit files" {
