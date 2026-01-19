@@ -38,55 +38,51 @@ pub const DupeImportRule = struct {
         while (i < token_tags.len) : (i += 1) {
             if (token_tags[i] == .builtin) {
                 const start = token_starts[i];
-                const builtin_name = getTokenSlice(content, start, token_tags, token_starts, i);
+                const builtin_name = tree.tokenSlice(@intCast(i));
 
                 if (std.mem.eql(u8, builtin_name, "@import")) {
-                    if (i + 2 < token_tags.len and
-                        token_tags[i + 1] == .l_paren and
-                        token_tags[i + 2] == .string_literal)
-                    {
-                        const string_start = token_starts[i + 2];
-                        const import_path = getStringLiteralContent(content, string_start);
+                    const l_paren_idx = nextNonCommentToken(token_tags, i + 1) orelse continue;
+                    if (token_tags[l_paren_idx] != .l_paren) continue;
 
-                        if (seen_imports.get(import_path)) |_| {
-                            const range = try src.byteRangeToSourceRange(start, start + builtin_name.len);
+                    const string_idx = nextNonCommentToken(token_tags, l_paren_idx + 1) orelse continue;
+                    if (token_tags[string_idx] != .string_literal) continue;
 
-                            try diagnostics.append(allocator, Diagnostic.init(
-                                src.getFilePath(),
-                                "dupe-import",
-                                .warning,
-                                "Duplicate import detected. This module has already been imported earlier in the file.",
-                                range,
-                            ));
-                        } else {
-                            try seen_imports.put(import_path, .{
-                                .byte_offset = start,
-                                .import_path = import_path,
-                            });
-                        }
+                    const string_start = token_starts[string_idx];
+                    const import_path = getStringLiteralContent(content, string_start);
 
-                        i += 2;
+                    if (seen_imports.get(import_path)) |_| {
+                        const range = try src.byteRangeToSourceRange(start, start + builtin_name.len);
+
+                        try diagnostics.append(allocator, Diagnostic.init(
+                            src.getFilePath(),
+                            "dupe-import",
+                            .warning,
+                            "Duplicate import detected. This module has already been imported earlier in the file.",
+                            range,
+                        ));
+                    } else {
+                        try seen_imports.put(import_path, .{
+                            .byte_offset = start,
+                            .import_path = import_path,
+                        });
                     }
+
+                    i = string_idx;
                 }
             }
         }
     }
 
-    fn getTokenSlice(content: []const u8, start: usize, token_tags: []const std.zig.Token.Tag, token_starts: []const u32, token_idx: usize) []const u8 {
-        const end = if (token_idx + 1 < token_starts.len)
-            token_starts[token_idx + 1]
-        else
-            content.len;
-
-        var actual_end = start;
-        while (actual_end < end and actual_end < content.len) {
-            const c = content[actual_end];
-            if (c == ' ' or c == '\n' or c == '\t' or c == '\r' or c == '(') break;
-            actual_end += 1;
+    fn nextNonCommentToken(token_tags: []const std.zig.Token.Tag, start: usize) ?usize {
+        var idx = start;
+        while (idx < token_tags.len) {
+            const tag = token_tags[idx];
+            if (tag != .container_doc_comment and tag != .doc_comment) {
+                return idx;
+            }
+            idx += 1;
         }
-
-        _ = token_tags;
-        return content[start..actual_end];
+        return null;
     }
 
     fn getStringLiteralContent(content: []const u8, start: usize) []const u8 {
@@ -269,6 +265,27 @@ test "duplicate import detection - import in function" {
         \\fn foo() void {
         \\    const std2 = @import("std");
         \\}
+    ;
+    var source = Source.init(allocator, "test.zig", code);
+    defer source.deinit();
+    try DupeImportRule.rule.check(&source, allocator, &diagnostics);
+
+    try testing.expectEqual(@as(usize, 1), diagnostics.items.len);
+}
+
+test "duplicate import detection - with doc comments between tokens" {
+    const testing = std.testing;
+    const allocator = testing.allocator;
+
+    var diagnostics: std.ArrayList(Diagnostic) = .empty;
+    defer diagnostics.deinit(allocator);
+
+    const code: [:0]const u8 =
+        \\const std = @import("std");
+        \\/// doc comment
+        \\const std2 = @import
+        \\    /// another doc comment
+        \\    ("std");
     ;
     var source = Source.init(allocator, "test.zig", code);
     defer source.deinit();
