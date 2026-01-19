@@ -5,3 +5,5 @@ zig-cache/
 *.swo
 *~
 .DS_Store
+.stepcat/
+.architect/

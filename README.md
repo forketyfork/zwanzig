@@ -62,12 +62,24 @@ See the `examples/` directory for sample code demonstrating both violations and 
 
 ## Architecture
 
-The analyzer is built with extensibility in mind:
+The analyzer is built with extensibility and performance in mind:
 
+- **`source.zig`**: Source parsing cache that provides lazy, cached access to AST and tokens
 - **`analyzer.zig`**: Core analysis engine that coordinates file reading and rule execution
 - **`rule.zig`**: Base rule interface that all checks implement
 - **`rules/`**: Directory containing individual rule implementations
 - **`main.zig`**: CLI interface and rule registration
+
+### Parsing Cache
+
+Zwanzig uses a smart caching strategy to avoid redundant parsing. When analyzing a file:
+
+1. The analyzer creates a `Source` object that holds the file content
+2. Rules access parsed representations (AST, tokens) through the `Source` interface
+3. Parsing happens lazily on first access and results are cached
+4. Subsequent accesses by other rules reuse the cached parse results
+
+This ensures efficient analysis even with many rules, as each file is parsed at most once.
 
 ## Adding New Rules
 
@@ -80,17 +92,31 @@ To add a new rule:
 Example:
 
 ```zig
+const Source = @import("../source.zig").Source;
+
 pub const MyRule = struct {
     pub const rule: Rule = Rule{
         .name = "my-rule",
         .checkFn = check,
     };
 
-    fn check(source: []const u8, file_path: []const u8, violations: *std.ArrayList(Violation)) !void {
+    fn check(
+        src: *Source,
+        allocator: std.mem.Allocator,
+        violations: *std.ArrayList(Violation),
+    ) RuleError!void {
+        // Access parsed AST for sophisticated analysis
+        const ast = try src.ast();
+
+        // Or access raw source for simple text-based checks
+        const source = src.getContent();
+
         // Your analysis logic here
     }
 };
 ```
+
+For detailed implementation guidance, see [IMPLEMENTATION.md](docs/IMPLEMENTATION.md).
 
 ## License
 

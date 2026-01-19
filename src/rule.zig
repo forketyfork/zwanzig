@@ -1,4 +1,5 @@
 const std = @import("std");
+const Source = @import("source.zig").Source;
 
 /// Represents a single violation found by a rule
 pub const Violation = struct {
@@ -19,25 +20,27 @@ pub const Violation = struct {
     }
 };
 
-pub const RuleError = error{OutOfMemory};
+pub const RuleError = error{
+    OutOfMemory,
+    Overflow,
+    InvalidCharacter,
+};
 
 /// Base interface that all rules must implement
 pub const Rule = struct {
     name: []const u8,
     checkFn: *const fn (
-        source: []const u8,
-        file_path: []const u8,
+        source: *Source,
         allocator: std.mem.Allocator,
         violations: *std.ArrayList(Violation),
     ) RuleError!void,
 
     pub fn check(
         self: *const Rule,
-        source: []const u8,
-        file_path: []const u8,
+        source: *Source,
         allocator: std.mem.Allocator,
         violations: *std.ArrayList(Violation),
     ) RuleError!void {
-        try self.checkFn(source, file_path, allocator, violations);
+        try self.checkFn(source, allocator, violations);
     }
 };

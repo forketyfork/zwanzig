@@ -1,6 +1,7 @@
 const std = @import("std");
 const Rule = @import("rule.zig").Rule;
 const Violation = @import("rule.zig").Violation;
+const Source = @import("source.zig").Source;
 
 pub const Analyzer = struct {
     allocator: std.mem.Allocator,
@@ -25,17 +26,18 @@ pub const Analyzer = struct {
     }
 
     pub fn analyzeFile(self: *Analyzer, file_path: []const u8) !void {
-        // Read the file
         const file = try std.fs.cwd().openFile(file_path, .{});
         defer file.close();
 
-        const max_size = 10 * 1024 * 1024; // 10MB max file size
-        const source = try file.readToEndAlloc(self.allocator, max_size);
-        defer self.allocator.free(source);
+        const max_size = 10 * 1024 * 1024;
+        const content = try file.readToEndAllocOptions(self.allocator, max_size, null, @alignOf(u8), 0);
+        defer self.allocator.free(content);
 
-        // Run all registered rules
+        var source = Source.init(self.allocator, file_path, content);
+        defer source.deinit();
+
         for (self.rules.items) |rule| {
-            try rule.check(source, file_path, self.allocator, &self.violations);
+            try rule.check(&source, self.allocator, &self.violations);
         }
     }
 
