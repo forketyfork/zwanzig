@@ -49,7 +49,7 @@ pub const Analyzer = struct {
 
         try stdout.print("Found {d} violation(s):\n", .{self.violations.items.len});
         for (self.violations.items) |violation| {
-            try stdout.print("{}\n", .{violation});
+            try stdout.print("{}", .{violation});
         }
     }
 

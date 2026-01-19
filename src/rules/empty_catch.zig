@@ -52,7 +52,6 @@ pub const EmptyCatchRule = struct {
 
                     // Now we should be at the opening brace
                     if (j < source.len and source[j] == '{') {
-                        const open_brace_pos = j;
                         j += 1;
 
                         // Check if the block is empty (only whitespace between { and })
