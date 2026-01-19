@@ -37,17 +37,21 @@ pub const EmptyCatchRule = struct {
                     var j = i + 5;
 
                     // Skip whitespace and potential |err| capture
-                    while (j < source.len and (source[j] == ' ' or source[j] == '\t' or source[j] == '\n')) : (j += 1) {}
+                    while (j < source.len and (source[j] == ' ' or source[j] == '\t' or source[j] == '\n' or source[j] == '\r')) : (j += 1) {}
 
                     // Check for optional error capture |err|
                     if (j < source.len and source[j] == '|') {
                         j += 1;
-                        // Skip until we find the closing |
+                        // Skip until we find the closing | (with bounds check)
                         while (j < source.len and source[j] != '|') : (j += 1) {}
-                        if (j < source.len) j += 1; // Skip the closing |
+                        if (j >= source.len) {
+                            // Malformed: no closing | found, skip this catch
+                            continue;
+                        }
+                        j += 1; // Skip the closing |
 
                         // Skip more whitespace
-                        while (j < source.len and (source[j] == ' ' or source[j] == '\t' or source[j] == '\n')) : (j += 1) {}
+                        while (j < source.len and (source[j] == ' ' or source[j] == '\t' or source[j] == '\n' or source[j] == '\r')) : (j += 1) {}
                     }
 
                     // Now we should be at the opening brace
@@ -56,9 +60,11 @@ pub const EmptyCatchRule = struct {
 
                         // Check if the block is empty (only whitespace between { and })
                         var is_empty = true;
+                        var found_closing_brace = false;
                         while (j < source.len) : (j += 1) {
                             if (source[j] == '}') {
                                 // Found closing brace
+                                found_closing_brace = true;
                                 if (is_empty) {
                                     // Report violation
                                     try violations.append(Violation{
@@ -76,8 +82,11 @@ pub const EmptyCatchRule = struct {
                             }
                         }
 
-                        // Move main loop past the catch block we just analyzed
-                        i = j;
+                        // If we found a closing brace, move main loop past it
+                        // If not (malformed code), j is already at end of source, which is safe
+                        if (found_closing_brace) {
+                            i = j;
+                        }
                     }
                 }
             }
@@ -138,4 +147,22 @@ test "empty catch block detection" {
     ;
     try EmptyCatchRule.rule.check(code4, "test.zig", &violations);
     try testing.expectEqual(@as(usize, 2), violations.items.len);
+
+    violations.clearRetainingCapacity();
+
+    // Test case 5: Malformed code - missing closing brace (should not crash)
+    const code5 =
+        \\const x = try_func() catch {
+    ;
+    try EmptyCatchRule.rule.check(code5, "test.zig", &violations);
+    // Should handle gracefully without reporting violation
+
+    violations.clearRetainingCapacity();
+
+    // Test case 6: Malformed code - missing closing pipe (should not crash)
+    const code6 =
+        \\const x = try_func() catch |err
+    ;
+    try EmptyCatchRule.rule.check(code6, "test.zig", &violations);
+    // Should handle gracefully without crashing
 }

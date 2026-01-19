@@ -51,7 +51,7 @@ else
 fi
 
 # Check if empty_catch rule implements check function
-if grep -q "fn check(source: \[\]const u8" src/rules/empty_catch.zig; then
+if grep -q 'fn check(source: \[\]const u8' src/rules/empty_catch.zig; then
     echo "✓ empty_catch.zig implements check function"
 else
     echo "✗ empty_catch.zig missing check function"
