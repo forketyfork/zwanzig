@@ -3,22 +3,22 @@ const Analyzer = @import("analyzer.zig").Analyzer;
 const Rule = @import("rule.zig").Rule;
 const EmptyCatchRule = @import("rules/empty_catch.zig").EmptyCatchRule;
 const RuleFilter = @import("rule_filter.zig").RuleFilter;
+const file_discovery = @import("file_discovery.zig");
 
 pub const CliArgs = struct {
-    files: []const []const u8,
+    paths: []const []const u8,
     rule_filter: RuleFilter,
 };
 
 pub const CliError = error{
     MutuallyExclusiveFlags,
     MissingFlagValue,
-    NoFilesProvided,
     OutOfMemory,
 };
 
 pub fn parseArgs(allocator: std.mem.Allocator, args: []const []const u8) CliError!CliArgs {
-    var files: std.ArrayList([]const u8) = .empty;
-    errdefer files.deinit(allocator);
+    var paths: std.ArrayList([]const u8) = .empty;
+    errdefer paths.deinit(allocator);
 
     var do_rules: std.ArrayList([]const u8) = .empty;
     errdefer do_rules.deinit(allocator);
@@ -42,10 +42,16 @@ pub fn parseArgs(allocator: std.mem.Allocator, args: []const []const u8) CliErro
             }
             i += 1;
             try skip_rules.append(allocator, args[i]);
+        } else if (std.mem.eql(u8, arg, "--file")) {
+            if (i + 1 >= args.len or std.mem.startsWith(u8, args[i + 1], "--")) {
+                return CliError.MissingFlagValue;
+            }
+            i += 1;
+            try paths.append(allocator, args[i]);
         } else if (std.mem.startsWith(u8, arg, "--")) {
             continue;
         } else {
-            try files.append(allocator, arg);
+            try paths.append(allocator, arg);
         }
     }
 
@@ -61,7 +67,7 @@ pub fn parseArgs(allocator: std.mem.Allocator, args: []const []const u8) CliErro
         .none;
 
     return CliArgs{
-        .files = try files.toOwnedSlice(allocator),
+        .paths = try paths.toOwnedSlice(allocator),
         .rule_filter = rule_filter,
     };
 }
@@ -83,9 +89,6 @@ pub fn main() !void {
             CliError.MissingFlagValue => {
                 try stderr.writeAll("Error: Flag requires a value\n");
             },
-            CliError.NoFilesProvided => {
-                try stderr.writeAll("Error: No files provided\n");
-            },
             CliError.OutOfMemory => {
                 try stderr.writeAll("Error: Out of memory\n");
             },
@@ -93,7 +96,7 @@ pub fn main() !void {
         std.process.exit(1);
     };
     defer {
-        allocator.free(cli_args.files);
+        allocator.free(cli_args.paths);
         switch (cli_args.rule_filter) {
             .allowlist => |list| allocator.free(list),
             .blocklist => |list| allocator.free(list),
@@ -101,8 +104,26 @@ pub fn main() !void {
         }
     }
 
-    if (cli_args.files.len == 0) {
-        try printUsage();
+    const files = file_discovery.discoverFiles(allocator, cli_args.paths) catch |err| {
+        const stderr = std.fs.File.stderr().deprecatedWriter();
+        switch (err) {
+            file_discovery.FileDiscoveryError.FileNotFound => {
+                try stderr.writeAll("Error: File or directory not found\n");
+            },
+            file_discovery.FileDiscoveryError.AccessDenied => {
+                try stderr.writeAll("Error: Access denied\n");
+            },
+            else => {
+                try stderr.writeAll("Error: Failed to discover files\n");
+            },
+        }
+        std.process.exit(1);
+    };
+    defer file_discovery.freeDiscoveredFiles(allocator, files);
+
+    if (files.len == 0) {
+        const stderr = std.fs.File.stderr().deprecatedWriter();
+        try stderr.writeAll("No .zig files found.\n");
         return;
     }
 
@@ -113,7 +134,7 @@ pub fn main() !void {
 
     analyzer.setRuleFilter(cli_args.rule_filter);
 
-    for (cli_args.files) |file_path| {
+    for (files) |file_path| {
         try analyzer.analyzeFile(file_path);
     }
 
@@ -126,18 +147,21 @@ pub fn main() !void {
 
 fn printUsage() !void {
     const stderr = std.fs.File.stderr().deprecatedWriter();
-    try stderr.writeAll("Usage: zwanzig [options] <file.zig> [file.zig...]\n");
+    try stderr.writeAll("Usage: zwanzig [options] [path...]\n");
     try stderr.writeAll("\nA static analyzer for Zig code.\n");
     try stderr.writeAll("\nOptions:\n");
+    try stderr.writeAll("  --file <path>  Specify a file or directory to analyze (can be repeated)\n");
     try stderr.writeAll("  --do <rule>    Only run the specified rule (can be repeated)\n");
     try stderr.writeAll("  --skip <rule>  Skip the specified rule (can be repeated)\n");
     try stderr.writeAll("\n  Note: --do and --skip are mutually exclusive.\n");
     try stderr.writeAll("\nArguments:\n");
-    try stderr.writeAll("  <file.zig>     Zig source file(s) to analyze\n");
+    try stderr.writeAll("  [path...]      Files or directories to analyze (default: current directory)\n");
+    try stderr.writeAll("\nIgnored directories:\n");
+    try stderr.writeAll("  zig-cache/, zig-out/, .zigmod/, .gyro/\n");
 }
 
 fn freeCliArgs(allocator: std.mem.Allocator, cli_args: CliArgs) void {
-    allocator.free(cli_args.files);
+    allocator.free(cli_args.paths);
     switch (cli_args.rule_filter) {
         .allowlist => |list| allocator.free(list),
         .blocklist => |list| allocator.free(list),
@@ -145,15 +169,15 @@ fn freeCliArgs(allocator: std.mem.Allocator, cli_args: CliArgs) void {
     }
 }
 
-test "parseArgs: files only" {
+test "parseArgs: paths only" {
     const allocator = std.testing.allocator;
     const args = [_][]const u8{ "zwanzig", "file1.zig", "file2.zig" };
     const result = try parseArgs(allocator, &args);
     defer freeCliArgs(allocator, result);
 
-    try std.testing.expectEqual(@as(usize, 2), result.files.len);
-    try std.testing.expectEqualStrings("file1.zig", result.files[0]);
-    try std.testing.expectEqualStrings("file2.zig", result.files[1]);
+    try std.testing.expectEqual(@as(usize, 2), result.paths.len);
+    try std.testing.expectEqualStrings("file1.zig", result.paths[0]);
+    try std.testing.expectEqualStrings("file2.zig", result.paths[1]);
     try std.testing.expectEqual(RuleFilter.none, result.rule_filter);
 }
 
@@ -163,8 +187,8 @@ test "parseArgs: --do flag" {
     const result = try parseArgs(allocator, &args);
     defer freeCliArgs(allocator, result);
 
-    try std.testing.expectEqual(@as(usize, 1), result.files.len);
-    try std.testing.expectEqualStrings("file.zig", result.files[0]);
+    try std.testing.expectEqual(@as(usize, 1), result.paths.len);
+    try std.testing.expectEqualStrings("file.zig", result.paths[0]);
 
     switch (result.rule_filter) {
         .allowlist => |list| {
@@ -197,7 +221,7 @@ test "parseArgs: --skip flag" {
     const result = try parseArgs(allocator, &args);
     defer freeCliArgs(allocator, result);
 
-    try std.testing.expectEqual(@as(usize, 1), result.files.len);
+    try std.testing.expectEqual(@as(usize, 1), result.paths.len);
 
     switch (result.rule_filter) {
         .blocklist => |list| {
@@ -264,15 +288,54 @@ test "parseArgs: --skip with flag as value" {
     try std.testing.expectError(CliError.MissingFlagValue, result);
 }
 
-test "parseArgs: files before and after flags" {
+test "parseArgs: paths before and after flags" {
     const allocator = std.testing.allocator;
     const args = [_][]const u8{ "zwanzig", "file1.zig", "--do", "empty-catch", "file2.zig" };
     const result = try parseArgs(allocator, &args);
     defer freeCliArgs(allocator, result);
 
-    try std.testing.expectEqual(@as(usize, 2), result.files.len);
-    try std.testing.expectEqualStrings("file1.zig", result.files[0]);
-    try std.testing.expectEqualStrings("file2.zig", result.files[1]);
+    try std.testing.expectEqual(@as(usize, 2), result.paths.len);
+    try std.testing.expectEqualStrings("file1.zig", result.paths[0]);
+    try std.testing.expectEqualStrings("file2.zig", result.paths[1]);
+}
+
+test "parseArgs: --file flag" {
+    const allocator = std.testing.allocator;
+    const args = [_][]const u8{ "zwanzig", "--file", "src", "--file", "tests" };
+    const result = try parseArgs(allocator, &args);
+    defer freeCliArgs(allocator, result);
+
+    try std.testing.expectEqual(@as(usize, 2), result.paths.len);
+    try std.testing.expectEqualStrings("src", result.paths[0]);
+    try std.testing.expectEqualStrings("tests", result.paths[1]);
+}
+
+test "parseArgs: --file without value" {
+    const allocator = std.testing.allocator;
+    const args = [_][]const u8{ "zwanzig", "--file" };
+    const result = parseArgs(allocator, &args);
+
+    try std.testing.expectError(CliError.MissingFlagValue, result);
+}
+
+test "parseArgs: --file mixed with positional" {
+    const allocator = std.testing.allocator;
+    const args = [_][]const u8{ "zwanzig", "--file", "src", "file.zig" };
+    const result = try parseArgs(allocator, &args);
+    defer freeCliArgs(allocator, result);
+
+    try std.testing.expectEqual(@as(usize, 2), result.paths.len);
+    try std.testing.expectEqualStrings("src", result.paths[0]);
+    try std.testing.expectEqualStrings("file.zig", result.paths[1]);
+}
+
+test "parseArgs: empty paths" {
+    const allocator = std.testing.allocator;
+    const args = [_][]const u8{"zwanzig"};
+    const result = try parseArgs(allocator, &args);
+    defer freeCliArgs(allocator, result);
+
+    try std.testing.expectEqual(@as(usize, 0), result.paths.len);
 }
 
 test "Analyzer.isRuleEnabled: no filter" {

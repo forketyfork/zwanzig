@@ -35,18 +35,40 @@ zig build
 
 ## Usage
 
-Analyze one or more Zig files:
+Analyze the current directory (recursively discovers all `.zig` files):
 
 ```bash
-zig build run -- path/to/file.zig
-zig build run -- file1.zig file2.zig file3.zig
+zig build run
+zwanzig
 ```
 
-Or use the compiled binary directly:
+Analyze specific files or directories:
 
 ```bash
-./zig-out/bin/zwanzig path/to/file.zig
+# Single file
+zwanzig path/to/file.zig
+
+# Multiple files
+zwanzig file1.zig file2.zig file3.zig
+
+# Directory (recursively scans for .zig files)
+zwanzig src/
+
+# Mix of files and directories
+zwanzig src/ tests/ main.zig
+
+# Using --file flag (can be repeated)
+zwanzig --file src --file tests
 ```
+
+### File Discovery
+
+When no paths are specified, zwanzig walks the current directory and discovers all `.zig` files. The following directories are automatically ignored:
+
+- `zig-cache/`
+- `zig-out/`
+- `.zigmod/`
+- `.gyro/`
 
 ### Rule Selection
 
@@ -94,6 +116,7 @@ The analyzer is built with extensibility and performance in mind:
 - **`analyzer.zig`**: Core analysis engine that coordinates file reading and rule execution
 - **`rule.zig`**: Base rule interface that all checks implement
 - **`rules/`**: Directory containing individual rule implementations
+- **`file_discovery.zig`**: Recursive file discovery with ignore filters
 - **`main.zig`**: CLI interface and rule registration
 
 ### Parsing Cache
