@@ -12,7 +12,7 @@ A static analyzer and linter for Zig code.
 
 ### empty-catch
 
-Detects empty `catch {}` blocks which silently ignore errors. This is often a code smell that can hide bugs.
+Detects empty `catch {}` blocks which silently ignore errors using AST-based analysis. This is often a code smell that can hide bugs. The rule uses the Zig parser's AST to accurately identify catch expressions and determine if their bodies are empty blocks.
 
 **Bad:**
 ```zig

@@ -169,11 +169,48 @@ pub const MyRule = struct {
 };
 ```
 
+## AST-Based Rule Implementation
+
+Rules in Zwanzig use AST traversal to accurately analyze code structure. This approach provides several benefits over text-based scanning:
+
+1. **Accuracy**: AST nodes precisely represent language constructs, avoiding false positives from string matching
+2. **Context Awareness**: The AST provides structural context (e.g., distinguishing a `catch` keyword in a comment vs actual code)
+3. **Token Information**: Access to token positions enables accurate source location reporting
+
+### Example: empty-catch Rule
+
+The `empty-catch` rule demonstrates AST-based analysis:
+
+```zig
+fn check(src: *Source, allocator: std.mem.Allocator, diagnostics: *std.ArrayList(Diagnostic)) RuleError!void {
+    const tree = try src.ast();
+    const tags = tree.nodes.items(.tag);
+
+    for (tags, 0..) |tag, node_idx| {
+        if (tag == .@"catch") {
+            // Found a catch expression - check if body is empty
+            if (hasEmptyCatchBody(tree, node_idx)) {
+                // Report diagnostic with accurate source range
+                const main_token = tree.nodes.items(.main_token)[node_idx];
+                const catch_start = tree.tokens.items(.start)[main_token];
+                const range = try src.byteRangeToSourceRange(catch_start, catch_start + 5);
+
+                try diagnostics.append(allocator, Diagnostic.init(...));
+            }
+        }
+    }
+}
+```
+
+The rule:
+1. Iterates through AST nodes looking for `.@"catch"` tags
+2. For each catch node, examines the following tokens to determine if the block is empty
+3. Uses token positions to compute accurate source ranges for diagnostics
+
 ## Future Enhancements
 
 The current implementation provides a foundation for more sophisticated analysis:
 
-- **AST-Based Rules**: Migration from text-based to AST-based rule implementations
 - **Control Flow Analysis**: CFG construction for inter-procedural analysis
 - **Semantic Analysis**: Integration with typed IR for deeper checks
 - **Multiple Output Formats**: JSON, SARIF for CI/CD integration

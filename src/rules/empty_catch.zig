@@ -3,10 +3,15 @@ const Rule = @import("../rule.zig").Rule;
 const RuleError = @import("../rule.zig").RuleError;
 const Diagnostic = @import("../rule.zig").Diagnostic;
 const Severity = @import("../rule.zig").Severity;
+const SourceRange = @import("../rule.zig").SourceRange;
 const Source = @import("../source.zig").Source;
 
-/// Rule that detects empty catch blocks in Zig code
-/// Empty catch blocks silently ignore errors which is usually a bad practice
+/// Rule that detects empty catch blocks in Zig code using AST traversal.
+/// Empty catch blocks silently ignore errors which is usually a bad practice.
+///
+/// This rule uses the Zig AST to find catch expressions and checks if the
+/// catch body is an empty block (no statements). It reports a warning for
+/// each empty catch block found.
 pub const EmptyCatchRule = struct {
     pub const rule: Rule = Rule{
         .name = "empty-catch",
@@ -19,145 +24,86 @@ pub const EmptyCatchRule = struct {
         allocator: std.mem.Allocator,
         diagnostics: *std.ArrayList(Diagnostic),
     ) RuleError!void {
-        const source = src.getContent();
-        const file_path = src.getFilePath();
-        var line: usize = 1;
-        var column: usize = 1;
-        var i: usize = 0;
+        const tree = try src.ast();
+        const tags = tree.nodes.items(.tag);
+        const main_tokens = tree.nodes.items(.main_token);
+        const token_starts = tree.tokens.items(.start);
 
-        while (i < source.len) {
-            const current = source[i];
+        for (tags, 0..) |tag, node_idx| {
+            if (tag == .@"catch") {
+                const node_index: u32 = @intCast(node_idx);
+                if (hasEmptyCatchBody(tree, node_index)) {
+                    const main_token = main_tokens[node_idx];
+                    const catch_start = token_starts[main_token];
+                    const range = try src.byteRangeToSourceRange(catch_start, catch_start + 5);
 
-            // Track line and column
-            if (current == '\n') {
-                line += 1;
-                column = 1;
-                i += 1;
+                    try diagnostics.append(allocator, Diagnostic.init(
+                        src.getFilePath(),
+                        "empty-catch",
+                        .warning,
+                        "Empty catch block detected. Consider handling the error or using '_' to explicitly ignore it.",
+                        range,
+                    ));
+                }
+            }
+        }
+    }
+
+    fn hasEmptyCatchBody(tree: *const std.zig.Ast, catch_node_idx: u32) bool {
+        // For catch nodes, we need to find the RHS which is the catch body.
+        // The catch node's main_token points to "catch", and we scan forward
+        // to find the block. An empty block has only { and } tokens.
+        const main_tokens = tree.nodes.items(.main_token);
+        const token_tags = tree.tokens.items(.tag);
+
+        // Get the catch token index
+        const catch_token = main_tokens[catch_node_idx];
+
+        // Scan forward from catch token to find the block
+        var token_idx = catch_token + 1;
+        const num_tokens = token_tags.len;
+
+        // Skip whitespace, comments, and potential |err| capture
+        while (token_idx < num_tokens) {
+            const tok_tag = token_tags[token_idx];
+
+            if (tok_tag == .l_brace) {
+                // Found the opening brace of the catch block
+                // Check if the next token is the closing brace
+                const next_token_idx = token_idx + 1;
+                if (next_token_idx < num_tokens and token_tags[next_token_idx] == .r_brace) {
+                    // Empty block - { immediately followed by }
+                    return true;
+                }
+                // Any other token means the block has content
+                return false;
+            }
+
+            // Skip pipe for |err| capture
+            if (tok_tag == .pipe) {
+                token_idx += 1;
+                // Skip identifier if present
+                if (token_idx < num_tokens and token_tags[token_idx] == .identifier) {
+                    token_idx += 1;
+                }
+                // Skip closing pipe
+                if (token_idx < num_tokens and token_tags[token_idx] == .pipe) {
+                    token_idx += 1;
+                }
                 continue;
             }
 
-            // Look for "catch" keyword
-            if (i + 5 <= source.len and std.mem.eql(u8, source[i .. i + 5], "catch")) {
-                // Make sure it's a whole word (not part of another identifier)
-                const is_word_start = i == 0 or !isIdentifierChar(source[i - 1]);
-                const is_word_end = i + 5 >= source.len or !isIdentifierChar(source[i + 5]);
-
-                if (is_word_start and is_word_end) {
-                    // Found "catch" keyword, now look for the block
-                    const catch_line = line;
-                    const catch_column = column;
-                    var j = i + 5;
-
-                    // Skip whitespace and potential |err| capture
-                    while (j < source.len and isWhitespace(source[j])) : (j += 1) {}
-
-                    // Check for optional error capture |err|
-                    if (j < source.len and source[j] == '|') {
-                        j += 1;
-                        // Skip until we find the closing | (with bounds check)
-                        while (j < source.len and source[j] != '|') : (j += 1) {}
-                        if (j >= source.len) {
-                            // Malformed: no closing | found, skip this catch
-                            continue;
-                        }
-                        j += 1; // Skip the closing |
-
-                        // Skip more whitespace
-                        while (j < source.len and isWhitespace(source[j])) : (j += 1) {}
-                    }
-
-                    // Now we should be at the opening brace
-                    if (j < source.len and source[j] == '{') {
-                        // Check if the block is empty (only whitespace between { and })
-                        var is_empty = true;
-                        var found_closing_brace = false;
-                        var k = j + 1;
-                        while (k < source.len) {
-                            const ch = source[k];
-                            if (ch == '}') {
-                                // Found closing brace
-                                found_closing_brace = true;
-                                if (is_empty) {
-                                    try diagnostics.append(allocator, Diagnostic.initAtLocation(
-                                        file_path,
-                                        "empty-catch",
-                                        .warning,
-                                        "Empty catch block detected. Consider handling the error or using '_' to explicitly ignore it.",
-                                        catch_line,
-                                        catch_column,
-                                    ));
-                                }
-                                break;
-                            }
-
-                            if (isWhitespace(ch)) {
-                                k += 1;
-                                continue;
-                            }
-
-                            if (ch == '/' and k + 1 < source.len) {
-                                const next = source[k + 1];
-                                if (next == '/') {
-                                    k += 2;
-                                    while (k < source.len and source[k] != '\n') : (k += 1) {}
-                                    continue;
-                                }
-                                if (next == '*') {
-                                    k += 2;
-                                    while (k + 1 < source.len and !(source[k] == '*' and source[k + 1] == '/')) : (k += 1) {}
-                                    if (k + 1 < source.len) {
-                                        k += 2;
-                                    } else {
-                                        k = source.len;
-                                    }
-                                    continue;
-                                }
-                            }
-
-                            // Found non-whitespace content
-                            is_empty = false;
-                            k += 1;
-                        }
-
-                        // If we found a closing brace, move main loop past it
-                        // If not (malformed code), j is already at end of source, which is safe
-                        if (found_closing_brace) {
-                            const skip_to = k + 1;
-                            advancePosition(source, i, skip_to, &line, &column);
-                            i = skip_to;
-                            continue;
-                        }
-                    }
-                }
+            // Skip identifiers (capture variable)
+            if (tok_tag == .identifier) {
+                token_idx += 1;
+                continue;
             }
 
-            i += 1;
-            column += 1;
+            // Any other significant token before finding brace
+            token_idx += 1;
         }
-    }
 
-    fn advancePosition(source: []const u8, start: usize, target: usize, line: *usize, column: *usize) void {
-        var idx = start;
-        const end = @min(target, source.len);
-        while (idx < end) : (idx += 1) {
-            if (source[idx] == '\n') {
-                line.* += 1;
-                column.* = 1;
-            } else {
-                column.* += 1;
-            }
-        }
-    }
-
-    fn isIdentifierChar(c: u8) bool {
-        return (c >= 'a' and c <= 'z') or
-            (c >= 'A' and c <= 'Z') or
-            (c >= '0' and c <= '9') or
-            c == '_';
-    }
-
-    fn isWhitespace(c: u8) bool {
-        return c == ' ' or c == '\t' or c == '\n' or c == '\r';
+        return false;
     }
 };
 
