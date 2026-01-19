@@ -82,11 +82,11 @@ Diagnostics represent issues found by rules. Each diagnostic includes:
 - **File path**: The source file containing the issue
 - **Source range**: Start and end locations (line, column) for precise highlighting
 - **Rule ID**: The identifier of the rule that detected the issue
-- **Severity**: The importance level (`hint`, `warning`, or `error`)
+- **Severity**: The importance level (`hint`, `warning`, or `err`)
 - **Message**: A descriptive message explaining the issue
 
 The `Diagnostic` type (`src/diagnostic.zig`) provides:
-- `Severity` enum with `hint`, `warning`, and `error` levels
+- `Severity` enum with `hint`, `warning`, and `err` levels
 - `Location` struct for line/column positions (1-based)
 - `SourceRange` struct for start/end location pairs
 - `LocationMapper` for converting byte offsets to line/column positions

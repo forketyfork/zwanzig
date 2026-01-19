@@ -135,7 +135,7 @@ This ensures efficient analysis even with many rules, as each file is parsed at 
 
 Zwanzig uses a structured diagnostic model for reporting issues:
 
-- **Severity**: Each diagnostic has a severity level (`hint`, `warning`, or `error`)
+- **Severity**: Each diagnostic has a severity level (`hint`, `warning`, or `err`)
 - **Source Range**: Diagnostics include precise source locations with line and column information
 - **Rule ID**: Each diagnostic identifies the rule that detected the issue
 
