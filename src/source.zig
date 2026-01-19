@@ -30,7 +30,7 @@ pub const Source = struct {
         return self.file_path;
     }
 
-    pub fn tokens(self: *Source) !std.zig.Ast.TokenList {
+    pub fn tokens(self: *Source) !std.zig.Ast.TokenList.Slice {
         const ast_result = try self.ast();
         return ast_result.tokens;
     }

@@ -2,17 +2,20 @@ const std = @import("std");
 const Rule = @import("rule.zig").Rule;
 const Violation = @import("rule.zig").Violation;
 const Source = @import("source.zig").Source;
+const RuleFilter = @import("main.zig").RuleFilter;
 
 pub const Analyzer = struct {
     allocator: std.mem.Allocator,
     rules: std.ArrayList(*const Rule),
     violations: std.ArrayList(Violation),
+    rule_filter: RuleFilter,
 
     pub fn init(allocator: std.mem.Allocator) Analyzer {
         return Analyzer{
             .allocator = allocator,
             .rules = .empty,
             .violations = .empty,
+            .rule_filter = .none,
         };
     }
 
@@ -23,6 +26,32 @@ pub const Analyzer = struct {
 
     pub fn registerRule(self: *Analyzer, rule: *const Rule) !void {
         try self.rules.append(self.allocator, rule);
+    }
+
+    pub fn setRuleFilter(self: *Analyzer, filter: RuleFilter) void {
+        self.rule_filter = filter;
+    }
+
+    pub fn isRuleEnabled(self: *const Analyzer, rule_name: []const u8) bool {
+        switch (self.rule_filter) {
+            .none => return true,
+            .allowlist => |list| {
+                for (list) |allowed| {
+                    if (std.mem.eql(u8, rule_name, allowed)) {
+                        return true;
+                    }
+                }
+                return false;
+            },
+            .blocklist => |list| {
+                for (list) |blocked| {
+                    if (std.mem.eql(u8, rule_name, blocked)) {
+                        return false;
+                    }
+                }
+                return true;
+            },
+        }
     }
 
     pub fn analyzeFile(self: *Analyzer, file_path: []const u8) !void {
@@ -43,7 +72,9 @@ pub const Analyzer = struct {
         defer source.deinit();
 
         for (self.rules.items) |rule| {
-            try rule.check(&source, self.allocator, &self.violations);
+            if (self.isRuleEnabled(rule.name)) {
+                try rule.check(&source, self.allocator, &self.violations);
+            }
         }
     }
 

@@ -48,6 +48,32 @@ Or use the compiled binary directly:
 ./zig-out/bin/zwanzig path/to/file.zig
 ```
 
+### Rule Selection
+
+By default, all rules are run. You can control which rules run using the `--do` and `--skip` flags.
+
+**Run only specific rules (allowlist):**
+
+```bash
+# Run only the empty-catch rule
+zwanzig --do empty-catch file.zig
+
+# Run multiple specific rules
+zwanzig --do empty-catch --do unused-var file.zig
+```
+
+**Skip specific rules (blocklist):**
+
+```bash
+# Run all rules except empty-catch
+zwanzig --skip empty-catch file.zig
+
+# Skip multiple rules
+zwanzig --skip empty-catch --skip unused-var file.zig
+```
+
+Note: `--do` and `--skip` are mutually exclusive and cannot be used together.
+
 ## Testing
 
 Run the test suite:
