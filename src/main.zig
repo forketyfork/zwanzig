@@ -9,6 +9,11 @@ const UnusedDeclRule = @import("rules/unused_decl.zig").UnusedDeclRule;
 const RuleFilter = @import("rule_filter.zig").RuleFilter;
 const file_discovery = @import("file_discovery.zig");
 
+test {
+    _ = @import("ir.zig");
+    _ = @import("cfg.zig");
+}
+
 pub const CliArgs = struct {
     paths: []const []const u8,
     rule_filter: RuleFilter,

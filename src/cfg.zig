@@ -8,6 +8,8 @@ pub const IrTag = ir.IrTag;
 pub const SourceRange = diagnostic.SourceRange;
 pub const Location = diagnostic.Location;
 
+pub const CfgError = std.mem.Allocator.Error || error{InvalidAst};
+
 /// Edge kind for CFG edges.
 pub const EdgeKind = enum {
     /// Normal sequential control flow
@@ -161,7 +163,7 @@ pub const CfgBuilder = struct {
         cfg.exit = exit_idx;
 
         const fn_data = tree.nodes.items(.data)[fn_node];
-        const body_node = fn_data.rhs;
+        const body_node = @intFromEnum(fn_data.node_and_node[1]);
 
         if (body_node == 0) {
             try cfg.addEdge(entry_idx, exit_idx);
@@ -194,7 +196,7 @@ pub const CfgBuilder = struct {
         source: *Source,
         ast_node: u32,
         prev_node: u32,
-    ) !?u32 {
+    ) CfgError!?u32 {
         const tree = try source.ast();
         const tags = tree.nodes.items(.tag);
 
@@ -205,9 +207,9 @@ pub const CfgBuilder = struct {
         const tag = tags[ast_node];
 
         return switch (tag) {
-            .block, .block_two, .block_two_semicolon => try self.processBlock(cfg, source, ast_node, prev_node),
+            .block, .block_semicolon, .block_two, .block_two_semicolon => try self.processBlock(cfg, source, ast_node, prev_node),
             .@"return" => try self.processReturn(cfg, source, ast_node, prev_node),
-            .simple_var_decl => try self.processVarDecl(cfg, source, ast_node, prev_node),
+            .simple_var_decl, .local_var_decl, .global_var_decl, .aligned_var_decl => try self.processVarDecl(cfg, source, ast_node, prev_node),
             .assign => try self.processAssign(cfg, source, ast_node, prev_node),
             .call, .call_one, .call_one_comma, .builtin_call, .builtin_call_comma, .builtin_call_two, .builtin_call_two_comma => try self.processCall(cfg, source, ast_node, prev_node),
             else => try self.processGenericExpr(cfg, source, ast_node, prev_node),
@@ -231,33 +233,32 @@ pub const CfgBuilder = struct {
         var inline_stmts: [2]u32 = undefined;
 
         switch (tag) {
-            .block, .block_two, .block_two_semicolon => {
-                if (tag == .block) {
-                    const extra_idx = data[ast_node].lhs;
-                    const len = data[ast_node].rhs;
-                    if (len > 0) {
-                        stmts = tree.extra_data[extra_idx..][0..len];
-                    }
-                } else {
-                    var count: usize = 0;
-                    if (data[ast_node].lhs != 0) {
-                        inline_stmts[count] = data[ast_node].lhs;
-                        count += 1;
-                    }
-                    if (data[ast_node].rhs != 0) {
-                        inline_stmts[count] = data[ast_node].rhs;
-                        count += 1;
-                    }
-                    stmts = inline_stmts[0..count];
+            .block, .block_semicolon => {
+                const extra = data[ast_node].extra_range;
+                const start: usize = @intFromEnum(extra.start);
+                const end: usize = @intFromEnum(extra.end);
+                if (end > start) {
+                    stmts = tree.extra_data[start..end];
                 }
+            },
+            .block_two, .block_two_semicolon => {
+                var count: usize = 0;
+                const opt_nodes = data[ast_node].opt_node_and_opt_node;
+                if (opt_nodes[0].unwrap()) |node| {
+                    inline_stmts[count] = @intFromEnum(node);
+                    count += 1;
+                }
+                if (opt_nodes[1].unwrap()) |node| {
+                    inline_stmts[count] = @intFromEnum(node);
+                    count += 1;
+                }
+                stmts = inline_stmts[0..count];
             },
             else => return null,
         }
 
         if (stmts.len == 0) {
-            const block_node_idx = try cfg.addNode(IrNode.initWithAst(.block, ast_node));
-            try cfg.addEdge(prev_node, block_node_idx);
-            return block_node_idx;
+            return null;
         }
 
         var current_prev = prev_node;
@@ -443,7 +444,7 @@ test "CfgBuilder empty function" {
 
     try testing.expect(root_decls.len > 0);
 
-    const fn_node = root_decls[0];
+    const fn_node = @intFromEnum(root_decls[0]);
     const maybe_cfg = try builder.buildFromFn(&source, fn_node);
 
     try testing.expect(maybe_cfg != null);
@@ -479,7 +480,7 @@ test "CfgBuilder simple return" {
     const tree = try source.ast();
     const root_decls = tree.rootDecls();
 
-    const fn_node = root_decls[0];
+    const fn_node = @intFromEnum(root_decls[0]);
     const maybe_cfg = try builder.buildFromFn(&source, fn_node);
 
     try testing.expect(maybe_cfg != null);
@@ -517,7 +518,7 @@ test "CfgBuilder var decl and return" {
     const tree = try source.ast();
     const root_decls = tree.rootDecls();
 
-    const fn_node = root_decls[0];
+    const fn_node = @intFromEnum(root_decls[0]);
     const maybe_cfg = try builder.buildFromFn(&source, fn_node);
 
     try testing.expect(maybe_cfg != null);
@@ -554,7 +555,7 @@ test "CfgBuilder source range mapping" {
     const tree = try source.ast();
     const root_decls = tree.rootDecls();
 
-    const fn_node = root_decls[0];
+    const fn_node = @intFromEnum(root_decls[0]);
     const maybe_cfg = try builder.buildFromFn(&source, fn_node);
 
     try testing.expect(maybe_cfg != null);
@@ -588,7 +589,7 @@ test "CfgBuilder non-function node returns null" {
     const root_decls = tree.rootDecls();
 
     if (root_decls.len > 0) {
-        const var_node = root_decls[0];
+        const var_node = @intFromEnum(root_decls[0]);
         const maybe_cfg = try builder.buildFromFn(&source, var_node);
         try testing.expect(maybe_cfg == null);
     }
@@ -614,7 +615,7 @@ test "CfgBuilder multiple statements" {
     const tree = try source.ast();
     const root_decls = tree.rootDecls();
 
-    const fn_node = root_decls[0];
+    const fn_node = @intFromEnum(root_decls[0]);
     const maybe_cfg = try builder.buildFromFn(&source, fn_node);
 
     try testing.expect(maybe_cfg != null);
@@ -649,7 +650,7 @@ test "CfgBuilder return terminates block" {
     const tree = try source.ast();
     const root_decls = tree.rootDecls();
 
-    const fn_node = root_decls[0];
+    const fn_node = @intFromEnum(root_decls[0]);
     const maybe_cfg = try builder.buildFromFn(&source, fn_node);
 
     try testing.expect(maybe_cfg != null);
