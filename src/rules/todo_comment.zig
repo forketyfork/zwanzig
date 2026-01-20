@@ -43,7 +43,7 @@ pub const TodoCommentRule = struct {
                     i += 1;
                 }
 
-                if (i + 4 <= content.len and std.mem.eql(u8, content[i .. i + 4], "TODO")) {
+                if (i + 4 <= content.len and std.mem.eql(u8, content[i .. i + 4], "TODO") and isTodoBoundary(content, i + 4)) {
                     const todo_col = comment_start - line_start + 1;
 
                     var comment_end = i;
@@ -54,12 +54,13 @@ pub const TodoCommentRule = struct {
                     const range = try src.byteRangeToSourceRange(comment_start, comment_end);
 
                     const todo_text = extractTodoMessage(content[i..comment_end]);
+                    const message = allocator.dupe(u8, todo_text) catch return RuleError.OutOfMemory;
 
                     try diagnostics.append(allocator, Diagnostic.init(
                         src.getFilePath(),
                         "todo",
                         .hint,
-                        todo_text,
+                        message,
                         range,
                     ));
 
@@ -70,6 +71,12 @@ pub const TodoCommentRule = struct {
                 i += 1;
             }
         }
+    }
+
+    fn isTodoBoundary(content: []const u8, pos: usize) bool {
+        if (pos >= content.len) return true;
+        const c = content[pos];
+        return c == ':' or c == ' ' or c == '\t' or c == '\n' or c == '\r';
     }
 
     fn extractTodoMessage(todo_content: []const u8) []const u8 {
@@ -104,6 +111,7 @@ test "todo comment detection - single TODO" {
 
     var diagnostics: std.ArrayList(Diagnostic) = .empty;
     defer diagnostics.deinit(allocator);
+    defer for (diagnostics.items) |diag| allocator.free(@constCast(diag.message));
 
     const code: [:0]const u8 =
         \\const x = 42;
@@ -127,6 +135,7 @@ test "todo comment detection - multiple TODOs" {
 
     var diagnostics: std.ArrayList(Diagnostic) = .empty;
     defer diagnostics.deinit(allocator);
+    defer for (diagnostics.items) |diag| allocator.free(@constCast(diag.message));
 
     const code: [:0]const u8 =
         \\// TODO: first task
@@ -150,6 +159,7 @@ test "todo comment detection - no TODOs" {
 
     var diagnostics: std.ArrayList(Diagnostic) = .empty;
     defer diagnostics.deinit(allocator);
+    defer for (diagnostics.items) |diag| allocator.free(@constCast(diag.message));
 
     const code: [:0]const u8 =
         \\const x = 42;
@@ -169,6 +179,7 @@ test "todo comment detection - TODO without colon" {
 
     var diagnostics: std.ArrayList(Diagnostic) = .empty;
     defer diagnostics.deinit(allocator);
+    defer for (diagnostics.items) |diag| allocator.free(@constCast(diag.message));
 
     const code: [:0]const u8 =
         \\// TODO implement this feature
@@ -187,6 +198,7 @@ test "todo comment detection - TODO with extra whitespace" {
 
     var diagnostics: std.ArrayList(Diagnostic) = .empty;
     defer diagnostics.deinit(allocator);
+    defer for (diagnostics.items) |diag| allocator.free(@constCast(diag.message));
 
     const code: [:0]const u8 =
         \\//   TODO:   fix this bug
@@ -205,6 +217,7 @@ test "todo comment detection - empty TODO" {
 
     var diagnostics: std.ArrayList(Diagnostic) = .empty;
     defer diagnostics.deinit(allocator);
+    defer for (diagnostics.items) |diag| allocator.free(@constCast(diag.message));
 
     const code: [:0]const u8 =
         \\// TODO
@@ -223,6 +236,7 @@ test "todo comment detection - TODO only with colon" {
 
     var diagnostics: std.ArrayList(Diagnostic) = .empty;
     defer diagnostics.deinit(allocator);
+    defer for (diagnostics.items) |diag| allocator.free(@constCast(diag.message));
 
     const code: [:0]const u8 =
         \\// TODO:
@@ -241,6 +255,7 @@ test "todo comment detection - not matching similar words" {
 
     var diagnostics: std.ArrayList(Diagnostic) = .empty;
     defer diagnostics.deinit(allocator);
+    defer for (diagnostics.items) |diag| allocator.free(@constCast(diag.message));
 
     const code: [:0]const u8 =
         \\// TODOLIST: this should not match
@@ -250,8 +265,7 @@ test "todo comment detection - not matching similar words" {
     defer source.deinit();
     try TodoCommentRule.rule.check(&source, allocator, &diagnostics);
 
-    try testing.expectEqual(@as(usize, 1), diagnostics.items.len);
-    try testing.expectEqualStrings("this should not match", diagnostics.items[0].message);
+    try testing.expectEqual(@as(usize, 0), diagnostics.items.len);
 }
 
 test "todo comment detection - empty file" {
@@ -260,6 +274,7 @@ test "todo comment detection - empty file" {
 
     var diagnostics: std.ArrayList(Diagnostic) = .empty;
     defer diagnostics.deinit(allocator);
+    defer for (diagnostics.items) |diag| allocator.free(@constCast(diag.message));
 
     const code: [:0]const u8 = "";
     var source = Source.init(allocator, "test.zig", code);
@@ -275,6 +290,7 @@ test "todo comment detection - inline TODO after code" {
 
     var diagnostics: std.ArrayList(Diagnostic) = .empty;
     defer diagnostics.deinit(allocator);
+    defer for (diagnostics.items) |diag| allocator.free(@constCast(diag.message));
 
     const code: [:0]const u8 =
         \\const x = 42; // TODO: refactor this
@@ -294,6 +310,7 @@ test "todo comment detection - column accuracy" {
 
     var diagnostics: std.ArrayList(Diagnostic) = .empty;
     defer diagnostics.deinit(allocator);
+    defer for (diagnostics.items) |diag| allocator.free(@constCast(diag.message));
 
     const code: [:0]const u8 =
         \\    // TODO: indented
