@@ -58,10 +58,8 @@ pub const UnusedDeclRule = struct {
             }
         }
 
-        const source_content = src.getContent();
-
         for (decls.items) |decl| {
-            if (!isNameUsed(source_content, decl.name, token_tags, token_starts)) {
+            if (!isNameUsed(tree, decl.name, token_tags)) {
                 const range = try src.byteRangeToSourceRange(decl.byte_offset, decl.byte_offset + decl.name.len);
 
                 const message = std.fmt.allocPrint(
@@ -89,13 +87,7 @@ pub const UnusedDeclRule = struct {
     ) ?DeclInfo {
         const main_token = tree.nodes.items(.main_token)[node_idx];
 
-        var is_pub = false;
-        if (main_token > 0) {
-            const prev_token = main_token - 1;
-            if (token_tags[prev_token] == .keyword_pub) {
-                is_pub = true;
-            }
-        }
+        const is_pub = hasPubOrExportModifier(main_token, token_tags);
 
         const name_token = main_token + 1;
         if (name_token >= token_tags.len) return null;
@@ -103,8 +95,7 @@ pub const UnusedDeclRule = struct {
         if (token_tags[name_token] != .identifier) return null;
 
         const name_start = token_starts[name_token];
-        const source = tree.source;
-        const name = extractIdentifier(source, name_start);
+        const name = tree.tokenSlice(name_token);
 
         return DeclInfo{
             .name = name,
@@ -122,13 +113,7 @@ pub const UnusedDeclRule = struct {
     ) ?DeclInfo {
         const main_token = tree.nodes.items(.main_token)[node_idx];
 
-        var is_pub = false;
-        if (main_token > 0) {
-            const prev_token = main_token - 1;
-            if (token_tags[prev_token] == .keyword_pub) {
-                is_pub = true;
-            }
-        }
+        const is_pub = hasPubOrExportModifier(main_token, token_tags);
 
         const name_token = main_token + 1;
         if (name_token >= token_tags.len) return null;
@@ -136,8 +121,7 @@ pub const UnusedDeclRule = struct {
         if (token_tags[name_token] != .identifier) return null;
 
         const name_start = token_starts[name_token];
-        const source = tree.source;
-        const name = extractIdentifier(source, name_start);
+        const name = tree.tokenSlice(name_token);
 
         return DeclInfo{
             .name = name,
@@ -147,12 +131,20 @@ pub const UnusedDeclRule = struct {
         };
     }
 
-    fn extractIdentifier(source: []const u8, start: usize) []const u8 {
-        var end = start;
-        while (end < source.len and (std.ascii.isAlphanumeric(source[end]) or source[end] == '_')) {
-            end += 1;
+    fn hasPubOrExportModifier(main_token: u32, token_tags: []const std.zig.Token.Tag) bool {
+        var token = main_token;
+        while (token > 0) {
+            token -= 1;
+            const tag = token_tags[token];
+            switch (tag) {
+                .keyword_pub => return true,
+                .keyword_export => return true,
+                .keyword_extern => return true,
+                .keyword_inline, .keyword_noinline => continue,
+                else => return false,
+            }
         }
-        return source[start..end];
+        return false;
     }
 
     fn isSpecialName(name: []const u8) bool {
@@ -163,24 +155,15 @@ pub const UnusedDeclRule = struct {
     }
 
     fn isNameUsed(
-        source: []const u8,
+        tree: *const std.zig.Ast,
         name: []const u8,
         token_tags: []const std.zig.Token.Tag,
-        token_starts: []const u32,
     ) bool {
         var count: usize = 0;
 
         for (token_tags, 0..) |tag, i| {
             if (tag == .identifier) {
-                const start = token_starts[i];
-                const end = blk: {
-                    var e = start;
-                    while (e < source.len and (std.ascii.isAlphanumeric(source[e]) or source[e] == '_')) {
-                        e += 1;
-                    }
-                    break :blk e;
-                };
-                const token_name = source[start..end];
+                const token_name = tree.tokenSlice(@intCast(i));
                 if (std.mem.eql(u8, token_name, name)) {
                     count += 1;
                     if (count > 1) return true;
@@ -470,6 +453,83 @@ test "unused var declaration - violation" {
 
     try testing.expectEqual(@as(usize, 1), diagnostics.items.len);
     try testing.expect(std.mem.indexOf(u8, diagnostics.items[0].message, "counter") != null);
+
+    freeDiagnosticMessages(&diagnostics, allocator);
+}
+
+test "pub inline function - no violation" {
+    const testing = std.testing;
+    const allocator = testing.allocator;
+
+    var diagnostics: std.ArrayList(Diagnostic) = .empty;
+    defer diagnostics.deinit(allocator);
+    defer for (diagnostics.items) |diag| allocator.free(@constCast(diag.message));
+
+    const code: [:0]const u8 =
+        \\pub inline fn helper() void {}
+    ;
+    var source = Source.init(allocator, "test.zig", code);
+    defer source.deinit();
+    try UnusedDeclRule.rule.check(&source, allocator, &diagnostics);
+
+    try testing.expectEqual(@as(usize, 0), diagnostics.items.len);
+}
+
+test "export function - no violation" {
+    const testing = std.testing;
+    const allocator = testing.allocator;
+
+    var diagnostics: std.ArrayList(Diagnostic) = .empty;
+    defer diagnostics.deinit(allocator);
+    defer for (diagnostics.items) |diag| allocator.free(@constCast(diag.message));
+
+    const code: [:0]const u8 =
+        \\export fn helper() void {}
+    ;
+    var source = Source.init(allocator, "test.zig", code);
+    defer source.deinit();
+    try UnusedDeclRule.rule.check(&source, allocator, &diagnostics);
+
+    try testing.expectEqual(@as(usize, 0), diagnostics.items.len);
+}
+
+test "extern function - no violation" {
+    const testing = std.testing;
+    const allocator = testing.allocator;
+
+    var diagnostics: std.ArrayList(Diagnostic) = .empty;
+    defer diagnostics.deinit(allocator);
+    defer for (diagnostics.items) |diag| allocator.free(@constCast(diag.message));
+
+    const code: [:0]const u8 =
+        \\extern fn helper() void;
+    ;
+    var source = Source.init(allocator, "test.zig", code);
+    defer source.deinit();
+    try UnusedDeclRule.rule.check(&source, allocator, &diagnostics);
+
+    try testing.expectEqual(@as(usize, 0), diagnostics.items.len);
+}
+
+test "inline function without pub - violation" {
+    const testing = std.testing;
+    const allocator = testing.allocator;
+
+    var diagnostics: std.ArrayList(Diagnostic) = .empty;
+    defer diagnostics.deinit(allocator);
+    defer for (diagnostics.items) |diag| allocator.free(@constCast(diag.message));
+
+    const code: [:0]const u8 =
+        \\inline fn unused_helper() void {}
+        \\
+        \\pub fn main() void {}
+    ;
+    var source = Source.init(allocator, "test.zig", code);
+    defer source.deinit();
+    try UnusedDeclRule.rule.check(&source, allocator, &diagnostics);
+
+    try testing.expectEqual(@as(usize, 1), diagnostics.items.len);
+    try testing.expect(std.mem.indexOf(u8, diagnostics.items[0].message, "unused_helper") != null);
 
     freeDiagnosticMessages(&diagnostics, allocator);
 }
