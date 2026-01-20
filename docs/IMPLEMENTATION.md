@@ -244,6 +244,49 @@ The rule:
 3. Tracks seen import paths in a hash map
 4. Reports duplicates with reference to the first occurrence
 
+### Example: unused-decl Rule
+
+The `unused-decl` rule demonstrates AST-based analysis for detecting unused declarations:
+
+```zig
+fn check(src: *Source, allocator: std.mem.Allocator, diagnostics: *std.ArrayList(Diagnostic)) RuleError!void {
+    const tree = try src.ast();
+    const root_decls = tree.rootDecls();
+
+    // Collect non-pub declarations
+    var decls = std.ArrayList(DeclInfo).init(allocator);
+    for (root_decls) |decl_idx| {
+        const tag = tree.nodes.items(.tag)[decl_idx];
+        if (tag == .simple_var_decl or tag == .fn_decl) {
+            // Extract name, check if pub, skip special names
+            if (decl_info) |info| {
+                if (!info.is_pub and !isSpecialName(info.name)) {
+                    try decls.append(info);
+                }
+            }
+        }
+    }
+
+    // Check usage by scanning tokens
+    for (decls.items) |decl| {
+        if (!isNameUsed(source_content, decl.name, token_tags, token_starts)) {
+            try diagnostics.append(allocator, Diagnostic.init(...));
+        }
+    }
+}
+```
+
+The rule:
+1. Iterates root declarations to find `const`, `var`, and `fn` declarations
+2. Filters out exported (`pub`) declarations and special names
+3. Scans all identifier tokens to count usages of each declaration name
+4. Reports declarations that appear only once (their definition)
+
+The conservative approach avoids false positives by:
+- Ignoring `pub` declarations (may be used externally)
+- Ignoring underscore-prefixed names (explicit opt-out convention)
+- Ignoring special names like `main` and `panic` (entry points)
+
 ## Future Enhancements
 
 The current implementation provides a foundation for more sophisticated analysis:

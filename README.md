@@ -106,6 +106,38 @@ pub fn helper() void {
 }
 ```
 
+### unused-decl
+
+Detects unused container-level `const`, `var`, and `fn` declarations that are not exported (`pub`). Declarations that are never referenced elsewhere in the file are reported as warnings.
+
+The rule uses a conservative approach:
+- Exported (`pub`) declarations are ignored (they may be used externally)
+- Underscore-prefixed names (e.g., `_unused`) are ignored (explicit opt-out)
+- Special names like `main` and `panic` are ignored (entry points)
+
+**Bad:**
+```zig
+const unused_value = 42;  // Never used
+
+fn unused_helper() void {}  // Never called
+
+pub fn main() void {
+    // ...
+}
+```
+
+**Good:**
+```zig
+const config = 42;
+
+fn helper() void {}
+
+pub fn main() void {
+    _ = config;
+    helper();
+}
+```
+
 ## Building
 
 ```bash

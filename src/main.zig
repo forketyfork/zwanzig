@@ -5,6 +5,7 @@ const EmptyCatchRule = @import("rules/empty_catch.zig").EmptyCatchRule;
 const DupeImportRule = @import("rules/dupe_import.zig").DupeImportRule;
 const TodoCommentRule = @import("rules/todo_comment.zig").TodoCommentRule;
 const FileAsStructRule = @import("rules/file_as_struct.zig").FileAsStructRule;
+const UnusedDeclRule = @import("rules/unused_decl.zig").UnusedDeclRule;
 const RuleFilter = @import("rule_filter.zig").RuleFilter;
 const file_discovery = @import("file_discovery.zig");
 
@@ -137,6 +138,7 @@ pub fn main() !void {
     try analyzer.registerRule(&DupeImportRule.rule);
     try analyzer.registerRule(&TodoCommentRule.rule);
     try analyzer.registerRule(&FileAsStructRule.rule);
+    try analyzer.registerRule(&UnusedDeclRule.rule);
 
     analyzer.setRuleFilter(cli_args.rule_filter);
 
