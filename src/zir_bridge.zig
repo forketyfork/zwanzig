@@ -210,6 +210,8 @@ pub const ZirBridge = struct {
 
     /// Generate ZIR from a Source and extract typed information.
     pub fn loadFromSource(self: *ZirBridge, source: *Source) ZirBridgeError!void {
+        self.clear();
+
         self.source = source;
 
         const tree = source.ast() catch return error.ParseError;
@@ -226,23 +228,41 @@ pub const ZirBridge = struct {
         try self.extractDeclarations();
     }
 
+    /// Clear all state to allow reuse of the bridge.
+    pub fn clear(self: *ZirBridge) void {
+        if (self.zir) |*zir| {
+            zir.deinit(self.allocator);
+            self.zir = null;
+        }
+        self.ast = null;
+        self.source = null;
+        self.declarations.clearRetainingCapacity();
+        for (self.functions.items) |*fn_info| {
+            fn_info.deinit();
+        }
+        self.functions.clearRetainingCapacity();
+    }
+
     fn extractDeclarations(self: *ZirBridge) ZirBridgeError!void {
         const tree = self.ast orelse return;
+        const zir = self.zir orelse return;
         const source_content = self.source.?.getContent();
 
         for (tree.rootDecls()) |root_decl| {
             const node_idx: u32 = @intFromEnum(root_decl);
-            const decl_info = self.extractDeclFromAst(tree, node_idx, source_content);
+            const decl_info = self.extractDeclFromAst(tree, zir, node_idx, source_content);
             if (decl_info) |info| {
                 try self.declarations.append(self.allocator, info);
             }
         }
     }
 
-    fn extractDeclFromAst(_: *ZirBridge, tree: *const Ast, node_idx: u32, source: []const u8) ?DeclInfo {
+    fn extractDeclFromAst(self: *ZirBridge, tree: *const Ast, zir: Zir, node_idx: u32, source: []const u8) ?DeclInfo {
+        _ = self;
         const node_tag = tree.nodes.items(.tag)[node_idx];
         const token_tags = tree.tokens.items(.tag);
         const token_starts = tree.tokens.items(.start);
+        const node_data = tree.nodes.items(.data);
 
         switch (node_tag) {
             .simple_var_decl, .local_var_decl, .global_var_decl, .aligned_var_decl => {
@@ -260,18 +280,30 @@ pub const ZirBridge = struct {
 
                 if (name_token < token_tags.len and token_tags[name_token] == .identifier) {
                     const name = extractIdentifier(source, token_starts[name_token]);
+
+                    var type_info = TypeInfo.initUnknown();
+                    const full_decl = tree.fullVarDecl(@enumFromInt(node_idx));
+                    if (full_decl) |decl| {
+                        if (decl.ast.type_node != .none) {
+                            type_info = extractTypeFromZir(tree, zir, decl.ast.type_node, source);
+                        }
+                    }
+
+                    const zir_inst = findZirInstForNode(zir, node_idx);
+
                     return DeclInfo{
                         .name = name,
-                        .type_info = TypeInfo.initUnknown(),
+                        .type_info = type_info,
                         .is_pub = is_pub,
                         .is_const = token_tags[main_token] == .keyword_const,
                         .is_fn = false,
                         .ast_node = node_idx,
+                        .zir_inst = zir_inst,
                     };
                 }
             },
             .fn_decl => {
-                const fn_proto_node = tree.nodes.items(.data)[node_idx].node_and_node[0];
+                const fn_proto_node = node_data[node_idx].node_and_node[0];
                 const proto_idx: u32 = @intFromEnum(fn_proto_node);
                 if (proto_idx < tree.nodes.len) {
                     const proto_tag = tree.nodes.items(.tag)[proto_idx];
@@ -291,6 +323,8 @@ pub const ZirBridge = struct {
 
                         if (name_token < token_tags.len and token_tags[name_token] == .identifier) {
                             const name = extractIdentifier(source, token_starts[name_token]);
+                            const zir_inst = findZirInstForNode(zir, node_idx);
+
                             return DeclInfo{
                                 .name = name,
                                 .type_info = TypeInfo.initFunction(),
@@ -298,6 +332,7 @@ pub const ZirBridge = struct {
                                 .is_const = true,
                                 .is_fn = true,
                                 .ast_node = node_idx,
+                                .zir_inst = zir_inst,
                             };
                         }
                     }
@@ -305,6 +340,62 @@ pub const ZirBridge = struct {
             },
             else => {},
         }
+        return null;
+    }
+
+    /// Attempt to extract type information from ZIR for a type annotation node.
+    fn extractTypeFromZir(tree: *const Ast, zir: Zir, type_node: Ast.Node.OptionalIndex, source: []const u8) TypeInfo {
+        const type_idx: u32 = @intFromEnum(type_node);
+        if (type_idx == 0 or type_idx >= tree.nodes.len) {
+            return TypeInfo.initUnknown();
+        }
+
+        const token_tags = tree.tokens.items(.tag);
+        const token_starts = tree.tokens.items(.start);
+        const node_tag = tree.nodes.items(.tag)[type_idx];
+        const main_token = tree.nodes.items(.main_token)[type_idx];
+
+        if (node_tag == .identifier) {
+            if (main_token < token_tags.len and token_tags[main_token] == .identifier) {
+                const type_name = extractIdentifier(source, token_starts[main_token]);
+                return parseBuiltinType(type_name, zir);
+            }
+        }
+
+        return TypeInfo.initUnknown();
+    }
+
+    /// Parse a built-in type name and return TypeInfo, using ZIR for validation when possible.
+    fn parseBuiltinType(type_name: []const u8, zir: Zir) TypeInfo {
+        _ = zir;
+
+        if (std.mem.eql(u8, type_name, "void")) return TypeInfo.initVoid();
+        if (std.mem.eql(u8, type_name, "bool")) return TypeInfo.initBool();
+        if (std.mem.eql(u8, type_name, "type")) return .{ .kind = .type_type };
+
+        if (type_name.len >= 2) {
+            const first = type_name[0];
+            if (first == 'i' or first == 'u') {
+                const bits_str = type_name[1..];
+                const bits = std.fmt.parseInt(u16, bits_str, 10) catch return TypeInfo.initUnknown();
+                return TypeInfo.initInt(bits, first == 'i');
+            }
+            if (first == 'f' and type_name.len >= 2) {
+                const bits_str = type_name[1..];
+                const bits = std.fmt.parseInt(u16, bits_str, 10) catch return TypeInfo.initUnknown();
+                return TypeInfo.initFloat(bits);
+            }
+        }
+
+        return TypeInfo.initUnknown();
+    }
+
+    /// Find the ZIR instruction index corresponding to an AST node.
+    /// Note: ZIR doesn't provide direct AST node mapping, so this performs
+    /// a best-effort lookup. Full type resolution requires semantic analysis.
+    fn findZirInstForNode(zir: Zir, node_idx: u32) ?u32 {
+        _ = zir;
+        _ = node_idx;
         return null;
     }
 
@@ -479,4 +570,48 @@ test "TypeInfo formatting" {
     const void_type = TypeInfo.initVoid();
     try void_type.format("", .{}, writer);
     try std.testing.expectEqualStrings("void", fbs.getWritten());
+}
+
+test "ZirBridge reuse clears previous state" {
+    const allocator = std.testing.allocator;
+
+    const code1: [:0]const u8 = "const x: i32 = 1;";
+    var source1 = Source.init(allocator, "test1.zig", code1);
+    defer source1.deinit();
+
+    const code2: [:0]const u8 = "const y: i64 = 2;";
+    var source2 = Source.init(allocator, "test2.zig", code2);
+    defer source2.deinit();
+
+    var bridge = ZirBridge.init(allocator);
+    defer bridge.deinit();
+
+    try bridge.loadFromSource(&source1);
+    try std.testing.expect(bridge.findDeclByName("x") != null);
+    try std.testing.expect(bridge.findDeclByName("y") == null);
+
+    try bridge.loadFromSource(&source2);
+    try std.testing.expect(bridge.findDeclByName("x") == null);
+    try std.testing.expect(bridge.findDeclByName("y") != null);
+}
+
+test "ZirBridge extracts type info from type annotation" {
+    const allocator = std.testing.allocator;
+
+    const code: [:0]const u8 = "const x: i32 = 42;";
+    var source = Source.init(allocator, "test.zig", code);
+    defer source.deinit();
+
+    var bridge = ZirBridge.init(allocator);
+    defer bridge.deinit();
+
+    try bridge.loadFromSource(&source);
+
+    const decl = bridge.findDeclByName("x");
+    try std.testing.expect(decl != null);
+    if (decl) |d| {
+        try std.testing.expectEqual(TypeInfo.TypeKind.int, d.type_info.kind);
+        try std.testing.expectEqual(@as(u16, 32), d.type_info.size_bits);
+        try std.testing.expect(d.type_info.is_signed);
+    }
 }

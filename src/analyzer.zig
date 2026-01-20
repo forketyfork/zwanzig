@@ -6,12 +6,15 @@ const RuleFilter = @import("rule_filter.zig").RuleFilter;
 const checker_mod = @import("checker.zig");
 const Checker = checker_mod.Checker;
 const CheckerManagerWithRules = checker_mod.CheckerManagerWithRules;
+const ZirBridge = @import("zir_bridge.zig").ZirBridge;
 
 pub const Analyzer = struct {
     allocator: std.mem.Allocator,
     checker_manager: CheckerManagerWithRules,
     diagnostics: std.ArrayList(Diagnostic),
     rule_filter: RuleFilter,
+    zir_bridge: ?ZirBridge = null,
+    use_typed_ir: bool = false,
 
     pub fn init(allocator: std.mem.Allocator) Analyzer {
         return Analyzer{
@@ -28,6 +31,25 @@ pub const Analyzer = struct {
             self.allocator.free(@constCast(diag.message));
         }
         self.diagnostics.deinit(self.allocator);
+        if (self.zir_bridge) |*bridge| {
+            bridge.deinit();
+        }
+    }
+
+    /// Enable typed IR analysis using ZirBridge.
+    pub fn enableTypedIr(self: *Analyzer) void {
+        self.use_typed_ir = true;
+        if (self.zir_bridge == null) {
+            self.zir_bridge = ZirBridge.init(self.allocator);
+        }
+    }
+
+    /// Get the ZirBridge if typed IR is enabled and loaded.
+    pub fn getZirBridge(self: *Analyzer) ?*ZirBridge {
+        if (self.zir_bridge) |*bridge| {
+            return bridge;
+        }
+        return null;
     }
 
     /// Register a legacy Rule with the analyzer.
@@ -84,7 +106,23 @@ pub const Analyzer = struct {
         var source = Source.init(self.allocator, file_path, content);
         defer source.deinit();
 
+        if (self.use_typed_ir) {
+            try self.loadTypedIr(&source);
+        }
+
         try self.runChecksOnSource(&source);
+    }
+
+    /// Load typed IR for a source file using ZirBridge.
+    fn loadTypedIr(self: *Analyzer, source: *Source) !void {
+        if (self.zir_bridge) |*bridge| {
+            bridge.loadFromSource(source) catch |err| {
+                switch (err) {
+                    error.ParseError, error.AstGenFailed => {},
+                    else => return err,
+                }
+            };
+        }
     }
 
     /// Internal method to run checks on a source with the analyzer's filter.
