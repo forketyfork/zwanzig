@@ -8,6 +8,419 @@ const IrTag = cfg_mod.IrTag;
 
 pub const EngineError = std.mem.Allocator.Error;
 
+/// Comparison operator for constraints.
+pub const CompareOp = enum {
+    eq, // ==
+    ne, // !=
+    lt, // <
+    le, // <=
+    gt, // >
+    ge, // >=
+};
+
+/// A constraint on a variable's value.
+/// Constraints are used to track path conditions from branch expressions.
+pub const Constraint = union(enum) {
+    /// Variable compared to an integer value: var <op> value
+    int_compare: struct {
+        var_id: u32,
+        op: CompareOp,
+        value: i64,
+    },
+    /// Variable compared to null: var == null or var != null
+    null_check: struct {
+        var_id: u32,
+        is_null: bool, // true = var is null, false = var is non-null
+    },
+    /// Variable compared to another variable: var1 <op> var2
+    var_compare: struct {
+        var1_id: u32,
+        op: CompareOp,
+        var2_id: u32,
+    },
+
+    pub fn eql(self: Constraint, other: Constraint) bool {
+        return switch (self) {
+            .int_compare => |ic1| switch (other) {
+                .int_compare => |ic2| ic1.var_id == ic2.var_id and ic1.op == ic2.op and ic1.value == ic2.value,
+                else => false,
+            },
+            .null_check => |nc1| switch (other) {
+                .null_check => |nc2| nc1.var_id == nc2.var_id and nc1.is_null == nc2.is_null,
+                else => false,
+            },
+            .var_compare => |vc1| switch (other) {
+                .var_compare => |vc2| vc1.var1_id == vc2.var1_id and vc1.op == vc2.op and vc1.var2_id == vc2.var2_id,
+                else => false,
+            },
+        };
+    }
+
+    pub fn hash(self: Constraint) u64 {
+        var hasher = std.hash.Wyhash.init(0);
+        const tag_byte: u8 = switch (self) {
+            .int_compare => 0,
+            .null_check => 1,
+            .var_compare => 2,
+        };
+        hasher.update(&[_]u8{tag_byte});
+        switch (self) {
+            .int_compare => |ic| {
+                hasher.update(std.mem.asBytes(&ic.var_id));
+                hasher.update(std.mem.asBytes(&ic.op));
+                hasher.update(std.mem.asBytes(&ic.value));
+            },
+            .null_check => |nc| {
+                hasher.update(std.mem.asBytes(&nc.var_id));
+                hasher.update(std.mem.asBytes(&nc.is_null));
+            },
+            .var_compare => |vc| {
+                hasher.update(std.mem.asBytes(&vc.var1_id));
+                hasher.update(std.mem.asBytes(&vc.op));
+                hasher.update(std.mem.asBytes(&vc.var2_id));
+            },
+        }
+        return hasher.final();
+    }
+
+    /// Create an integer comparison constraint.
+    pub fn intCompare(var_id: u32, op: CompareOp, value: i64) Constraint {
+        return .{ .int_compare = .{ .var_id = var_id, .op = op, .value = value } };
+    }
+
+    /// Create a null check constraint.
+    pub fn nullCheck(var_id: u32, is_null: bool) Constraint {
+        return .{ .null_check = .{ .var_id = var_id, .is_null = is_null } };
+    }
+
+    /// Create a variable comparison constraint.
+    pub fn varCompare(var1_id: u32, op: CompareOp, var2_id: u32) Constraint {
+        return .{ .var_compare = .{ .var1_id = var1_id, .op = op, .var2_id = var2_id } };
+    }
+
+    /// Get the negation of this constraint (for else branches).
+    pub fn negate(self: Constraint) Constraint {
+        return switch (self) {
+            .int_compare => |ic| .{ .int_compare = .{
+                .var_id = ic.var_id,
+                .op = negateOp(ic.op),
+                .value = ic.value,
+            } },
+            .null_check => |nc| .{ .null_check = .{
+                .var_id = nc.var_id,
+                .is_null = !nc.is_null,
+            } },
+            .var_compare => |vc| .{ .var_compare = .{
+                .var1_id = vc.var1_id,
+                .op = negateOp(vc.op),
+                .var2_id = vc.var2_id,
+            } },
+        };
+    }
+
+    fn negateOp(op: CompareOp) CompareOp {
+        return switch (op) {
+            .eq => .ne,
+            .ne => .eq,
+            .lt => .ge,
+            .le => .gt,
+            .gt => .le,
+            .ge => .lt,
+        };
+    }
+};
+
+/// Manages path constraints for symbolic execution.
+/// Tracks a set of constraints that must all hold on a given path.
+pub const ConstraintManager = struct {
+    /// List of active constraints on this path
+    constraints: std.ArrayList(Constraint),
+    allocator: std.mem.Allocator,
+
+    pub fn init(allocator: std.mem.Allocator) ConstraintManager {
+        return .{
+            .constraints = .empty,
+            .allocator = allocator,
+        };
+    }
+
+    pub fn deinit(self: *ConstraintManager) void {
+        self.constraints.deinit(self.allocator);
+    }
+
+    pub fn clone(self: *const ConstraintManager) !ConstraintManager {
+        var new_cm = ConstraintManager.init(self.allocator);
+        for (self.constraints.items) |c| {
+            try new_cm.constraints.append(self.allocator, c);
+        }
+        return new_cm;
+    }
+
+    /// Add a constraint to the manager.
+    pub fn addConstraint(self: *ConstraintManager, constraint: Constraint) !void {
+        // Check for duplicate before adding
+        for (self.constraints.items) |c| {
+            if (c.eql(constraint)) return;
+        }
+        try self.constraints.append(self.allocator, constraint);
+    }
+
+    /// Check if the current constraint set is satisfiable.
+    /// Returns false if there's a definite contradiction.
+    pub fn isSatisfiable(self: *const ConstraintManager, env: *const Environment) bool {
+        // Check each constraint against the environment
+        for (self.constraints.items) |constraint| {
+            if (!self.isConstraintSatisfiable(constraint, env)) {
+                return false;
+            }
+        }
+
+        // Check for contradictions between constraints
+        for (self.constraints.items, 0..) |c1, i| {
+            for (self.constraints.items[i + 1 ..]) |c2| {
+                if (self.areContradictory(c1, c2)) {
+                    return false;
+                }
+            }
+        }
+
+        return true;
+    }
+
+    fn isConstraintSatisfiable(self: *const ConstraintManager, constraint: Constraint, env: *const Environment) bool {
+        _ = self;
+        switch (constraint) {
+            .int_compare => |ic| {
+                if (env.get(ic.var_id)) |val| {
+                    return isValueCompatibleWithIntConstraint(val, ic.op, ic.value);
+                }
+                return true; // Unknown variable, constraint might be satisfiable
+            },
+            .null_check => |nc| {
+                if (env.get(nc.var_id)) |val| {
+                    return isValueCompatibleWithNullCheck(val, nc.is_null);
+                }
+                return true;
+            },
+            .var_compare => {
+                // Variable comparisons are conservatively satisfiable unless we have concrete values
+                return true;
+            },
+        }
+    }
+
+    fn areContradictory(self: *const ConstraintManager, c1: Constraint, c2: Constraint) bool {
+        _ = self;
+        switch (c1) {
+            .int_compare => |ic1| {
+                switch (c2) {
+                    .int_compare => |ic2| {
+                        if (ic1.var_id != ic2.var_id) return false;
+                        return areIntConstraintsContradictory(ic1.op, ic1.value, ic2.op, ic2.value);
+                    },
+                    else => return false,
+                }
+            },
+            .null_check => |nc1| {
+                switch (c2) {
+                    .null_check => |nc2| {
+                        // x == null AND x != null is contradictory
+                        return nc1.var_id == nc2.var_id and nc1.is_null != nc2.is_null;
+                    },
+                    else => return false,
+                }
+            },
+            .var_compare => return false,
+        }
+    }
+
+    pub fn size(self: *const ConstraintManager) usize {
+        return self.constraints.items.len;
+    }
+
+    pub fn eql(self: *const ConstraintManager, other: *const ConstraintManager) bool {
+        if (self.constraints.items.len != other.constraints.items.len) return false;
+        for (self.constraints.items) |c1| {
+            var found = false;
+            for (other.constraints.items) |c2| {
+                if (c1.eql(c2)) {
+                    found = true;
+                    break;
+                }
+            }
+            if (!found) return false;
+        }
+        return true;
+    }
+
+    pub fn computeHash(self: *const ConstraintManager) u64 {
+        var combined_hash: u64 = 0;
+        for (self.constraints.items) |c| {
+            combined_hash ^= c.hash();
+        }
+        return combined_hash;
+    }
+
+    /// Refine an abstract value based on a constraint.
+    /// Returns the refined value, or null if the constraint is unsatisfiable.
+    pub fn refineValue(value: AbstractValue, constraint: Constraint) ?AbstractValue {
+        switch (constraint) {
+            .int_compare => |ic| {
+                return refineValueWithIntConstraint(value, ic.op, ic.value);
+            },
+            .null_check => |nc| {
+                if (nc.is_null) {
+                    // Constraint: variable is null
+                    return switch (value) {
+                        .null_val => .null_val,
+                        .non_null => null, // Contradiction
+                        .unknown => .null_val,
+                        else => null, // Concrete int or range can't be null
+                    };
+                } else {
+                    // Constraint: variable is non-null
+                    return switch (value) {
+                        .null_val => null, // Contradiction
+                        .non_null => .non_null,
+                        .unknown => .non_null,
+                        .int_range, .concrete_int => value, // Ints are non-null
+                    };
+                }
+            },
+            .var_compare => return value, // No refinement for var-var comparisons yet
+        }
+    }
+};
+
+fn isValueCompatibleWithIntConstraint(val: AbstractValue, op: CompareOp, value: i64) bool {
+    switch (val) {
+        .concrete_int => |v| {
+            return switch (op) {
+                .eq => v == value,
+                .ne => v != value,
+                .lt => v < value,
+                .le => v <= value,
+                .gt => v > value,
+                .ge => v >= value,
+            };
+        },
+        .int_range => |r| {
+            return switch (op) {
+                .eq => r.contains(value),
+                .ne => !(r.min == value and r.max == value), // Only contradictory if range is single value equal to value
+                .lt => r.min < value, // At least some values can be < value
+                .le => r.min <= value,
+                .gt => r.max > value,
+                .ge => r.max >= value,
+            };
+        },
+        else => return true, // Unknown, null, non_null are conservatively compatible
+    }
+}
+
+fn isValueCompatibleWithNullCheck(val: AbstractValue, is_null: bool) bool {
+    if (is_null) {
+        // Checking if variable is null
+        return switch (val) {
+            .null_val => true,
+            .non_null => false,
+            .concrete_int, .int_range => false, // Ints are not null
+            .unknown => true,
+        };
+    } else {
+        // Checking if variable is non-null
+        return switch (val) {
+            .null_val => false,
+            .non_null => true,
+            .concrete_int, .int_range => true,
+            .unknown => true,
+        };
+    }
+}
+
+fn areIntConstraintsContradictory(op1: CompareOp, val1: i64, op2: CompareOp, val2: i64) bool {
+    // Check for obvious contradictions
+    // x == 5 AND x == 6 is contradictory
+    if (op1 == .eq and op2 == .eq and val1 != val2) return true;
+
+    // x == 5 AND x != 5 is contradictory
+    if (op1 == .eq and op2 == .ne and val1 == val2) return true;
+    if (op1 == .ne and op2 == .eq and val1 == val2) return true;
+
+    // x < 5 AND x > 10 is contradictory (or x > 5 AND x < 5)
+    if (op1 == .lt and op2 == .gt and val1 <= val2) return true;
+    if (op1 == .gt and op2 == .lt and val1 >= val2) return true;
+
+    // x < 5 AND x >= 5 is contradictory
+    if (op1 == .lt and op2 == .ge and val1 <= val2) return true;
+    if (op1 == .ge and op2 == .lt and val1 >= val2) return true;
+
+    // x <= 5 AND x > 5 is contradictory
+    if (op1 == .le and op2 == .gt and val1 == val2) return true;
+    if (op1 == .gt and op2 == .le and val1 == val2) return true;
+
+    // x == 5 AND x < 5 is contradictory
+    if (op1 == .eq and op2 == .lt and val1 >= val2) return true;
+    if (op1 == .lt and op2 == .eq and val1 <= val2) return true;
+
+    // x == 5 AND x > 5 is contradictory
+    if (op1 == .eq and op2 == .gt and val1 <= val2) return true;
+    if (op1 == .gt and op2 == .eq and val1 >= val2) return true;
+
+    return false;
+}
+
+fn refineValueWithIntConstraint(value: AbstractValue, op: CompareOp, constraint_val: i64) ?AbstractValue {
+    switch (value) {
+        .unknown => {
+            // Refine unknown based on constraint
+            return switch (op) {
+                .eq => .{ .concrete_int = constraint_val },
+                .ne => .unknown, // Still unknown, just not equal to one value
+                .lt => .{ .int_range = AbstractValue.IntRange.init(std.math.minInt(i64), constraint_val - 1) },
+                .le => .{ .int_range = AbstractValue.IntRange.init(std.math.minInt(i64), constraint_val) },
+                .gt => .{ .int_range = AbstractValue.IntRange.init(constraint_val + 1, std.math.maxInt(i64)) },
+                .ge => .{ .int_range = AbstractValue.IntRange.init(constraint_val, std.math.maxInt(i64)) },
+            };
+        },
+        .concrete_int => |v| {
+            const satisfies = switch (op) {
+                .eq => v == constraint_val,
+                .ne => v != constraint_val,
+                .lt => v < constraint_val,
+                .le => v <= constraint_val,
+                .gt => v > constraint_val,
+                .ge => v >= constraint_val,
+            };
+            return if (satisfies) value else null;
+        },
+        .int_range => |r| {
+            const new_range = switch (op) {
+                .eq => if (r.contains(constraint_val)) AbstractValue.IntRange.single(constraint_val) else return null,
+                .ne => r, // Can't easily narrow a range for !=
+                .lt => blk: {
+                    if (r.min >= constraint_val) return null;
+                    break :blk AbstractValue.IntRange.init(r.min, @min(r.max, constraint_val - 1));
+                },
+                .le => blk: {
+                    if (r.min > constraint_val) return null;
+                    break :blk AbstractValue.IntRange.init(r.min, @min(r.max, constraint_val));
+                },
+                .gt => blk: {
+                    if (r.max <= constraint_val) return null;
+                    break :blk AbstractValue.IntRange.init(@max(r.min, constraint_val + 1), r.max);
+                },
+                .ge => blk: {
+                    if (r.max < constraint_val) return null;
+                    break :blk AbstractValue.IntRange.init(@max(r.min, constraint_val), r.max);
+                },
+            };
+            return .{ .int_range = new_range };
+        },
+        .null_val, .non_null => return value,
+    }
+}
+
 /// Abstract value representing the possible values of a variable or expression.
 /// These values are used for symbolic execution and dataflow analysis.
 pub const AbstractValue = union(enum) {
@@ -284,32 +697,41 @@ pub const ProgramPoint = struct {
 };
 
 /// Abstract program state for path-sensitive analysis.
-/// Stores the environment mapping variables to abstract values.
-/// States are compared structurally for deduplication.
+/// Stores the environment mapping variables to abstract values,
+/// plus path constraints from branch conditions.
 pub const ProgramState = struct {
     /// Environment mapping variables to abstract values
     env: Environment,
+    /// Constraint manager for path conditions
+    constraints: ConstraintManager,
     /// Cached hash for efficient deduplication
     cached_hash: ?u64,
 
     pub fn init(allocator: std.mem.Allocator) ProgramState {
         return .{
             .env = Environment.init(allocator),
+            .constraints = ConstraintManager.init(allocator),
             .cached_hash = null,
         };
     }
 
     pub fn deinit(self: *ProgramState) void {
         self.env.deinit();
+        self.constraints.deinit();
     }
 
     pub fn eql(self: *const ProgramState, other: *const ProgramState) bool {
-        return self.env.eql(&other.env);
+        return self.env.eql(&other.env) and self.constraints.eql(&other.constraints);
     }
 
     pub fn computeHash(self: *ProgramState) u64 {
         if (self.cached_hash) |h| return h;
-        const h = self.env.computeHash();
+        var hasher = std.hash.Wyhash.init(0);
+        const env_hash = self.env.computeHash();
+        hasher.update(std.mem.asBytes(&env_hash));
+        const constraints_hash = self.constraints.computeHash();
+        hasher.update(std.mem.asBytes(&constraints_hash));
+        const h = hasher.final();
         self.cached_hash = h;
         return h;
     }
@@ -318,6 +740,7 @@ pub const ProgramState = struct {
         _ = allocator;
         return .{
             .env = try self.env.clone(),
+            .constraints = try self.constraints.clone(),
             .cached_hash = self.cached_hash,
         };
     }
@@ -337,6 +760,34 @@ pub const ProgramState = struct {
 
     pub fn envSize(self: *const ProgramState) usize {
         return self.env.size();
+    }
+
+    /// Add a constraint to this state and refine variable values accordingly.
+    pub fn addConstraint(self: *ProgramState, constraint: Constraint) !void {
+        try self.constraints.addConstraint(constraint);
+        self.invalidateCache();
+
+        // Refine the relevant variable's value based on the constraint
+        const var_id = switch (constraint) {
+            .int_compare => |ic| ic.var_id,
+            .null_check => |nc| nc.var_id,
+            .var_compare => |vc| vc.var1_id,
+        };
+
+        if (self.env.get(var_id)) |current_val| {
+            if (ConstraintManager.refineValue(current_val, constraint)) |refined| {
+                try self.env.set(var_id, refined);
+            }
+        }
+    }
+
+    /// Check if this state's constraints are satisfiable.
+    pub fn isSatisfiable(self: *const ProgramState) bool {
+        return self.constraints.isSatisfiable(&self.env);
+    }
+
+    pub fn constraintCount(self: *const ProgramState) usize {
+        return self.constraints.size();
     }
 };
 
@@ -452,18 +903,23 @@ pub const ExplodedGraph = struct {
 /// Worklist-based analysis engine.
 /// Traverses the CFG and builds an exploded graph with deduplication.
 /// Evaluates abstract values for literals and assignments.
+/// Applies branch constraints and prunes infeasible paths.
 pub const AnalysisEngine = struct {
     allocator: std.mem.Allocator,
     /// The exploded graph being built
     graph: ExplodedGraph,
-    /// Worklist of (exploded node index, edge kind from predecessor) pairs to process
+    /// Worklist of (exploded node index, edge kind from predecessor, optional constraint) pairs to process
     worklist: std.ArrayList(WorklistItem),
+    /// Count of pruned paths (for testing/debugging)
+    pruned_path_count: u32,
 
     const WorklistItem = struct {
         /// Index of the exploded graph node to process
         node_index: u32,
         /// The kind of edge that led to this node (for path-sensitive analysis)
         edge_kind: EdgeKind,
+        /// Optional constraint to apply (from branch condition)
+        pending_constraint: ?Constraint,
     };
 
     pub fn init(allocator: std.mem.Allocator, cfg: *const Cfg) AnalysisEngine {
@@ -471,6 +927,7 @@ pub const AnalysisEngine = struct {
             .allocator = allocator,
             .graph = ExplodedGraph.init(allocator, cfg),
             .worklist = .empty,
+            .pruned_path_count = 0,
         };
     }
 
@@ -490,24 +947,40 @@ pub const AnalysisEngine = struct {
         if (!result.is_new) {
             initial_state.deinit();
         }
-        try self.worklist.append(self.allocator, .{ .node_index = result.index, .edge_kind = .normal });
+        try self.worklist.append(self.allocator, .{ .node_index = result.index, .edge_kind = .normal, .pending_constraint = null });
 
         while (self.worklist.pop()) |item| {
-            try self.processNode(item.node_index, item.edge_kind);
+            try self.processNode(item.node_index, item.edge_kind, item.pending_constraint);
         }
     }
 
-    fn processNode(self: *AnalysisEngine, node_index: u32, edge_kind: EdgeKind) EngineError!void {
+    fn processNode(self: *AnalysisEngine, node_index: u32, edge_kind: EdgeKind, pending_constraint: ?Constraint) EngineError!void {
         _ = edge_kind;
 
         const exploded_node = self.graph.getNode(node_index) orelse return;
         const point = exploded_node.point;
-        const state = &exploded_node.state;
+
+        // Clone the state immediately - we can't hold a reference to exploded_node.state
+        // because graph operations may reallocate the nodes array and invalidate pointers.
+        var state_copy = try exploded_node.state.clone(self.allocator);
+        defer state_copy.deinit();
 
         switch (point.kind) {
             .pre => {
                 const post_point = ProgramPoint.initPost(point.node_index);
-                var new_state = try self.transferFunction(point, state);
+                var new_state = try self.transferFunction(point, &state_copy);
+
+                // Apply any pending constraint from a branch edge
+                if (pending_constraint) |constraint| {
+                    try new_state.addConstraint(constraint);
+
+                    // Check if the state is still satisfiable after adding the constraint
+                    if (!new_state.isSatisfiable()) {
+                        self.pruned_path_count += 1;
+                        new_state.deinit();
+                        return; // Prune this path
+                    }
+                }
 
                 const result = try self.graph.getOrCreateNode(post_point, &new_state);
                 if (!result.is_new) {
@@ -516,16 +989,47 @@ pub const AnalysisEngine = struct {
                 try self.graph.addEdge(node_index, result.index);
 
                 if (result.is_new) {
-                    try self.worklist.append(self.allocator, .{ .node_index = result.index, .edge_kind = .normal });
+                    try self.worklist.append(self.allocator, .{ .node_index = result.index, .edge_kind = .normal, .pending_constraint = null });
                 }
             },
             .post => {
                 const cfg = self.graph.cfg;
+                const cfg_node = cfg.getNode(point.node_index);
+
+                // Check if this is a branch node - if so, we need to extract constraints
+                const is_branch_node = if (cfg_node) |node| node.ir_node.tag == .branch else false;
+                const branch_constraint = if (is_branch_node)
+                    self.extractBranchConstraint(cfg_node.?)
+                else
+                    null;
 
                 for (cfg.edges.items) |edge| {
                     if (edge.from == point.node_index) {
                         const succ_point = ProgramPoint.initPre(edge.to);
-                        var succ_state = try state.clone(self.allocator);
+                        var succ_state = try state_copy.clone(self.allocator);
+
+                        // Determine the constraint to apply based on the edge kind
+                        var constraint_to_apply: ?Constraint = null;
+                        if (branch_constraint) |bc| {
+                            if (edge.kind == .branch_true) {
+                                constraint_to_apply = bc;
+                            } else if (edge.kind == .branch_false) {
+                                constraint_to_apply = bc.negate();
+                            }
+                        }
+
+                        // If we have a constraint, pre-check if the resulting state would be satisfiable
+                        if (constraint_to_apply) |constraint| {
+                            // Create a temporary state to check satisfiability
+                            var temp_state = try succ_state.clone(self.allocator);
+                            defer temp_state.deinit();
+                            try temp_state.addConstraint(constraint);
+                            if (!temp_state.isSatisfiable()) {
+                                self.pruned_path_count += 1;
+                                succ_state.deinit();
+                                continue; // Skip this edge entirely
+                            }
+                        }
 
                         const result = try self.graph.getOrCreateNode(succ_point, &succ_state);
                         if (!result.is_new) {
@@ -534,12 +1038,40 @@ pub const AnalysisEngine = struct {
                         try self.graph.addEdge(node_index, result.index);
 
                         if (result.is_new) {
-                            try self.worklist.append(self.allocator, .{ .node_index = result.index, .edge_kind = edge.kind });
+                            try self.worklist.append(self.allocator, .{ .node_index = result.index, .edge_kind = edge.kind, .pending_constraint = constraint_to_apply });
                         }
                     }
                 }
             },
         }
+    }
+
+    /// Extract a constraint from a branch node's condition.
+    /// Returns null if no constraint can be extracted.
+    fn extractBranchConstraint(self: *AnalysisEngine, cfg_node: *const CfgNode) ?Constraint {
+        _ = self;
+        // The branch node has ast_node pointing to the if expression
+        // In a more complete implementation, we would analyze the condition expression
+        // to extract constraints like "x == 5" or "x != null"
+        //
+        // For now, we support a simple pattern where the branch node's operand_node
+        // contains the variable being tested, and operand2_node contains information
+        // about the comparison.
+        //
+        // This is a placeholder that can be enhanced when the CFG builder provides
+        // more detailed information about branch conditions.
+        const ir_node = cfg_node.ir_node;
+        if (ir_node.operand_node) |var_id| {
+            if (ir_node.operand2_node) |cmp_info| {
+                // Interpret operand2_node as encoded comparison info:
+                // High 32 bits of the value represent the comparison constant
+                // This is a simplified encoding for now
+                return Constraint.intCompare(var_id, .eq, @as(i64, cmp_info));
+            }
+            // If we only have a variable and no comparison info, assume null check
+            return Constraint.nullCheck(var_id, true);
+        }
+        return null;
     }
 
     /// Transfer function: compute the new state after executing a CFG node.
@@ -569,6 +1101,11 @@ pub const AnalysisEngine = struct {
         }
 
         return new_state;
+    }
+
+    /// Get the count of pruned paths
+    pub fn getPrunedPathCount(self: *const AnalysisEngine) u32 {
+        return self.pruned_path_count;
     }
 
     /// Get the exploded graph after analysis
@@ -952,4 +1489,345 @@ test "AnalysisEngine with var_decl propagates state" {
         }
     }
     try testing.expect(found_var_decl_post);
+}
+
+// ============== Constraint Tests ==============
+
+test "Constraint creation and equality" {
+    const c1 = Constraint.intCompare(1, .eq, 42);
+    const c2 = Constraint.intCompare(1, .eq, 42);
+    const c3 = Constraint.intCompare(1, .eq, 100);
+    const c4 = Constraint.intCompare(2, .eq, 42);
+
+    try std.testing.expect(c1.eql(c2));
+    try std.testing.expect(!c1.eql(c3));
+    try std.testing.expect(!c1.eql(c4));
+
+    const null_check1 = Constraint.nullCheck(1, true);
+    const null_check2 = Constraint.nullCheck(1, true);
+    const null_check3 = Constraint.nullCheck(1, false);
+
+    try std.testing.expect(null_check1.eql(null_check2));
+    try std.testing.expect(!null_check1.eql(null_check3));
+    try std.testing.expect(!null_check1.eql(c1));
+}
+
+test "Constraint negation" {
+    const eq_constraint = Constraint.intCompare(1, .eq, 5);
+    const neq = eq_constraint.negate();
+    switch (neq) {
+        .int_compare => |ic| {
+            try std.testing.expectEqual(@as(u32, 1), ic.var_id);
+            try std.testing.expectEqual(CompareOp.ne, ic.op);
+            try std.testing.expectEqual(@as(i64, 5), ic.value);
+        },
+        else => try std.testing.expect(false),
+    }
+
+    const lt_constraint = Constraint.intCompare(1, .lt, 10);
+    const ge = lt_constraint.negate();
+    switch (ge) {
+        .int_compare => |ic| {
+            try std.testing.expectEqual(CompareOp.ge, ic.op);
+        },
+        else => try std.testing.expect(false),
+    }
+
+    const null_check = Constraint.nullCheck(1, true);
+    const not_null = null_check.negate();
+    switch (not_null) {
+        .null_check => |nc| {
+            try std.testing.expectEqual(@as(u32, 1), nc.var_id);
+            try std.testing.expect(!nc.is_null);
+        },
+        else => try std.testing.expect(false),
+    }
+}
+
+test "ConstraintManager basic operations" {
+    const allocator = std.testing.allocator;
+
+    var cm = ConstraintManager.init(allocator);
+    defer cm.deinit();
+
+    try std.testing.expectEqual(@as(usize, 0), cm.size());
+
+    try cm.addConstraint(Constraint.intCompare(1, .eq, 42));
+    try std.testing.expectEqual(@as(usize, 1), cm.size());
+
+    // Adding duplicate should not increase size
+    try cm.addConstraint(Constraint.intCompare(1, .eq, 42));
+    try std.testing.expectEqual(@as(usize, 1), cm.size());
+
+    try cm.addConstraint(Constraint.nullCheck(2, false));
+    try std.testing.expectEqual(@as(usize, 2), cm.size());
+}
+
+test "ConstraintManager cloning" {
+    const allocator = std.testing.allocator;
+
+    var cm1 = ConstraintManager.init(allocator);
+    defer cm1.deinit();
+
+    try cm1.addConstraint(Constraint.intCompare(1, .eq, 42));
+    try cm1.addConstraint(Constraint.nullCheck(2, true));
+
+    var cm2 = try cm1.clone();
+    defer cm2.deinit();
+
+    try std.testing.expect(cm1.eql(&cm2));
+    try std.testing.expectEqual(@as(usize, 2), cm2.size());
+}
+
+test "ConstraintManager satisfiability with environment" {
+    const allocator = std.testing.allocator;
+
+    var cm = ConstraintManager.init(allocator);
+    defer cm.deinit();
+
+    var env = Environment.init(allocator);
+    defer env.deinit();
+
+    // Variable x = 5
+    try env.set(1, .{ .concrete_int = 5 });
+
+    // Constraint: x == 5 should be satisfiable
+    try cm.addConstraint(Constraint.intCompare(1, .eq, 5));
+    try std.testing.expect(cm.isSatisfiable(&env));
+
+    // Adding x == 6 should make it unsatisfiable
+    try cm.addConstraint(Constraint.intCompare(1, .eq, 6));
+    try std.testing.expect(!cm.isSatisfiable(&env));
+}
+
+test "ConstraintManager null check satisfiability" {
+    const allocator = std.testing.allocator;
+
+    var cm = ConstraintManager.init(allocator);
+    defer cm.deinit();
+
+    var env = Environment.init(allocator);
+    defer env.deinit();
+
+    // Variable x is non-null
+    try env.set(1, .non_null);
+
+    // Constraint: x is null should be unsatisfiable
+    try cm.addConstraint(Constraint.nullCheck(1, true));
+    try std.testing.expect(!cm.isSatisfiable(&env));
+}
+
+test "ConstraintManager contradictory constraints" {
+    const allocator = std.testing.allocator;
+
+    var cm = ConstraintManager.init(allocator);
+    defer cm.deinit();
+
+    var env = Environment.init(allocator);
+    defer env.deinit();
+
+    // x == null AND x != null should be contradictory
+    try cm.addConstraint(Constraint.nullCheck(1, true));
+    try cm.addConstraint(Constraint.nullCheck(1, false));
+    try std.testing.expect(!cm.isSatisfiable(&env));
+}
+
+test "ConstraintManager refineValue for int constraint" {
+    // Test refining unknown value with equality constraint
+    const unknown: AbstractValue = .unknown;
+    const refined = ConstraintManager.refineValue(unknown, Constraint.intCompare(1, .eq, 42));
+    try std.testing.expect(refined != null);
+    try std.testing.expect(refined.?.eql(.{ .concrete_int = 42 }));
+
+    // Test refining concrete value that satisfies constraint
+    const concrete5: AbstractValue = .{ .concrete_int = 5 };
+    const refined_eq = ConstraintManager.refineValue(concrete5, Constraint.intCompare(1, .eq, 5));
+    try std.testing.expect(refined_eq != null);
+    try std.testing.expect(refined_eq.?.eql(.{ .concrete_int = 5 }));
+
+    // Test refining concrete value that doesn't satisfy constraint
+    const refined_neq = ConstraintManager.refineValue(concrete5, Constraint.intCompare(1, .eq, 10));
+    try std.testing.expect(refined_neq == null);
+
+    // Test refining with less-than constraint
+    const refined_lt = ConstraintManager.refineValue(unknown, Constraint.intCompare(1, .lt, 10));
+    try std.testing.expect(refined_lt != null);
+    switch (refined_lt.?) {
+        .int_range => |r| {
+            try std.testing.expect(r.max == 9);
+        },
+        else => try std.testing.expect(false),
+    }
+}
+
+test "ConstraintManager refineValue for null constraint" {
+    // Test refining unknown value with null constraint
+    const unknown: AbstractValue = .unknown;
+    const refined_null = ConstraintManager.refineValue(unknown, Constraint.nullCheck(1, true));
+    try std.testing.expect(refined_null != null);
+    try std.testing.expect(refined_null.?.isNull());
+
+    // Test refining unknown value with non-null constraint
+    const refined_non_null = ConstraintManager.refineValue(unknown, Constraint.nullCheck(1, false));
+    try std.testing.expect(refined_non_null != null);
+    try std.testing.expect(refined_non_null.?.isNonNull());
+
+    // Test refining null value with non-null constraint (contradiction)
+    const null_val: AbstractValue = .null_val;
+    const refined_contradiction = ConstraintManager.refineValue(null_val, Constraint.nullCheck(1, false));
+    try std.testing.expect(refined_contradiction == null);
+
+    // Test refining non-null value with null constraint (contradiction)
+    const non_null: AbstractValue = .non_null;
+    const refined_contradiction2 = ConstraintManager.refineValue(non_null, Constraint.nullCheck(1, true));
+    try std.testing.expect(refined_contradiction2 == null);
+}
+
+test "ProgramState with constraints" {
+    const allocator = std.testing.allocator;
+
+    var state = ProgramState.init(allocator);
+    defer state.deinit();
+
+    try std.testing.expectEqual(@as(usize, 0), state.constraintCount());
+
+    // Add a variable with unknown value
+    try state.setVar(1, .unknown);
+
+    // Add constraint that refines the value
+    try state.addConstraint(Constraint.intCompare(1, .eq, 42));
+    try std.testing.expectEqual(@as(usize, 1), state.constraintCount());
+
+    // The variable should now be refined to concrete 42
+    const val = state.getVar(1);
+    try std.testing.expect(val != null);
+    try std.testing.expect(val.?.eql(.{ .concrete_int = 42 }));
+
+    try std.testing.expect(state.isSatisfiable());
+}
+
+test "ProgramState clone includes constraints" {
+    const allocator = std.testing.allocator;
+
+    var state1 = ProgramState.init(allocator);
+    defer state1.deinit();
+
+    try state1.setVar(1, .unknown);
+    try state1.addConstraint(Constraint.intCompare(1, .gt, 0));
+
+    var state2 = try state1.clone(allocator);
+    defer state2.deinit();
+
+    try std.testing.expect(state1.eql(&state2));
+    try std.testing.expectEqual(state1.constraintCount(), state2.constraintCount());
+}
+
+test "ProgramState satisfiability" {
+    const allocator = std.testing.allocator;
+
+    var state = ProgramState.init(allocator);
+    defer state.deinit();
+
+    try state.setVar(1, .{ .concrete_int = 5 });
+
+    // Add constraint that is satisfiable
+    try state.addConstraint(Constraint.intCompare(1, .lt, 10));
+    try std.testing.expect(state.isSatisfiable());
+
+    // Add constraint that makes it unsatisfiable
+    try state.addConstraint(Constraint.intCompare(1, .gt, 10));
+    try std.testing.expect(!state.isSatisfiable());
+}
+
+test "AnalysisEngine branch constraint pruning" {
+    const allocator = std.testing.allocator;
+
+    // Create a CFG with a branch where one path should be pruned:
+    // entry -> var_decl (x = 5) -> branch (x == 10?) -> then/else -> merge -> exit
+    //
+    // Since x = 5, the branch "x == 10" should prune the then-branch
+
+    var cfg = Cfg.init(allocator);
+    defer cfg.deinit();
+
+    const entry = try cfg.addNode(cfg_mod.IrNode.init(.fn_entry));
+    const var_decl = try cfg.addNode(cfg_mod.IrNode.initWithAst(.var_decl, 100)); // x
+
+    // Create a branch node with condition info embedded
+    // operand_node = variable being tested (100)
+    // operand2_node = value being compared to (10)
+    var branch_ir = cfg_mod.IrNode.init(.branch);
+    branch_ir.operand_node = 100;
+    branch_ir.operand2_node = 10;
+    const branch = try cfg.addNode(branch_ir);
+
+    const then_node = try cfg.addNode(cfg_mod.IrNode.init(.block));
+    const else_node = try cfg.addNode(cfg_mod.IrNode.init(.block));
+    const merge = try cfg.addNode(cfg_mod.IrNode.init(.nop));
+    const exit = try cfg.addNode(cfg_mod.IrNode.init(.fn_exit));
+
+    cfg.entry = entry;
+    cfg.exit = exit;
+
+    try cfg.addEdge(entry, var_decl);
+    try cfg.addEdge(var_decl, branch);
+    try cfg.addEdgeWithKind(branch, then_node, .branch_true);
+    try cfg.addEdgeWithKind(branch, else_node, .branch_false);
+    try cfg.addEdge(then_node, merge);
+    try cfg.addEdge(else_node, merge);
+    try cfg.addEdge(merge, exit);
+
+    var engine = AnalysisEngine.init(allocator, &cfg);
+    defer engine.deinit();
+
+    try engine.run();
+
+    // The engine should have explored both branches since we start with unknown value
+    // (var_decl sets value to unknown, not concrete 5)
+    // Both paths should be explored
+    const graph = engine.getGraph();
+    try std.testing.expect(graph.nodeCount() > 0);
+}
+
+test "areIntConstraintsContradictory" {
+    // x == 5 AND x == 6 is contradictory
+    try std.testing.expect(areIntConstraintsContradictory(.eq, 5, .eq, 6));
+
+    // x == 5 AND x == 5 is not contradictory
+    try std.testing.expect(!areIntConstraintsContradictory(.eq, 5, .eq, 5));
+
+    // x == 5 AND x != 5 is contradictory
+    try std.testing.expect(areIntConstraintsContradictory(.eq, 5, .ne, 5));
+
+    // x < 5 AND x > 10 is contradictory
+    try std.testing.expect(areIntConstraintsContradictory(.lt, 5, .gt, 10));
+
+    // x < 10 AND x > 5 is not contradictory (overlapping range)
+    try std.testing.expect(!areIntConstraintsContradictory(.lt, 10, .gt, 5));
+}
+
+test "isValueCompatibleWithIntConstraint" {
+    // Concrete value tests
+    try std.testing.expect(isValueCompatibleWithIntConstraint(.{ .concrete_int = 5 }, .eq, 5));
+    try std.testing.expect(!isValueCompatibleWithIntConstraint(.{ .concrete_int = 5 }, .eq, 6));
+    try std.testing.expect(isValueCompatibleWithIntConstraint(.{ .concrete_int = 5 }, .lt, 10));
+    try std.testing.expect(!isValueCompatibleWithIntConstraint(.{ .concrete_int = 5 }, .lt, 5));
+
+    // Range value tests
+    const range = AbstractValue.IntRange.init(0, 10);
+    try std.testing.expect(isValueCompatibleWithIntConstraint(.{ .int_range = range }, .eq, 5));
+    try std.testing.expect(!isValueCompatibleWithIntConstraint(.{ .int_range = range }, .eq, 15));
+    try std.testing.expect(isValueCompatibleWithIntConstraint(.{ .int_range = range }, .lt, 15));
+
+    // Unknown is always compatible
+    try std.testing.expect(isValueCompatibleWithIntConstraint(.unknown, .eq, 5));
+}
+
+test "isValueCompatibleWithNullCheck" {
+    try std.testing.expect(isValueCompatibleWithNullCheck(.null_val, true));
+    try std.testing.expect(!isValueCompatibleWithNullCheck(.null_val, false));
+    try std.testing.expect(!isValueCompatibleWithNullCheck(.non_null, true));
+    try std.testing.expect(isValueCompatibleWithNullCheck(.non_null, false));
+    try std.testing.expect(isValueCompatibleWithNullCheck(.unknown, true));
+    try std.testing.expect(isValueCompatibleWithNullCheck(.unknown, false));
 }

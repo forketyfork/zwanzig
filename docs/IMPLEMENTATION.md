@@ -1020,11 +1020,133 @@ The transfer function currently handles:
 - **Variable declarations**: Initializes variables with `unknown` value
 - **Assignments**: Updates variable values in the environment
 
-Future enhancements will implement transfer functions for:
-- Literal evaluation (concrete integer values)
-- Arithmetic operations
-- Branch conditions (state forking)
-- Function calls
+### Branch Constraints and Path Pruning
+
+The analysis engine supports path-sensitive analysis by tracking constraints from branch conditions. When the engine encounters a branch node with `branch_true` or `branch_false` edges, it extracts constraints and applies them to the successor states.
+
+#### Constraints
+
+Constraints represent conditions that must hold on a given execution path:
+
+```zig
+pub const Constraint = union(enum) {
+    /// Variable compared to an integer value: var <op> value
+    int_compare: struct {
+        var_id: u32,
+        op: CompareOp,
+        value: i64,
+    },
+    /// Variable compared to null: var == null or var != null
+    null_check: struct {
+        var_id: u32,
+        is_null: bool,
+    },
+    /// Variable compared to another variable: var1 <op> var2
+    var_compare: struct {
+        var1_id: u32,
+        op: CompareOp,
+        var2_id: u32,
+    },
+};
+```
+
+**Comparison Operators:**
+| Op | Description |
+|----|-------------|
+| `eq` | Equal (==) |
+| `ne` | Not equal (!=) |
+| `lt` | Less than (<) |
+| `le` | Less or equal (<=) |
+| `gt` | Greater than (>) |
+| `ge` | Greater or equal (>=) |
+
+#### ConstraintManager
+
+The `ConstraintManager` tracks active constraints on a path:
+
+```zig
+pub const ConstraintManager = struct {
+    constraints: std.ArrayList(Constraint),
+    allocator: std.mem.Allocator,
+};
+```
+
+**Key Operations:**
+- `addConstraint(constraint)`: Adds a constraint (ignores duplicates)
+- `isSatisfiable(env)`: Checks if constraints are satisfiable given the environment
+- `refineValue(value, constraint)`: Refines an abstract value based on a constraint
+- `clone()`: Creates a deep copy
+
+#### ProgramState with Constraints
+
+The `ProgramState` now includes a `ConstraintManager`:
+
+```zig
+pub const ProgramState = struct {
+    env: Environment,
+    constraints: ConstraintManager,
+    cached_hash: ?u64,
+};
+```
+
+**Constraint Integration:**
+- `addConstraint(constraint)`: Adds a constraint and refines variable values
+- `isSatisfiable()`: Checks if the state's constraints are satisfiable
+- `constraintCount()`: Returns the number of active constraints
+
+#### Path Pruning
+
+When processing branch edges, the engine:
+
+1. Extracts the constraint from the branch condition (if available)
+2. For `branch_true` edges: applies the constraint as-is
+3. For `branch_false` edges: applies the negated constraint
+4. Checks if the resulting state is satisfiable
+5. If unsatisfiable, prunes the path (skips exploration)
+
+**Example:**
+```
+// Code:
+if (x == 5) {
+    // then-branch: constraint x == 5
+} else {
+    // else-branch: constraint x != 5
+}
+
+// If x is known to be 10:
+// - then-branch is pruned (x == 5 contradicts x == 10)
+// - else-branch is explored (x != 5 is satisfiable)
+```
+
+#### Value Refinement
+
+When a constraint is added, the engine refines the affected variable's abstract value:
+
+| Value Type | Constraint | Result |
+|------------|------------|--------|
+| `unknown` | `x == 5` | `concrete_int(5)` |
+| `unknown` | `x < 10` | `int_range(MIN, 9)` |
+| `unknown` | `x is null` | `null_val` |
+| `unknown` | `x is non-null` | `non_null` |
+| `int_range(0,10)` | `x < 5` | `int_range(0,4)` |
+| `concrete_int(5)` | `x == 5` | `concrete_int(5)` |
+| `concrete_int(5)` | `x == 10` | `null` (contradiction) |
+| `null_val` | `x is non-null` | `null` (contradiction) |
+
+When a refinement returns `null`, the path is unsatisfiable and is pruned.
+
+#### Satisfiability Checking
+
+The `ConstraintManager.isSatisfiable` method performs two checks:
+
+1. **Environment compatibility**: Each constraint is checked against known variable values
+2. **Constraint consistency**: Pairs of constraints are checked for contradictions
+
+**Contradictory constraint pairs:**
+- `x == 5` AND `x == 6` (different equality values)
+- `x == 5` AND `x != 5` (equality vs inequality)
+- `x == null` AND `x != null` (null check contradiction)
+- `x < 5` AND `x > 10` (non-overlapping ranges)
 
 ### Usage Example
 
@@ -1052,7 +1174,6 @@ std.debug.print("Exploded graph has {d} nodes\n", .{graph.nodeCount()});
 
 The current implementation provides a foundation for more sophisticated analysis:
 
-- **Branch Constraints**: Fork state on conditions and prune infeasible paths
 - **Error Semantics**: Model error unions and try/catch propagation
 - **Interprocedural Analysis**: Inline function calls and build summaries
 - **Multiple Output Formats**: JSON, SARIF for CI/CD integration
