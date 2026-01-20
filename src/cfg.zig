@@ -471,28 +471,69 @@ pub const CfgBuilder = struct {
 
         const full_while = tree.fullWhile(@enumFromInt(ast_node)) orelse return .{ .last = null, .terminates = false };
 
-        const exit_node = try cfg.addNode(IrNode.init(.nop));
-        try cfg.addEdgeWithKind(header_node, exit_node, .loop_exit);
+        // Handle else expression if present - this executes when loop condition is false
+        const else_ast = if (full_while.ast.else_expr.unwrap()) |e| @intFromEnum(e) else 0;
+
+        var exit_node: u32 = undefined;
+        var else_terminates = false;
+        if (else_ast != 0) {
+            // Process else body - loop_exit goes to else body, then else body goes to merge
+            const else_range = try getSourceRange(source, else_ast);
+            const else_entry_node = try cfg.addNode(IrNode.initFull(.block, else_ast, else_range));
+            try cfg.addEdgeWithKind(header_node, else_entry_node, .loop_exit);
+
+            const else_result = try self.processNode(cfg, source, else_ast, else_entry_node);
+
+            if (else_result.terminates) {
+                else_terminates = true;
+                exit_node = else_entry_node;
+            } else {
+                exit_node = try cfg.addNode(IrNode.init(.nop));
+                if (else_result.last) |else_end| {
+                    try cfg.addEdge(else_end, exit_node);
+                } else {
+                    try cfg.addEdge(else_entry_node, exit_node);
+                }
+            }
+        } else {
+            exit_node = try cfg.addNode(IrNode.init(.nop));
+            try cfg.addEdgeWithKind(header_node, exit_node, .loop_exit);
+        }
 
         const body_ast = @intFromEnum(full_while.ast.then_expr);
         if (body_ast != 0) {
-            const body_node = try cfg.addNode(IrNode.initFull(.loop_body, body_ast, range));
+            const body_range = try getSourceRange(source, body_ast);
+            const body_node = try cfg.addNode(IrNode.initFull(.loop_body, body_ast, body_range));
             try cfg.addEdgeWithKind(header_node, body_node, .branch_true);
 
             const body_result = try self.processNode(cfg, source, body_ast, body_node);
 
+            // Handle continue expression if present - executes after body, before loop back
+            const cont_ast = if (full_while.ast.cont_expr.unwrap()) |c| @intFromEnum(c) else 0;
+
+            var loop_back_from: u32 = body_node;
             if (body_result.last) |body_end| {
                 if (!body_result.terminates) {
-                    try cfg.addEdgeWithKind(body_end, header_node, .loop_back);
+                    loop_back_from = body_end;
                 }
-            } else {
-                try cfg.addEdgeWithKind(body_node, header_node, .loop_back);
+            }
+
+            if (!body_result.terminates) {
+                if (cont_ast != 0) {
+                    // Process continue expression
+                    const cont_range = try getSourceRange(source, cont_ast);
+                    const cont_node = try cfg.addNode(IrNode.initFull(.expr, cont_ast, cont_range));
+                    try cfg.addEdge(loop_back_from, cont_node);
+                    try cfg.addEdgeWithKind(cont_node, header_node, .loop_back);
+                } else {
+                    try cfg.addEdgeWithKind(loop_back_from, header_node, .loop_back);
+                }
             }
         } else {
             try cfg.addEdgeWithKind(header_node, header_node, .loop_back);
         }
 
-        return .{ .last = exit_node, .terminates = false };
+        return .{ .last = exit_node, .terminates = else_terminates };
     }
 
     fn processFor(
@@ -510,12 +551,39 @@ pub const CfgBuilder = struct {
 
         const full_for = tree.fullFor(@enumFromInt(ast_node)) orelse return .{ .last = null, .terminates = false };
 
-        const exit_node = try cfg.addNode(IrNode.init(.nop));
-        try cfg.addEdgeWithKind(header_node, exit_node, .loop_exit);
+        // Handle else expression if present - this executes when loop completes normally (not via break)
+        const else_ast = if (full_for.ast.else_expr.unwrap()) |e| @intFromEnum(e) else 0;
+
+        var exit_node: u32 = undefined;
+        var else_terminates = false;
+        if (else_ast != 0) {
+            // Process else body - loop_exit goes to else body, then else body goes to merge
+            const else_range = try getSourceRange(source, else_ast);
+            const else_entry_node = try cfg.addNode(IrNode.initFull(.block, else_ast, else_range));
+            try cfg.addEdgeWithKind(header_node, else_entry_node, .loop_exit);
+
+            const else_result = try self.processNode(cfg, source, else_ast, else_entry_node);
+
+            if (else_result.terminates) {
+                else_terminates = true;
+                exit_node = else_entry_node;
+            } else {
+                exit_node = try cfg.addNode(IrNode.init(.nop));
+                if (else_result.last) |else_end| {
+                    try cfg.addEdge(else_end, exit_node);
+                } else {
+                    try cfg.addEdge(else_entry_node, exit_node);
+                }
+            }
+        } else {
+            exit_node = try cfg.addNode(IrNode.init(.nop));
+            try cfg.addEdgeWithKind(header_node, exit_node, .loop_exit);
+        }
 
         const body_ast = @intFromEnum(full_for.ast.then_expr);
         if (body_ast != 0) {
-            const body_node = try cfg.addNode(IrNode.initFull(.loop_body, body_ast, range));
+            const body_range = try getSourceRange(source, body_ast);
+            const body_node = try cfg.addNode(IrNode.initFull(.loop_body, body_ast, body_range));
             try cfg.addEdgeWithKind(header_node, body_node, .branch_true);
 
             const body_result = try self.processNode(cfg, source, body_ast, body_node);
@@ -531,7 +599,7 @@ pub const CfgBuilder = struct {
             try cfg.addEdgeWithKind(header_node, header_node, .loop_back);
         }
 
-        return .{ .last = exit_node, .terminates = false };
+        return .{ .last = exit_node, .terminates = else_terminates };
     }
 
     fn processDefer(
@@ -542,20 +610,14 @@ pub const CfgBuilder = struct {
         prev_node: u32,
     ) !ProcessResult {
         _ = self;
-        const tree = try source.ast();
         const range = try getSourceRange(source, ast_node);
-        const data = tree.nodes.items(.data);
 
+        // Defer bodies execute at scope exit, not at declaration time.
+        // We record the defer statement node (which references the body AST)
+        // but don't add the body to the main control flow. The body can be
+        // analyzed separately when needed for scope exit paths.
         const defer_node = try cfg.addNode(IrNode.initFull(.defer_stmt, ast_node, range));
-        try cfg.addEdgeWithKind(prev_node, defer_node, .defer_edge);
-
-        const body_ast = @intFromEnum(data[ast_node].node);
-        if (body_ast != 0) {
-            const body_range = try getSourceRange(source, body_ast);
-            const body_node = try cfg.addNode(IrNode.initFull(.block, body_ast, body_range));
-            try cfg.addEdge(defer_node, body_node);
-            return .{ .last = body_node, .terminates = false };
-        }
+        try cfg.addEdge(prev_node, defer_node);
 
         return .{ .last = defer_node, .terminates = false };
     }
@@ -568,20 +630,14 @@ pub const CfgBuilder = struct {
         prev_node: u32,
     ) !ProcessResult {
         _ = self;
-        const tree = try source.ast();
         const range = try getSourceRange(source, ast_node);
-        const data = tree.nodes.items(.data);
 
+        // Errdefer bodies execute at scope exit on error paths, not at declaration time.
+        // We record the errdefer statement node (which references the body AST)
+        // but don't add the body to the main control flow. The body can be
+        // analyzed separately when needed for error exit paths.
         const errdefer_node = try cfg.addNode(IrNode.initFull(.errdefer_stmt, ast_node, range));
-        try cfg.addEdgeWithKind(prev_node, errdefer_node, .errdefer_edge);
-
-        const body_ast = @intFromEnum(data[ast_node].opt_token_and_node[1]);
-        if (body_ast != 0) {
-            const body_range = try getSourceRange(source, body_ast);
-            const body_node = try cfg.addNode(IrNode.initFull(.block, body_ast, body_range));
-            try cfg.addEdge(errdefer_node, body_node);
-            return .{ .last = body_node, .terminates = false };
-        }
+        try cfg.addEdge(prev_node, errdefer_node);
 
         return .{ .last = errdefer_node, .terminates = false };
     }
@@ -1560,7 +1616,7 @@ test "CfgBuilder defer statement" {
     var cfg = maybe_cfg.?;
     defer cfg.deinit();
 
-    // Should have defer_stmt node
+    // Should have defer_stmt node (body is not added inline, executes at scope exit)
     var defer_count: usize = 0;
     for (cfg.nodes.items) |node| {
         if (node.ir_node.tag == .defer_stmt) defer_count += 1;
@@ -1568,13 +1624,15 @@ test "CfgBuilder defer statement" {
 
     try testing.expectEqual(@as(usize, 1), defer_count);
 
-    // Should have defer_edge
-    var defer_edge_count: usize = 0;
+    // Defer is part of normal control flow - body AST is referenced but not executed inline
+    var edges_to_defer: usize = 0;
     for (cfg.edges.items) |edge| {
-        if (edge.kind == .defer_edge) defer_edge_count += 1;
+        if (cfg.getNode(edge.to)) |node| {
+            if (node.ir_node.tag == .defer_stmt) edges_to_defer += 1;
+        }
     }
 
-    try testing.expectEqual(@as(usize, 1), defer_edge_count);
+    try testing.expectEqual(@as(usize, 1), edges_to_defer);
 }
 
 test "CfgBuilder errdefer statement" {
@@ -1605,7 +1663,7 @@ test "CfgBuilder errdefer statement" {
     var cfg = maybe_cfg.?;
     defer cfg.deinit();
 
-    // Should have errdefer_stmt node
+    // Should have errdefer_stmt node (body is not added inline, executes on error exit)
     var errdefer_count: usize = 0;
     for (cfg.nodes.items) |node| {
         if (node.ir_node.tag == .errdefer_stmt) errdefer_count += 1;
@@ -1613,13 +1671,15 @@ test "CfgBuilder errdefer statement" {
 
     try testing.expectEqual(@as(usize, 1), errdefer_count);
 
-    // Should have errdefer_edge
-    var errdefer_edge_count: usize = 0;
+    // Errdefer is part of normal control flow - body AST is referenced but not executed inline
+    var edges_to_errdefer: usize = 0;
     for (cfg.edges.items) |edge| {
-        if (edge.kind == .errdefer_edge) errdefer_edge_count += 1;
+        if (cfg.getNode(edge.to)) |node| {
+            if (node.ir_node.tag == .errdefer_stmt) edges_to_errdefer += 1;
+        }
     }
 
-    try testing.expectEqual(@as(usize, 1), errdefer_edge_count);
+    try testing.expectEqual(@as(usize, 1), edges_to_errdefer);
 }
 
 test "CfgBuilder multiple defers" {
