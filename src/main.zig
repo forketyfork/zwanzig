@@ -12,6 +12,7 @@ const file_discovery = @import("file_discovery.zig");
 test {
     _ = @import("ir.zig");
     _ = @import("cfg.zig");
+    _ = @import("checker.zig");
 }
 
 pub const CliArgs = struct {

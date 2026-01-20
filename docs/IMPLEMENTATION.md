@@ -55,9 +55,9 @@ The `Analyzer` (`src/analyzer.zig`) is the main engine that coordinates the anal
 
 The analyzer ensures that each file is parsed once and the resulting `Source` object is shared across all rules.
 
-#### Rule Interface
+#### Rule Interface (Legacy)
 
-The `Rule` interface (`src/rule.zig`) defines the contract that all analysis rules must implement:
+The `Rule` interface (`src/rule.zig`) defines the contract for legacy analysis rules:
 
 ```zig
 pub const Rule = struct {
@@ -75,6 +75,70 @@ Rules receive a `Source` pointer, allowing them to:
 - Parse and traverse the AST via `ast()`
 - Examine tokens via `tokens()`
 - Avoid redundant parsing when multiple rules access the same representations
+
+#### Checker Interface
+
+The `Checker` interface (`src/checker.zig`) is the new extensible API for implementing analysis passes. It provides a more flexible hook-based architecture that will support multiple analysis stages (AST, CFG, IR) as the analyzer evolves.
+
+```zig
+pub const Checker = struct {
+    name: []const u8,
+    default_severity: Severity = .err,
+    checkAstFn: ?*const fn (
+        source: *Source,
+        allocator: std.mem.Allocator,
+        diagnostics: *std.ArrayList(Diagnostic),
+    ) CheckerError!void = null,
+
+    pub fn checkAst(...) CheckerError!void { ... }
+    pub fn hasHooks(self: *const Checker) bool { ... }
+};
+```
+
+**Key Features:**
+- **Hook-based design**: Checkers implement specific hooks (currently `checkAstFn`) rather than a single check function
+- **Multiple analysis stages**: Future versions will add CFG and IR hooks for control-flow and dataflow analysis
+- **Backward compatibility**: The `CheckerManagerWithRules` supports both new checkers and legacy rules
+
+#### CheckerManager
+
+The `CheckerManager` (`src/checker.zig`) owns checker registration and coordinates running checks:
+
+```zig
+pub const CheckerManager = struct {
+    pub fn init(allocator: std.mem.Allocator) CheckerManager { ... }
+    pub fn deinit(self: *CheckerManager) void { ... }
+    pub fn registerChecker(self: *CheckerManager, checker: *const Checker) !void { ... }
+    pub fn runAstChecks(self: *const CheckerManager, source: *Source, diagnostics: *std.ArrayList(Diagnostic), filter_fn: ?*const fn ([]const u8) bool) CheckerError!void { ... }
+};
+```
+
+#### CheckerManagerWithRules
+
+For backward compatibility, `CheckerManagerWithRules` supports both new-style checkers and legacy rules:
+
+```zig
+pub const CheckerManagerWithRules = struct {
+    pub fn registerChecker(self: *CheckerManagerWithRules, checker: *const Checker) !void { ... }
+    pub fn registerRule(self: *CheckerManagerWithRules, rule: *const Rule) !void { ... }
+    pub fn runAstChecks(...) CheckerError!void { ... }
+};
+```
+
+**Usage:**
+```zig
+var manager = CheckerManagerWithRules.init(allocator);
+defer manager.deinit();
+
+// Register a new-style checker
+try manager.registerChecker(&MyChecker.checker);
+
+// Register a legacy rule
+try manager.registerRule(&MyRule.rule);
+
+// Run all checks
+try manager.runAstChecks(&source, &diagnostics, null);
+```
 
 #### Diagnostics
 
@@ -107,9 +171,64 @@ This design ensures:
 - No redundant parsing when multiple rules need the AST
 - Proper memory management via RAII pattern
 
-## Adding New Rules
+## Adding New Checkers
 
-To add a new rule:
+The preferred way to implement analysis passes is using the new `Checker` interface.
+
+### Creating a Checker
+
+1. Create a file in `src/checkers/` (e.g., `my_checker.zig`)
+2. Define a checker constant of type `Checker`
+3. Implement the hook functions you need
+
+Example:
+```zig
+const std = @import("std");
+const checker_mod = @import("../checker.zig");
+const Checker = checker_mod.Checker;
+const CheckerError = checker_mod.CheckerError;
+const Diagnostic = checker_mod.Diagnostic;
+const Source = @import("../source.zig").Source;
+
+pub const MyChecker = struct {
+    pub const checker: Checker = .{
+        .name = "my-checker",
+        .default_severity = .warning,
+        .checkAstFn = checkAst,
+    };
+
+    fn checkAst(
+        src: *Source,
+        allocator: std.mem.Allocator,
+        diagnostics: *std.ArrayList(Diagnostic),
+    ) CheckerError!void {
+        const tree = try src.ast();
+
+        // Analyze the AST...
+
+        // Report issues
+        try diagnostics.append(allocator, Diagnostic.initAtLocation(
+            src.getFilePath(),
+            "my-checker",
+            .warning,
+            "Issue description",
+            line,
+            column,
+        ));
+    }
+};
+```
+
+4. Register the checker in `main.zig`:
+```zig
+try analyzer.registerChecker(&MyChecker.checker);
+```
+
+### Legacy Rules (Backward Compatibility)
+
+Existing rules using the `Rule` interface continue to work. They are run through the `CheckerManagerWithRules` adapter.
+
+To add a legacy rule:
 
 1. Create a file in `src/rules/` (e.g., `my_rule.zig`)
 2. Define a struct with a `rule` constant of type `Rule`

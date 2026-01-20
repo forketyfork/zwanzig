@@ -3,32 +3,42 @@ const Rule = @import("rule.zig").Rule;
 const Diagnostic = @import("rule.zig").Diagnostic;
 const Source = @import("source.zig").Source;
 const RuleFilter = @import("rule_filter.zig").RuleFilter;
+const checker_mod = @import("checker.zig");
+const Checker = checker_mod.Checker;
+const CheckerManagerWithRules = checker_mod.CheckerManagerWithRules;
 
 pub const Analyzer = struct {
     allocator: std.mem.Allocator,
-    rules: std.ArrayList(*const Rule),
+    checker_manager: CheckerManagerWithRules,
     diagnostics: std.ArrayList(Diagnostic),
     rule_filter: RuleFilter,
 
     pub fn init(allocator: std.mem.Allocator) Analyzer {
         return Analyzer{
             .allocator = allocator,
-            .rules = .empty,
+            .checker_manager = CheckerManagerWithRules.init(allocator),
             .diagnostics = .empty,
             .rule_filter = .none,
         };
     }
 
     pub fn deinit(self: *Analyzer) void {
-        self.rules.deinit(self.allocator);
+        self.checker_manager.deinit();
         for (self.diagnostics.items) |diag| {
             self.allocator.free(@constCast(diag.message));
         }
         self.diagnostics.deinit(self.allocator);
     }
 
+    /// Register a legacy Rule with the analyzer.
+    /// The rule will be wrapped and run through the CheckerManager.
     pub fn registerRule(self: *Analyzer, rule: *const Rule) !void {
-        try self.rules.append(self.allocator, rule);
+        try self.checker_manager.registerRule(rule);
+    }
+
+    /// Register a new-style Checker with the analyzer.
+    pub fn registerChecker(self: *Analyzer, chkr: *const Checker) !void {
+        try self.checker_manager.registerChecker(chkr);
     }
 
     pub fn setRuleFilter(self: *Analyzer, filter: RuleFilter) void {
@@ -74,9 +84,22 @@ pub const Analyzer = struct {
         var source = Source.init(self.allocator, file_path, content);
         defer source.deinit();
 
-        for (self.rules.items) |rule| {
+        try self.runChecksOnSource(&source);
+    }
+
+    /// Internal method to run checks on a source with the analyzer's filter.
+    fn runChecksOnSource(self: *Analyzer, source: *Source) !void {
+        // Run native checkers
+        for (self.checker_manager.checkers.items) |chkr| {
+            if (self.isRuleEnabled(chkr.name)) {
+                try chkr.checkAst(source, self.allocator, &self.diagnostics);
+            }
+        }
+
+        // Run adapted rules
+        for (self.checker_manager.adapted_rules.items) |rule| {
             if (self.isRuleEnabled(rule.name)) {
-                try rule.check(&source, self.allocator, &self.diagnostics);
+                try rule.check(source, self.allocator, &self.diagnostics);
             }
         }
     }
@@ -97,5 +120,10 @@ pub const Analyzer = struct {
 
     pub fn hasDiagnostics(self: *Analyzer) bool {
         return self.diagnostics.items.len > 0;
+    }
+
+    /// Get the total number of registered checkers and rules.
+    pub fn totalCheckerCount(self: *const Analyzer) usize {
+        return self.checker_manager.totalCount();
     }
 };
