@@ -341,3 +341,23 @@ test "mixed top-level fields and declarations" {
 
     try testing.expectEqual(@as(usize, 0), diagnostics.items.len);
 }
+
+test "file with aligned top-level field - lowercase name - violation" {
+    const testing = std.testing;
+    const allocator = testing.allocator;
+
+    var diagnostics: std.ArrayList(Diagnostic) = .empty;
+    defer diagnostics.deinit(allocator);
+    defer for (diagnostics.items) |diag| allocator.free(@constCast(diag.message));
+
+    const code: [:0]const u8 =
+        \\field: u8 align(4),
+    ;
+    var source = Source.init(allocator, "myaligned.zig", code);
+    defer source.deinit();
+    try FileAsStructRule.rule.check(&source, allocator, &diagnostics);
+
+    try testing.expectEqual(@as(usize, 1), diagnostics.items.len);
+
+    freeDiagnosticMessages(&diagnostics, allocator);
+}
