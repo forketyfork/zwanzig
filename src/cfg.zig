@@ -20,6 +20,14 @@ pub const EdgeKind = enum {
     branch_true,
     /// Branch taken when condition is false
     branch_false,
+    /// Loop back-edge (from loop body back to condition)
+    loop_back,
+    /// Loop exit edge (when condition is false)
+    loop_exit,
+    /// Defer execution edge (before return/exit)
+    defer_edge,
+    /// Errdefer execution edge (on error path)
+    errdefer_edge,
 };
 
 /// An edge in the control-flow graph.
@@ -214,6 +222,10 @@ pub const CfgBuilder = struct {
             .assign => try self.processAssign(cfg, source, ast_node, prev_node),
             .call, .call_one, .call_one_comma, .builtin_call, .builtin_call_comma, .builtin_call_two, .builtin_call_two_comma => try self.processCall(cfg, source, ast_node, prev_node),
             .@"if", .if_simple => try self.processIf(cfg, source, ast_node, prev_node),
+            .while_simple, .while_cont, .@"while" => try self.processWhile(cfg, source, ast_node, prev_node),
+            .for_simple, .@"for" => try self.processFor(cfg, source, ast_node, prev_node),
+            .@"defer" => try self.processDefer(cfg, source, ast_node, prev_node),
+            .@"errdefer" => try self.processErrdefer(cfg, source, ast_node, prev_node),
             else => try self.processGenericExpr(cfg, source, ast_node, prev_node),
         };
     }
@@ -442,6 +454,136 @@ pub const CfgBuilder = struct {
         const expr_node = try cfg.addNode(IrNode.initFull(.expr, ast_node, range));
         try cfg.addEdge(prev_node, expr_node);
         return .{ .last = expr_node, .terminates = false };
+    }
+
+    fn processWhile(
+        self: *CfgBuilder,
+        cfg: *Cfg,
+        source: *Source,
+        ast_node: u32,
+        prev_node: u32,
+    ) !ProcessResult {
+        const tree = try source.ast();
+        const range = try getSourceRange(source, ast_node);
+
+        const header_node = try cfg.addNode(IrNode.initFull(.loop_header, ast_node, range));
+        try cfg.addEdge(prev_node, header_node);
+
+        const full_while = tree.fullWhile(@enumFromInt(ast_node)) orelse return .{ .last = null, .terminates = false };
+
+        const exit_node = try cfg.addNode(IrNode.init(.nop));
+        try cfg.addEdgeWithKind(header_node, exit_node, .loop_exit);
+
+        const body_ast = @intFromEnum(full_while.ast.then_expr);
+        if (body_ast != 0) {
+            const body_node = try cfg.addNode(IrNode.initFull(.loop_body, body_ast, range));
+            try cfg.addEdgeWithKind(header_node, body_node, .branch_true);
+
+            const body_result = try self.processNode(cfg, source, body_ast, body_node);
+
+            if (body_result.last) |body_end| {
+                if (!body_result.terminates) {
+                    try cfg.addEdgeWithKind(body_end, header_node, .loop_back);
+                }
+            } else {
+                try cfg.addEdgeWithKind(body_node, header_node, .loop_back);
+            }
+        } else {
+            try cfg.addEdgeWithKind(header_node, header_node, .loop_back);
+        }
+
+        return .{ .last = exit_node, .terminates = false };
+    }
+
+    fn processFor(
+        self: *CfgBuilder,
+        cfg: *Cfg,
+        source: *Source,
+        ast_node: u32,
+        prev_node: u32,
+    ) !ProcessResult {
+        const tree = try source.ast();
+        const range = try getSourceRange(source, ast_node);
+
+        const header_node = try cfg.addNode(IrNode.initFull(.loop_header, ast_node, range));
+        try cfg.addEdge(prev_node, header_node);
+
+        const full_for = tree.fullFor(@enumFromInt(ast_node)) orelse return .{ .last = null, .terminates = false };
+
+        const exit_node = try cfg.addNode(IrNode.init(.nop));
+        try cfg.addEdgeWithKind(header_node, exit_node, .loop_exit);
+
+        const body_ast = @intFromEnum(full_for.ast.then_expr);
+        if (body_ast != 0) {
+            const body_node = try cfg.addNode(IrNode.initFull(.loop_body, body_ast, range));
+            try cfg.addEdgeWithKind(header_node, body_node, .branch_true);
+
+            const body_result = try self.processNode(cfg, source, body_ast, body_node);
+
+            if (body_result.last) |body_end| {
+                if (!body_result.terminates) {
+                    try cfg.addEdgeWithKind(body_end, header_node, .loop_back);
+                }
+            } else {
+                try cfg.addEdgeWithKind(body_node, header_node, .loop_back);
+            }
+        } else {
+            try cfg.addEdgeWithKind(header_node, header_node, .loop_back);
+        }
+
+        return .{ .last = exit_node, .terminates = false };
+    }
+
+    fn processDefer(
+        self: *CfgBuilder,
+        cfg: *Cfg,
+        source: *Source,
+        ast_node: u32,
+        prev_node: u32,
+    ) !ProcessResult {
+        _ = self;
+        const tree = try source.ast();
+        const range = try getSourceRange(source, ast_node);
+        const data = tree.nodes.items(.data);
+
+        const defer_node = try cfg.addNode(IrNode.initFull(.defer_stmt, ast_node, range));
+        try cfg.addEdgeWithKind(prev_node, defer_node, .defer_edge);
+
+        const body_ast = @intFromEnum(data[ast_node].node);
+        if (body_ast != 0) {
+            const body_range = try getSourceRange(source, body_ast);
+            const body_node = try cfg.addNode(IrNode.initFull(.block, body_ast, body_range));
+            try cfg.addEdge(defer_node, body_node);
+            return .{ .last = body_node, .terminates = false };
+        }
+
+        return .{ .last = defer_node, .terminates = false };
+    }
+
+    fn processErrdefer(
+        self: *CfgBuilder,
+        cfg: *Cfg,
+        source: *Source,
+        ast_node: u32,
+        prev_node: u32,
+    ) !ProcessResult {
+        _ = self;
+        const tree = try source.ast();
+        const range = try getSourceRange(source, ast_node);
+        const data = tree.nodes.items(.data);
+
+        const errdefer_node = try cfg.addNode(IrNode.initFull(.errdefer_stmt, ast_node, range));
+        try cfg.addEdgeWithKind(prev_node, errdefer_node, .errdefer_edge);
+
+        const body_ast = @intFromEnum(data[ast_node].opt_token_and_node[1]);
+        if (body_ast != 0) {
+            const body_range = try getSourceRange(source, body_ast);
+            const body_node = try cfg.addNode(IrNode.initFull(.block, body_ast, body_range));
+            try cfg.addEdge(errdefer_node, body_node);
+            return .{ .last = body_node, .terminates = false };
+        }
+
+        return .{ .last = errdefer_node, .terminates = false };
     }
 };
 
@@ -1242,4 +1384,369 @@ test "CfgBuilder trailing statements unreachable after terminating if-else" {
     try testing.expectEqual(@as(usize, 0), var_decl_count);
     // Only the 2 returns inside if/else should be present
     try testing.expectEqual(@as(usize, 2), ret_count);
+}
+
+test "CfgBuilder simple while loop" {
+    const testing = std.testing;
+    const allocator = testing.allocator;
+
+    const code: [:0]const u8 =
+        \\fn foo() void {
+        \\    var x: i32 = 0;
+        \\    while (x < 10) {
+        \\        x += 1;
+        \\    }
+        \\}
+    ;
+
+    var source = Source.init(allocator, "test.zig", code);
+    defer source.deinit();
+
+    var builder = CfgBuilder.init(allocator);
+    const tree = try source.ast();
+    const root_decls = tree.rootDecls();
+
+    const fn_node = @intFromEnum(root_decls[0]);
+    const maybe_cfg = try builder.buildFromFn(&source, fn_node);
+
+    try testing.expect(maybe_cfg != null);
+
+    var cfg = maybe_cfg.?;
+    defer cfg.deinit();
+
+    // Should have loop_header and loop_body nodes
+    var loop_header_count: usize = 0;
+    var loop_body_count: usize = 0;
+    for (cfg.nodes.items) |node| {
+        if (node.ir_node.tag == .loop_header) loop_header_count += 1;
+        if (node.ir_node.tag == .loop_body) loop_body_count += 1;
+    }
+
+    try testing.expectEqual(@as(usize, 1), loop_header_count);
+    try testing.expectEqual(@as(usize, 1), loop_body_count);
+
+    // Should have loop_back and loop_exit edges
+    var loop_back_count: usize = 0;
+    var loop_exit_count: usize = 0;
+    for (cfg.edges.items) |edge| {
+        if (edge.kind == .loop_back) loop_back_count += 1;
+        if (edge.kind == .loop_exit) loop_exit_count += 1;
+    }
+
+    try testing.expectEqual(@as(usize, 1), loop_back_count);
+    try testing.expectEqual(@as(usize, 1), loop_exit_count);
+}
+
+test "CfgBuilder while loop with return" {
+    const testing = std.testing;
+    const allocator = testing.allocator;
+
+    const code: [:0]const u8 =
+        \\fn foo() i32 {
+        \\    var x: i32 = 0;
+        \\    while (x < 10) {
+        \\        if (x == 5) {
+        \\            return x;
+        \\        }
+        \\        x += 1;
+        \\    }
+        \\    return x;
+        \\}
+    ;
+
+    var source = Source.init(allocator, "test.zig", code);
+    defer source.deinit();
+
+    var builder = CfgBuilder.init(allocator);
+    const tree = try source.ast();
+    const root_decls = tree.rootDecls();
+
+    const fn_node = @intFromEnum(root_decls[0]);
+    const maybe_cfg = try builder.buildFromFn(&source, fn_node);
+
+    try testing.expect(maybe_cfg != null);
+
+    var cfg = maybe_cfg.?;
+    defer cfg.deinit();
+
+    // Should have branch and return nodes inside the loop
+    var branch_count: usize = 0;
+    var ret_count: usize = 0;
+    for (cfg.nodes.items) |node| {
+        if (node.ir_node.tag == .branch) branch_count += 1;
+        if (node.ir_node.tag == .ret) ret_count += 1;
+    }
+
+    try testing.expectEqual(@as(usize, 1), branch_count);
+    try testing.expectEqual(@as(usize, 2), ret_count);
+}
+
+test "CfgBuilder simple for loop" {
+    const testing = std.testing;
+    const allocator = testing.allocator;
+
+    const code: [:0]const u8 =
+        \\fn foo() void {
+        \\    for (0..10) |_| {
+        \\        const x = 1;
+        \\        _ = x;
+        \\    }
+        \\}
+    ;
+
+    var source = Source.init(allocator, "test.zig", code);
+    defer source.deinit();
+
+    var builder = CfgBuilder.init(allocator);
+    const tree = try source.ast();
+    const root_decls = tree.rootDecls();
+
+    const fn_node = @intFromEnum(root_decls[0]);
+    const maybe_cfg = try builder.buildFromFn(&source, fn_node);
+
+    try testing.expect(maybe_cfg != null);
+
+    var cfg = maybe_cfg.?;
+    defer cfg.deinit();
+
+    // Should have loop_header and loop_body nodes
+    var loop_header_count: usize = 0;
+    var loop_body_count: usize = 0;
+    for (cfg.nodes.items) |node| {
+        if (node.ir_node.tag == .loop_header) loop_header_count += 1;
+        if (node.ir_node.tag == .loop_body) loop_body_count += 1;
+    }
+
+    try testing.expectEqual(@as(usize, 1), loop_header_count);
+    try testing.expectEqual(@as(usize, 1), loop_body_count);
+
+    // Should have loop_back and loop_exit edges
+    var loop_back_count: usize = 0;
+    var loop_exit_count: usize = 0;
+    for (cfg.edges.items) |edge| {
+        if (edge.kind == .loop_back) loop_back_count += 1;
+        if (edge.kind == .loop_exit) loop_exit_count += 1;
+    }
+
+    try testing.expectEqual(@as(usize, 1), loop_back_count);
+    try testing.expectEqual(@as(usize, 1), loop_exit_count);
+}
+
+test "CfgBuilder defer statement" {
+    const testing = std.testing;
+    const allocator = testing.allocator;
+
+    const code: [:0]const u8 =
+        \\fn foo() void {
+        \\    defer {
+        \\        const x = 1;
+        \\        _ = x;
+        \\    }
+        \\}
+    ;
+
+    var source = Source.init(allocator, "test.zig", code);
+    defer source.deinit();
+
+    var builder = CfgBuilder.init(allocator);
+    const tree = try source.ast();
+    const root_decls = tree.rootDecls();
+
+    const fn_node = @intFromEnum(root_decls[0]);
+    const maybe_cfg = try builder.buildFromFn(&source, fn_node);
+
+    try testing.expect(maybe_cfg != null);
+
+    var cfg = maybe_cfg.?;
+    defer cfg.deinit();
+
+    // Should have defer_stmt node
+    var defer_count: usize = 0;
+    for (cfg.nodes.items) |node| {
+        if (node.ir_node.tag == .defer_stmt) defer_count += 1;
+    }
+
+    try testing.expectEqual(@as(usize, 1), defer_count);
+
+    // Should have defer_edge
+    var defer_edge_count: usize = 0;
+    for (cfg.edges.items) |edge| {
+        if (edge.kind == .defer_edge) defer_edge_count += 1;
+    }
+
+    try testing.expectEqual(@as(usize, 1), defer_edge_count);
+}
+
+test "CfgBuilder errdefer statement" {
+    const testing = std.testing;
+    const allocator = testing.allocator;
+
+    const code: [:0]const u8 =
+        \\fn foo() !void {
+        \\    errdefer {
+        \\        const x = 1;
+        \\        _ = x;
+        \\    }
+        \\}
+    ;
+
+    var source = Source.init(allocator, "test.zig", code);
+    defer source.deinit();
+
+    var builder = CfgBuilder.init(allocator);
+    const tree = try source.ast();
+    const root_decls = tree.rootDecls();
+
+    const fn_node = @intFromEnum(root_decls[0]);
+    const maybe_cfg = try builder.buildFromFn(&source, fn_node);
+
+    try testing.expect(maybe_cfg != null);
+
+    var cfg = maybe_cfg.?;
+    defer cfg.deinit();
+
+    // Should have errdefer_stmt node
+    var errdefer_count: usize = 0;
+    for (cfg.nodes.items) |node| {
+        if (node.ir_node.tag == .errdefer_stmt) errdefer_count += 1;
+    }
+
+    try testing.expectEqual(@as(usize, 1), errdefer_count);
+
+    // Should have errdefer_edge
+    var errdefer_edge_count: usize = 0;
+    for (cfg.edges.items) |edge| {
+        if (edge.kind == .errdefer_edge) errdefer_edge_count += 1;
+    }
+
+    try testing.expectEqual(@as(usize, 1), errdefer_edge_count);
+}
+
+test "CfgBuilder multiple defers" {
+    const testing = std.testing;
+    const allocator = testing.allocator;
+
+    const code: [:0]const u8 =
+        \\fn foo() void {
+        \\    defer { const a = 1; _ = a; }
+        \\    defer { const b = 2; _ = b; }
+        \\    errdefer { const c = 3; _ = c; }
+        \\}
+    ;
+
+    var source = Source.init(allocator, "test.zig", code);
+    defer source.deinit();
+
+    var builder = CfgBuilder.init(allocator);
+    const tree = try source.ast();
+    const root_decls = tree.rootDecls();
+
+    const fn_node = @intFromEnum(root_decls[0]);
+    const maybe_cfg = try builder.buildFromFn(&source, fn_node);
+
+    try testing.expect(maybe_cfg != null);
+
+    var cfg = maybe_cfg.?;
+    defer cfg.deinit();
+
+    // Should have 2 defer_stmt and 1 errdefer_stmt nodes
+    var defer_count: usize = 0;
+    var errdefer_count: usize = 0;
+    for (cfg.nodes.items) |node| {
+        if (node.ir_node.tag == .defer_stmt) defer_count += 1;
+        if (node.ir_node.tag == .errdefer_stmt) errdefer_count += 1;
+    }
+
+    try testing.expectEqual(@as(usize, 2), defer_count);
+    try testing.expectEqual(@as(usize, 1), errdefer_count);
+}
+
+test "CfgBuilder loop with defer inside" {
+    const testing = std.testing;
+    const allocator = testing.allocator;
+
+    const code: [:0]const u8 =
+        \\fn foo() void {
+        \\    while (true) {
+        \\        defer { const x = 1; _ = x; }
+        \\    }
+        \\}
+    ;
+
+    var source = Source.init(allocator, "test.zig", code);
+    defer source.deinit();
+
+    var builder = CfgBuilder.init(allocator);
+    const tree = try source.ast();
+    const root_decls = tree.rootDecls();
+
+    const fn_node = @intFromEnum(root_decls[0]);
+    const maybe_cfg = try builder.buildFromFn(&source, fn_node);
+
+    try testing.expect(maybe_cfg != null);
+
+    var cfg = maybe_cfg.?;
+    defer cfg.deinit();
+
+    // Should have both loop and defer nodes
+    var loop_header_count: usize = 0;
+    var defer_count: usize = 0;
+    for (cfg.nodes.items) |node| {
+        if (node.ir_node.tag == .loop_header) loop_header_count += 1;
+        if (node.ir_node.tag == .defer_stmt) defer_count += 1;
+    }
+
+    try testing.expectEqual(@as(usize, 1), loop_header_count);
+    try testing.expectEqual(@as(usize, 1), defer_count);
+}
+
+test "CfgBuilder while loop back-edge targets header" {
+    const testing = std.testing;
+    const allocator = testing.allocator;
+
+    const code: [:0]const u8 =
+        \\fn foo() void {
+        \\    while (true) {
+        \\        const x = 1;
+        \\        _ = x;
+        \\    }
+        \\}
+    ;
+
+    var source = Source.init(allocator, "test.zig", code);
+    defer source.deinit();
+
+    var builder = CfgBuilder.init(allocator);
+    const tree = try source.ast();
+    const root_decls = tree.rootDecls();
+
+    const fn_node = @intFromEnum(root_decls[0]);
+    const maybe_cfg = try builder.buildFromFn(&source, fn_node);
+
+    try testing.expect(maybe_cfg != null);
+
+    var cfg = maybe_cfg.?;
+    defer cfg.deinit();
+
+    // Find the loop header node
+    var header_idx: ?u32 = null;
+    for (cfg.nodes.items, 0..) |node, i| {
+        if (node.ir_node.tag == .loop_header) {
+            header_idx = @intCast(i);
+            break;
+        }
+    }
+
+    try testing.expect(header_idx != null);
+
+    // The loop_back edge should point to the header
+    var back_edge_targets_header = false;
+    for (cfg.edges.items) |edge| {
+        if (edge.kind == .loop_back and edge.to == header_idx.?) {
+            back_edge_targets_header = true;
+            break;
+        }
+    }
+
+    try testing.expect(back_edge_targets_header);
 }

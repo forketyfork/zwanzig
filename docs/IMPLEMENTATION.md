@@ -426,6 +426,10 @@ The IR (`src/ir.zig`) defines the following node types:
 | `expr` | Generic expression |
 | `nop` | No-op placeholder for control flow merge points |
 | `branch` | Branch condition evaluation (if/else) |
+| `loop_header` | While/for loop header (condition evaluation) |
+| `loop_body` | Loop body entry point |
+| `defer_stmt` | Defer statement body |
+| `errdefer_stmt` | Errdefer statement body |
 
 ### IR Node Structure
 
@@ -462,6 +466,10 @@ A CFG consists of:
 | `jump` | Unconditional jump (e.g., from return to exit) |
 | `branch_true` | Edge taken when branch condition is true |
 | `branch_false` | Edge taken when branch condition is false |
+| `loop_back` | Loop back-edge (from loop body back to condition) |
+| `loop_exit` | Loop exit edge (when condition is false) |
+| `defer_edge` | Defer execution edge (before return/exit) |
+| `errdefer_edge` | Errdefer execution edge (on error path) |
 
 ### CFG Builder
 
@@ -474,6 +482,10 @@ The `CfgBuilder` constructs CFGs from Zig AST function declarations. Currently s
 - Assignment expressions
 - Function calls
 - If/else branching (with merge points)
+- While loops (with back-edges)
+- For loops (with back-edges)
+- Defer statements
+- Errdefer statements
 
 **Usage:**
 ```zig
@@ -543,12 +555,62 @@ fn_entry
   fn_exit
 ```
 
+### Loop CFG
+
+The CFG builder supports `while` and `for` loops with proper back-edges for cyclic control flow:
+
+1. **Loop Header**: A `loop_header` node is created to represent the loop condition evaluation point
+2. **Loop Body**: A `loop_body` node marks the entry into the loop body
+3. **Back-Edges**: After the loop body completes (without terminating), a `loop_back` edge connects back to the header
+4. **Exit Edge**: A `loop_exit` edge from the header leads to the code after the loop (when the condition is false)
+5. **Termination Handling**: If the loop body terminates (e.g., with return), no back-edge is created from that path
+
+**Example CFG for while loop:**
+```
+fn_entry
+    │
+    ▼
+loop_header ◄────┐
+    │            │
+    │ true       │ loop_back
+    ▼            │
+loop_body ───────┘
+    │
+    │ loop_exit
+    ▼
+   nop
+    │
+    ▼
+  fn_exit
+```
+
+### Defer/Errdefer CFG
+
+The CFG builder models `defer` and `errdefer` statements to represent their execution order:
+
+1. **Defer Nodes**: A `defer_stmt` node is created for each `defer` statement, connected via `defer_edge`
+2. **Errdefer Nodes**: An `errdefer_stmt` node is created for each `errdefer` statement, connected via `errdefer_edge`
+3. **Body Representation**: The defer body is represented as a `block` node following the defer/errdefer node
+4. **Execution Order**: Defers are recorded in program order; actual execution happens in reverse order at function exit (to be modeled in future analysis passes)
+
+**Example CFG with defers:**
+```
+fn_entry
+    │
+    ▼
+defer_stmt ──► block (defer body)
+    │
+    ▼
+errdefer_stmt ──► block (errdefer body)
+    │
+    ▼
+  fn_exit
+```
+
 ## Future Enhancements
 
 The current implementation provides a foundation for more sophisticated analysis:
 
-- **Loop CFG**: Support for while/for loops with back-edges
-- **Defer/Errdefer**: Proper modeling of cleanup paths
 - **Try/Catch Edges**: Error flow representation
 - **Semantic Analysis**: Integration with typed IR for deeper checks
 - **Multiple Output Formats**: JSON, SARIF for CI/CD integration

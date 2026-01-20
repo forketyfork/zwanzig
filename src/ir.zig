@@ -26,6 +26,14 @@ pub const IrTag = enum {
     nop,
     /// Branch condition evaluation (if/else)
     branch,
+    /// While loop header (condition evaluation)
+    loop_header,
+    /// Loop body entry point
+    loop_body,
+    /// Defer statement body
+    defer_stmt,
+    /// Errdefer statement body
+    errdefer_stmt,
 };
 
 /// A single IR node representing a statement or expression.
