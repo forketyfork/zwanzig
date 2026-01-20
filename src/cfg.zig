@@ -661,18 +661,19 @@ pub const CfgBuilder = struct {
         // Assign node data: lhs and rhs
         const data = tree.nodes.items(.data);
         const assign_data = data[ast_node].node_and_node;
+        const lhs_idx = @intFromEnum(assign_data[0]);
         const rhs_idx = @intFromEnum(assign_data[1]);
         const tags = tree.nodes.items(.tag);
         if (rhs_idx < tags.len) {
             const rhs_tag = tags[rhs_idx];
             if (rhs_tag == .@"try") {
-                return try self.processAssignWithTry(cfg, source, ast_node, rhs_idx, prev_node, range);
+                return try self.processAssignWithTry(cfg, source, ast_node, lhs_idx, rhs_idx, prev_node, range);
             } else if (rhs_tag == .@"catch") {
-                return try self.processAssignWithCatch(cfg, source, ast_node, rhs_idx, prev_node, range);
+                return try self.processAssignWithCatch(cfg, source, ast_node, lhs_idx, rhs_idx, prev_node, range);
             }
         }
 
-        const assign_node = try cfg.addNode(IrNode.initFull(.assign, ast_node, range));
+        const assign_node = try cfg.addNode(IrNode.initAssign(ast_node, lhs_idx, rhs_idx, range));
         try cfg.addEdge(prev_node, assign_node);
         return .{ .last = assign_node, .terminates = false };
     }
@@ -682,6 +683,7 @@ pub const CfgBuilder = struct {
         cfg: *Cfg,
         source: *Source,
         assign_node_ast: u32,
+        lhs_node: u32,
         try_expr_node: u32,
         prev_node: u32,
         assign_range: SourceRange,
@@ -699,7 +701,7 @@ pub const CfgBuilder = struct {
         try cfg.addEdgeWithKind(try_node, cfg.exit, .try_error);
 
         // Success path: continue to assignment
-        const assign_node = try cfg.addNode(IrNode.initFull(.assign, assign_node_ast, assign_range));
+        const assign_node = try cfg.addNode(IrNode.initAssign(assign_node_ast, lhs_node, try_expr_node, assign_range));
         try cfg.addEdgeWithKind(try_node, assign_node, .try_success);
 
         return .{ .last = assign_node, .terminates = false };
@@ -710,6 +712,7 @@ pub const CfgBuilder = struct {
         cfg: *Cfg,
         source: *Source,
         assign_node_ast: u32,
+        lhs_node: u32,
         catch_expr_node: u32,
         prev_node: u32,
         assign_range: SourceRange,
@@ -727,7 +730,7 @@ pub const CfgBuilder = struct {
         const handler_ast = @intFromEnum(catch_data[1]);
 
         // Create the assign node
-        const assign_node = try cfg.addNode(IrNode.initFull(.assign, assign_node_ast, assign_range));
+        const assign_node = try cfg.addNode(IrNode.initAssign(assign_node_ast, lhs_node, catch_expr_node, assign_range));
 
         // Success path: no error, value is unwrapped, goes to assign
         try cfg.addEdgeWithKind(catch_node, assign_node, .catch_success);

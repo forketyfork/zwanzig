@@ -224,28 +224,19 @@ pub const Environment = struct {
     }
 
     pub fn computeHash(self: *const Environment) u64 {
-        var hasher = std.hash.Wyhash.init(0);
+        // Use XOR-based hashing which is order-independent and requires no allocation
+        var combined_hash: u64 = 0;
 
-        // Sort keys for deterministic hashing
-        var keys: std.ArrayList(u32) = .empty;
-        defer keys.deinit(self.allocator);
-
-        var iter = self.bindings.keyIterator();
-        while (iter.next()) |key| {
-            keys.append(self.allocator, key.*) catch return 0;
+        var iter = self.bindings.iterator();
+        while (iter.next()) |entry| {
+            var hasher = std.hash.Wyhash.init(0);
+            hasher.update(std.mem.asBytes(entry.key_ptr));
+            const val_hash = entry.value_ptr.*.hash();
+            hasher.update(std.mem.asBytes(&val_hash));
+            combined_hash ^= hasher.final();
         }
 
-        std.mem.sort(u32, keys.items, {}, std.sort.asc(u32));
-
-        for (keys.items) |key| {
-            hasher.update(std.mem.asBytes(&key));
-            if (self.bindings.get(key)) |val| {
-                const val_hash = val.hash();
-                hasher.update(std.mem.asBytes(&val_hash));
-            }
-        }
-
-        return hasher.final();
+        return combined_hash;
     }
 };
 
@@ -567,8 +558,11 @@ pub const AnalysisEngine = struct {
                 }
             },
             .assign => {
-                if (ir_node.ast_node) |ast_node| {
-                    try new_state.setVar(ast_node, .unknown);
+                // For assignments, use the LHS identifier node as the key
+                // operand_node contains the LHS, operand2_node contains the RHS
+                if (ir_node.operand_node) |lhs_node| {
+                    // For now, set to unknown. Future enhancement: evaluate RHS literals
+                    try new_state.setVar(lhs_node, .unknown);
                 }
             },
             else => {},
@@ -868,6 +862,11 @@ test "AbstractValue merge operations" {
     const non_null: AbstractValue = .non_null;
     const merged_nulls = null_val.merge(non_null);
     try testing.expect(merged_nulls.isUnknown());
+
+    // Verify that merging two null_vals returns null_val (idempotent)
+    const null_val2: AbstractValue = .null_val;
+    const merged_same_nulls = null_val.merge(null_val2);
+    try testing.expect(merged_same_nulls.isNull());
 }
 
 test "Environment operations" {

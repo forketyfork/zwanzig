@@ -50,12 +50,18 @@ pub const IrNode = struct {
     ast_node: ?u32,
     /// Source range for diagnostic reporting
     source_range: ?SourceRange,
+    /// Additional operand node for tags that need it (e.g., LHS of assign, RHS value)
+    operand_node: ?u32,
+    /// Second operand for tags that need two (e.g., RHS of assign)
+    operand2_node: ?u32,
 
     pub fn init(tag: IrTag) IrNode {
         return .{
             .tag = tag,
             .ast_node = null,
             .source_range = null,
+            .operand_node = null,
+            .operand2_node = null,
         };
     }
 
@@ -64,6 +70,8 @@ pub const IrNode = struct {
             .tag = tag,
             .ast_node = ast_node,
             .source_range = null,
+            .operand_node = null,
+            .operand2_node = null,
         };
     }
 
@@ -72,6 +80,8 @@ pub const IrNode = struct {
             .tag = tag,
             .ast_node = null,
             .source_range = range,
+            .operand_node = null,
+            .operand2_node = null,
         };
     }
 
@@ -80,6 +90,18 @@ pub const IrNode = struct {
             .tag = tag,
             .ast_node = ast_node,
             .source_range = range,
+            .operand_node = null,
+            .operand2_node = null,
+        };
+    }
+
+    pub fn initAssign(ast_node: u32, lhs_node: u32, rhs_node: u32, range: SourceRange) IrNode {
+        return .{
+            .tag = .assign,
+            .ast_node = ast_node,
+            .source_range = range,
+            .operand_node = lhs_node,
+            .operand2_node = rhs_node,
         };
     }
 };
