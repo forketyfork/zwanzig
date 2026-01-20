@@ -89,6 +89,56 @@ The architecture follows these key principles:
    - Efficient string scanning
    - Parallel rule execution (future enhancement)
 
+## Error Semantics
+
+Zwanzig models error flow in the ProgramState to support error-aware analysis. This enables detection of error handling issues and tracking of error propagation through try/catch constructs.
+
+### Error State Model
+
+The `ErrorState` enum represents the error handling state of a program path:
+
+- **normal**: Normal execution path (no error)
+- **error_active**: Error path (error has been produced but not yet handled)
+- **error_handled**: Error has been caught and is being handled
+
+### Error Flow Tracking
+
+Error state transitions occur based on CFG edge kinds:
+
+1. **try_error edge**: Transitions to `error_active` state
+   - Represents the error path from a try expression
+   - State propagates as an active error until caught
+
+2. **try_success edge**: Continues on normal path
+   - Represents successful execution through try
+   - No state change
+
+3. **catch_error edge**: Transitions to `error_handled` state
+   - Entering a catch block to handle the error
+   - Indicates error is being actively handled
+
+4. **catch_success edge**: Transitions back to `normal` state
+   - Exiting catch block after handling
+   - Returns to normal execution
+
+5. **errdefer_edge**: Only executes on error paths
+   - Errdefer blocks are skipped on normal paths
+   - The engine prunes errdefer paths when state is not `error_active`
+
+### Integration with ProgramState
+
+The error state is:
+- Included in state equality checks for proper deduplication
+- Hashed for exploded graph node identity
+- Preserved through state cloning
+- Used to prune infeasible paths (e.g., errdefer on success path)
+
+This model enables checkers to:
+- Detect empty catch blocks (Step 22)
+- Identify swallowed errors without proper handling (Step 22)
+- Track error propagation through call chains
+- Verify proper error handling in complex control flow
+
 ## Implementation Details
 
 ### Empty Catch Block Rule

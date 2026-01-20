@@ -708,14 +708,26 @@ pub const ProgramPoint = struct {
     }
 };
 
+/// Error state of the program: whether we are on an error path or success path.
+pub const ErrorState = enum {
+    /// Normal execution path (no error)
+    normal,
+    /// Error path (error has been produced but not yet handled)
+    error_active,
+    /// Error has been caught and handled
+    error_handled,
+};
+
 /// Abstract program state for path-sensitive analysis.
 /// Stores the environment mapping variables to abstract values,
-/// plus path constraints from branch conditions.
+/// plus path constraints from branch conditions, and error state.
 pub const ProgramState = struct {
     /// Environment mapping variables to abstract values
     env: Environment,
     /// Constraint manager for path conditions
     constraints: ConstraintManager,
+    /// Error state tracking (normal, error_active, error_handled)
+    error_state: ErrorState,
     /// Cached hash for efficient deduplication
     cached_hash: ?u64,
 
@@ -723,6 +735,7 @@ pub const ProgramState = struct {
         return .{
             .env = Environment.init(allocator),
             .constraints = ConstraintManager.init(allocator),
+            .error_state = .normal,
             .cached_hash = null,
         };
     }
@@ -733,7 +746,9 @@ pub const ProgramState = struct {
     }
 
     pub fn eql(self: *const ProgramState, other: *const ProgramState) bool {
-        return self.env.eql(&other.env) and self.constraints.eql(&other.constraints);
+        return self.env.eql(&other.env) and
+            self.constraints.eql(&other.constraints) and
+            self.error_state == other.error_state;
     }
 
     pub fn computeHash(self: *ProgramState) u64 {
@@ -743,6 +758,7 @@ pub const ProgramState = struct {
         hasher.update(std.mem.asBytes(&env_hash));
         const constraints_hash = self.constraints.computeHash();
         hasher.update(std.mem.asBytes(&constraints_hash));
+        hasher.update(std.mem.asBytes(&self.error_state));
         const h = hasher.final();
         self.cached_hash = h;
         return h;
@@ -753,6 +769,7 @@ pub const ProgramState = struct {
         return .{
             .env = try self.env.clone(),
             .constraints = try self.constraints.clone(),
+            .error_state = self.error_state,
             .cached_hash = self.cached_hash,
         };
     }
@@ -800,6 +817,27 @@ pub const ProgramState = struct {
 
     pub fn constraintCount(self: *const ProgramState) usize {
         return self.constraints.size();
+    }
+
+    /// Set the error state of this program state.
+    pub fn setErrorState(self: *ProgramState, error_state: ErrorState) void {
+        self.error_state = error_state;
+        self.invalidateCache();
+    }
+
+    /// Get the current error state.
+    pub fn getErrorState(self: *const ProgramState) ErrorState {
+        return self.error_state;
+    }
+
+    /// Check if we are on an error path.
+    pub fn isErrorPath(self: *const ProgramState) bool {
+        return self.error_state == .error_active;
+    }
+
+    /// Check if we are on a normal (non-error) path.
+    pub fn isNormalPath(self: *const ProgramState) bool {
+        return self.error_state == .normal;
     }
 };
 
@@ -1019,6 +1057,32 @@ pub const AnalysisEngine = struct {
                     if (edge.from == point.node_index) {
                         const succ_point = ProgramPoint.initPre(edge.to);
                         var succ_state = try state_copy.clone(self.allocator);
+
+                        // Handle error state transitions based on edge kind
+                        switch (edge.kind) {
+                            .try_error => {
+                                succ_state.setErrorState(.error_active);
+                            },
+                            .try_success => {
+                                // Continue on normal path
+                            },
+                            .catch_error => {
+                                // Entering catch block - error is being handled
+                                succ_state.setErrorState(.error_handled);
+                            },
+                            .catch_success => {
+                                // Exiting catch block - return to normal
+                                succ_state.setErrorState(.normal);
+                            },
+                            .errdefer_edge => {
+                                // Errdefer only executes on error path
+                                if (!succ_state.isErrorPath()) {
+                                    succ_state.deinit();
+                                    continue;
+                                }
+                            },
+                            else => {},
+                        }
 
                         // Determine the constraint to apply based on the edge kind
                         var constraint_to_apply: ?Constraint = null;
@@ -1847,4 +1911,231 @@ test "isValueCompatibleWithNullCheck" {
     try std.testing.expect(isValueCompatibleWithNullCheck(.non_null, false));
     try std.testing.expect(isValueCompatibleWithNullCheck(.unknown, true));
     try std.testing.expect(isValueCompatibleWithNullCheck(.unknown, false));
+}
+
+test "ErrorState enum values" {
+    const normal: ErrorState = .normal;
+    const error_active: ErrorState = .error_active;
+    const error_handled: ErrorState = .error_handled;
+
+    try std.testing.expect(normal == .normal);
+    try std.testing.expect(error_active == .error_active);
+    try std.testing.expect(error_handled == .error_handled);
+    try std.testing.expect(normal != error_active);
+    try std.testing.expect(error_active != error_handled);
+}
+
+test "ProgramState error state operations" {
+    const allocator = std.testing.allocator;
+
+    var state = ProgramState.init(allocator);
+    defer state.deinit();
+
+    try std.testing.expectEqual(ErrorState.normal, state.getErrorState());
+    try std.testing.expect(state.isNormalPath());
+    try std.testing.expect(!state.isErrorPath());
+
+    state.setErrorState(.error_active);
+    try std.testing.expectEqual(ErrorState.error_active, state.getErrorState());
+    try std.testing.expect(state.isErrorPath());
+    try std.testing.expect(!state.isNormalPath());
+
+    state.setErrorState(.error_handled);
+    try std.testing.expectEqual(ErrorState.error_handled, state.getErrorState());
+    try std.testing.expect(!state.isErrorPath());
+    try std.testing.expect(!state.isNormalPath());
+
+    state.setErrorState(.normal);
+    try std.testing.expect(state.isNormalPath());
+}
+
+test "ProgramState clone preserves error state" {
+    const allocator = std.testing.allocator;
+
+    var state1 = ProgramState.init(allocator);
+    defer state1.deinit();
+
+    state1.setErrorState(.error_active);
+
+    var state2 = try state1.clone(allocator);
+    defer state2.deinit();
+
+    try std.testing.expectEqual(state1.getErrorState(), state2.getErrorState());
+    try std.testing.expect(state1.eql(&state2));
+}
+
+test "ProgramState equality includes error state" {
+    const allocator = std.testing.allocator;
+
+    var state1 = ProgramState.init(allocator);
+    defer state1.deinit();
+
+    var state2 = ProgramState.init(allocator);
+    defer state2.deinit();
+
+    try std.testing.expect(state1.eql(&state2));
+
+    state2.setErrorState(.error_active);
+    try std.testing.expect(!state1.eql(&state2));
+
+    state1.setErrorState(.error_active);
+    try std.testing.expect(state1.eql(&state2));
+}
+
+test "ProgramState hash includes error state" {
+    const allocator = std.testing.allocator;
+
+    var state1 = ProgramState.init(allocator);
+    defer state1.deinit();
+
+    var state2 = ProgramState.init(allocator);
+    defer state2.deinit();
+
+    const hash1_initial = state1.computeHash();
+    const hash2_initial = state2.computeHash();
+    try std.testing.expectEqual(hash1_initial, hash2_initial);
+
+    state2.setErrorState(.error_active);
+    const hash2_after = state2.computeHash();
+    try std.testing.expect(hash1_initial != hash2_after);
+}
+
+test "AnalysisEngine try edge sets error state" {
+    const allocator = std.testing.allocator;
+
+    var cfg = Cfg.init(allocator);
+    defer cfg.deinit();
+
+    const entry = try cfg.addNode(cfg_mod.IrNode.init(.fn_entry));
+    const try_node = try cfg.addNode(cfg_mod.IrNode.init(.try_expr));
+    const success_node = try cfg.addNode(cfg_mod.IrNode.init(.block));
+    const error_node = try cfg.addNode(cfg_mod.IrNode.init(.block));
+    const exit = try cfg.addNode(cfg_mod.IrNode.init(.fn_exit));
+
+    cfg.entry = entry;
+    cfg.exit = exit;
+
+    try cfg.addEdge(entry, try_node);
+    try cfg.addEdgeWithKind(try_node, success_node, .try_success);
+    try cfg.addEdgeWithKind(try_node, error_node, .try_error);
+    try cfg.addEdge(success_node, exit);
+    try cfg.addEdge(error_node, exit);
+
+    var engine = AnalysisEngine.init(allocator, &cfg);
+    defer engine.deinit();
+
+    try engine.run();
+
+    const graph = engine.getGraph();
+
+    var found_error_state = false;
+    var found_normal_state = false;
+
+    for (graph.nodes.items) |node| {
+        if (node.point.node_index == error_node and node.point.kind == .pre) {
+            if (node.state.isErrorPath()) {
+                found_error_state = true;
+            }
+        }
+        if (node.point.node_index == success_node and node.point.kind == .pre) {
+            if (node.state.isNormalPath()) {
+                found_normal_state = true;
+            }
+        }
+    }
+
+    try std.testing.expect(found_error_state);
+    try std.testing.expect(found_normal_state);
+}
+
+test "AnalysisEngine catch edge handles error" {
+    const allocator = std.testing.allocator;
+
+    var cfg = Cfg.init(allocator);
+    defer cfg.deinit();
+
+    const entry = try cfg.addNode(cfg_mod.IrNode.init(.fn_entry));
+    const try_node = try cfg.addNode(cfg_mod.IrNode.init(.try_expr));
+    const catch_node = try cfg.addNode(cfg_mod.IrNode.init(.catch_expr));
+    const after_catch = try cfg.addNode(cfg_mod.IrNode.init(.block));
+    const exit = try cfg.addNode(cfg_mod.IrNode.init(.fn_exit));
+
+    cfg.entry = entry;
+    cfg.exit = exit;
+
+    try cfg.addEdge(entry, try_node);
+    try cfg.addEdgeWithKind(try_node, catch_node, .try_error);
+    try cfg.addEdgeWithKind(catch_node, after_catch, .catch_error);
+    try cfg.addEdgeWithKind(after_catch, exit, .catch_success);
+
+    var engine = AnalysisEngine.init(allocator, &cfg);
+    defer engine.deinit();
+
+    try engine.run();
+
+    const graph = engine.getGraph();
+
+    var found_handled_state = false;
+    var found_normal_after_catch = false;
+
+    for (graph.nodes.items) |node| {
+        if (node.point.node_index == after_catch and node.point.kind == .pre) {
+            if (node.state.getErrorState() == .error_handled) {
+                found_handled_state = true;
+            }
+        }
+        if (node.point.node_index == exit and node.point.kind == .pre) {
+            if (node.state.isNormalPath()) {
+                found_normal_after_catch = true;
+            }
+        }
+    }
+
+    try std.testing.expect(found_handled_state);
+    try std.testing.expect(found_normal_after_catch);
+}
+
+test "AnalysisEngine errdefer only on error path" {
+    const allocator = std.testing.allocator;
+
+    var cfg = Cfg.init(allocator);
+    defer cfg.deinit();
+
+    const entry = try cfg.addNode(cfg_mod.IrNode.init(.fn_entry));
+    const try_node = try cfg.addNode(cfg_mod.IrNode.init(.try_expr));
+    const success_node = try cfg.addNode(cfg_mod.IrNode.init(.block));
+    const errdefer_node = try cfg.addNode(cfg_mod.IrNode.init(.errdefer_stmt));
+    const exit = try cfg.addNode(cfg_mod.IrNode.init(.fn_exit));
+
+    cfg.entry = entry;
+    cfg.exit = exit;
+
+    try cfg.addEdge(entry, try_node);
+    try cfg.addEdgeWithKind(try_node, success_node, .try_success);
+    try cfg.addEdgeWithKind(try_node, errdefer_node, .try_error);
+    try cfg.addEdgeWithKind(success_node, errdefer_node, .errdefer_edge);
+    try cfg.addEdge(errdefer_node, exit);
+
+    var engine = AnalysisEngine.init(allocator, &cfg);
+    defer engine.deinit();
+
+    try engine.run();
+
+    const graph = engine.getGraph();
+
+    var errdefer_reached_from_error = false;
+    var errdefer_reached_from_success = false;
+
+    for (graph.nodes.items) |node| {
+        if (node.point.node_index == errdefer_node and node.point.kind == .pre) {
+            if (node.state.isErrorPath()) {
+                errdefer_reached_from_error = true;
+            } else if (node.state.isNormalPath()) {
+                errdefer_reached_from_success = true;
+            }
+        }
+    }
+
+    try std.testing.expect(errdefer_reached_from_error);
+    try std.testing.expect(!errdefer_reached_from_success);
 }
