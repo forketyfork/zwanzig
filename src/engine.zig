@@ -377,9 +377,17 @@ fn refineValueWithIntConstraint(value: AbstractValue, op: CompareOp, constraint_
             return switch (op) {
                 .eq => .{ .concrete_int = constraint_val },
                 .ne => .unknown, // Still unknown, just not equal to one value
-                .lt => .{ .int_range = AbstractValue.IntRange.init(std.math.minInt(i64), constraint_val - 1) },
+                .lt => blk: {
+                    // x < minInt is unsatisfiable
+                    if (constraint_val == std.math.minInt(i64)) return null;
+                    break :blk .{ .int_range = AbstractValue.IntRange.init(std.math.minInt(i64), constraint_val - 1) };
+                },
                 .le => .{ .int_range = AbstractValue.IntRange.init(std.math.minInt(i64), constraint_val) },
-                .gt => .{ .int_range = AbstractValue.IntRange.init(constraint_val + 1, std.math.maxInt(i64)) },
+                .gt => blk: {
+                    // x > maxInt is unsatisfiable
+                    if (constraint_val == std.math.maxInt(i64)) return null;
+                    break :blk .{ .int_range = AbstractValue.IntRange.init(constraint_val + 1, std.math.maxInt(i64)) };
+                },
                 .ge => .{ .int_range = AbstractValue.IntRange.init(constraint_val, std.math.maxInt(i64)) },
             };
         },
@@ -399,6 +407,8 @@ fn refineValueWithIntConstraint(value: AbstractValue, op: CompareOp, constraint_
                 .eq => if (r.contains(constraint_val)) AbstractValue.IntRange.single(constraint_val) else return null,
                 .ne => r, // Can't easily narrow a range for !=
                 .lt => blk: {
+                    // x < minInt is unsatisfiable
+                    if (constraint_val == std.math.minInt(i64)) return null;
                     if (r.min >= constraint_val) return null;
                     break :blk AbstractValue.IntRange.init(r.min, @min(r.max, constraint_val - 1));
                 },
@@ -407,6 +417,8 @@ fn refineValueWithIntConstraint(value: AbstractValue, op: CompareOp, constraint_
                     break :blk AbstractValue.IntRange.init(r.min, @min(r.max, constraint_val));
                 },
                 .gt => blk: {
+                    // x > maxInt is unsatisfiable
+                    if (constraint_val == std.math.maxInt(i64)) return null;
                     if (r.max <= constraint_val) return null;
                     break :blk AbstractValue.IntRange.init(@max(r.min, constraint_val + 1), r.max);
                 },
@@ -1743,15 +1755,15 @@ test "AnalysisEngine branch constraint pruning" {
     const allocator = std.testing.allocator;
 
     // Create a CFG with a branch where one path should be pruned:
-    // entry -> var_decl (x = 5) -> branch (x == 10?) -> then/else -> merge -> exit
+    // entry -> assign (x = 5) -> branch (x == 10?) -> then/else -> merge -> exit
     //
-    // Since x = 5, the branch "x == 10" should prune the then-branch
+    // We'll manually set x = 5 in the initial state, then the branch "x == 10"
+    // should prune the then-branch since 5 != 10
 
     var cfg = Cfg.init(allocator);
     defer cfg.deinit();
 
     const entry = try cfg.addNode(cfg_mod.IrNode.init(.fn_entry));
-    const var_decl = try cfg.addNode(cfg_mod.IrNode.initWithAst(.var_decl, 100)); // x
 
     // Create a branch node with condition info embedded
     // operand_node = variable being tested (100)
@@ -1769,8 +1781,7 @@ test "AnalysisEngine branch constraint pruning" {
     cfg.entry = entry;
     cfg.exit = exit;
 
-    try cfg.addEdge(entry, var_decl);
-    try cfg.addEdge(var_decl, branch);
+    try cfg.addEdge(entry, branch);
     try cfg.addEdgeWithKind(branch, then_node, .branch_true);
     try cfg.addEdgeWithKind(branch, else_node, .branch_false);
     try cfg.addEdge(then_node, merge);
@@ -1780,13 +1791,22 @@ test "AnalysisEngine branch constraint pruning" {
     var engine = AnalysisEngine.init(allocator, &cfg);
     defer engine.deinit();
 
+    // Manually set the initial state: x = 5
+    // This simulates the effect of an assignment before the branch
+    const entry_point = ProgramPoint.initPre(entry);
+    var initial_state = ProgramState.init(allocator);
+    try initial_state.setVar(100, .{ .concrete_int = 5 });
+    const result = try engine.graph.getOrCreateNode(entry_point, &initial_state);
+    try engine.worklist.append(allocator, .{ .node_index = result.index, .edge_kind = .normal, .pending_constraint = null });
+    if (!result.is_new) {
+        initial_state.deinit();
+    }
+
     try engine.run();
 
-    // The engine should have explored both branches since we start with unknown value
-    // (var_decl sets value to unknown, not concrete 5)
-    // Both paths should be explored
-    const graph = engine.getGraph();
-    try std.testing.expect(graph.nodeCount() > 0);
+    // With x = 5 and branch condition x == 10, the then-branch (x == 10) should be pruned
+    // We should see exactly 1 pruned path
+    try std.testing.expect(engine.pruned_path_count == 1);
 }
 
 test "areIntConstraintsContradictory" {
