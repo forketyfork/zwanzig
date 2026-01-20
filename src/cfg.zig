@@ -28,6 +28,14 @@ pub const EdgeKind = enum {
     defer_edge,
     /// Errdefer execution edge (on error path)
     errdefer_edge,
+    /// Error path from try expression (propagates to caller)
+    try_error,
+    /// Success path from try expression (continues normally)
+    try_success,
+    /// Error path into catch block
+    catch_error,
+    /// Success path from catch (after handling error)
+    catch_success,
 };
 
 /// An edge in the control-flow graph.
@@ -226,6 +234,8 @@ pub const CfgBuilder = struct {
             .for_simple, .@"for" => try self.processFor(cfg, source, ast_node, prev_node),
             .@"defer" => try self.processDefer(cfg, source, ast_node, prev_node),
             .@"errdefer" => try self.processErrdefer(cfg, source, ast_node, prev_node),
+            .@"try" => try self.processTry(cfg, source, ast_node, prev_node),
+            .@"catch" => try self.processCatch(cfg, source, ast_node, prev_node),
             else => try self.processGenericExpr(cfg, source, ast_node, prev_node),
         };
     }
@@ -392,10 +402,106 @@ pub const CfgBuilder = struct {
         ast_node: u32,
         prev_node: u32,
     ) !ProcessResult {
-        _ = self;
+        const tree = try source.ast();
         const range = try getSourceRange(source, ast_node);
+
+        // Check if the return expression contains a try or catch expression
+        // Return node data: opt_node format - a single optional return expression
+        const data = tree.nodes.items(.data);
+        const ret_expr_opt = data[ast_node].opt_node;
+        if (ret_expr_opt.unwrap()) |ret_expr_node| {
+            const ret_expr_idx = @intFromEnum(ret_expr_node);
+            const tags = tree.nodes.items(.tag);
+            if (ret_expr_idx < tags.len) {
+                const ret_expr_tag = tags[ret_expr_idx];
+                if (ret_expr_tag == .@"try") {
+                    return try self.processReturnWithTry(cfg, source, ast_node, ret_expr_idx, prev_node, range);
+                } else if (ret_expr_tag == .@"catch") {
+                    return try self.processReturnWithCatch(cfg, source, ast_node, ret_expr_idx, prev_node, range);
+                }
+            }
+        }
+
         const ret_node = try cfg.addNode(IrNode.initFull(.ret, ast_node, range));
         try cfg.addEdge(prev_node, ret_node);
+        try cfg.addEdgeWithKind(ret_node, cfg.exit, .jump);
+        return .{ .last = ret_node, .terminates = true };
+    }
+
+    fn processReturnWithTry(
+        self: *CfgBuilder,
+        cfg: *Cfg,
+        source: *Source,
+        ret_node_ast: u32,
+        try_expr_node: u32,
+        prev_node: u32,
+        ret_range: SourceRange,
+    ) !ProcessResult {
+        _ = self;
+        const try_range = try getSourceRange(source, try_expr_node);
+
+        // Return with try expression: return try bar();
+        //   prev -> try_node -> ret_node -> exit (success path)
+        //   try_node --[try_error]--> fn_exit (error path)
+        const try_node = try cfg.addNode(IrNode.initFull(.try_expr, try_expr_node, try_range));
+        try cfg.addEdge(prev_node, try_node);
+
+        // Error path: propagate to function exit
+        try cfg.addEdgeWithKind(try_node, cfg.exit, .try_error);
+
+        // Success path: continue to return statement
+        const ret_node = try cfg.addNode(IrNode.initFull(.ret, ret_node_ast, ret_range));
+        try cfg.addEdgeWithKind(try_node, ret_node, .try_success);
+        try cfg.addEdgeWithKind(ret_node, cfg.exit, .jump);
+
+        return .{ .last = ret_node, .terminates = true };
+    }
+
+    fn processReturnWithCatch(
+        self: *CfgBuilder,
+        cfg: *Cfg,
+        source: *Source,
+        ret_node_ast: u32,
+        catch_expr_node: u32,
+        prev_node: u32,
+        ret_range: SourceRange,
+    ) !ProcessResult {
+        const tree = try source.ast();
+        const catch_range = try getSourceRange(source, catch_expr_node);
+        const data = tree.nodes.items(.data);
+
+        // Return with catch expression
+        const catch_node = try cfg.addNode(IrNode.initFull(.catch_expr, catch_expr_node, catch_range));
+        try cfg.addEdge(prev_node, catch_node);
+
+        // Get the handler from catch node
+        const catch_data = data[catch_expr_node].node_and_node;
+        const handler_ast = @intFromEnum(catch_data[1]);
+
+        // Create the return node
+        const ret_node = try cfg.addNode(IrNode.initFull(.ret, ret_node_ast, ret_range));
+
+        // Success path: no error, value is unwrapped, goes to return
+        try cfg.addEdgeWithKind(catch_node, ret_node, .catch_success);
+
+        // Error path: process handler if present, then go to return
+        if (handler_ast != 0) {
+            const handler_result = try self.processNode(cfg, source, handler_ast, catch_node);
+
+            if (handler_result.last) |handler_end| {
+                // Handler produced nodes - mark edge from catch to handler as error edge
+                self.markEdgeFromCatchError(cfg, catch_node);
+                if (!handler_result.terminates) {
+                    try cfg.addEdge(handler_end, ret_node);
+                }
+            } else {
+                // Empty handler (e.g., `catch {}`) - add direct catch_error edge
+                try cfg.addEdgeWithKind(catch_node, ret_node, .catch_error);
+            }
+        } else {
+            try cfg.addEdgeWithKind(catch_node, ret_node, .catch_error);
+        }
+
         try cfg.addEdgeWithKind(ret_node, cfg.exit, .jump);
         return .{ .last = ret_node, .terminates = true };
     }
@@ -407,10 +513,110 @@ pub const CfgBuilder = struct {
         ast_node: u32,
         prev_node: u32,
     ) !ProcessResult {
-        _ = self;
+        const tree = try source.ast();
         const range = try getSourceRange(source, ast_node);
+
+        // Check if the initializer contains a try or catch expression
+        const full_var = tree.fullVarDecl(@enumFromInt(ast_node));
+        if (full_var) |vd| {
+            if (vd.ast.init_node.unwrap()) |init_node| {
+                const init_idx = @intFromEnum(init_node);
+                const tags = tree.nodes.items(.tag);
+                if (init_idx < tags.len) {
+                    const init_tag = tags[init_idx];
+                    if (init_tag == .@"try") {
+                        return try self.processVarDeclWithTry(cfg, source, ast_node, init_idx, prev_node, range);
+                    } else if (init_tag == .@"catch") {
+                        return try self.processVarDeclWithCatch(cfg, source, ast_node, init_idx, prev_node, range);
+                    }
+                }
+            }
+        }
+
+        // Simple var decl without try/catch in initializer
         const decl_node = try cfg.addNode(IrNode.initFull(.var_decl, ast_node, range));
         try cfg.addEdge(prev_node, decl_node);
+        return .{ .last = decl_node, .terminates = false };
+    }
+
+    fn processVarDeclWithTry(
+        self: *CfgBuilder,
+        cfg: *Cfg,
+        source: *Source,
+        var_decl_node: u32,
+        try_init_node: u32,
+        prev_node: u32,
+        var_range: SourceRange,
+    ) !ProcessResult {
+        _ = self;
+        const try_range = try getSourceRange(source, try_init_node);
+
+        // Try expression in var decl initializer:
+        //   prev -> try_node -> var_decl_node (success path)
+        //   try_node --[try_error]--> fn_exit
+        const try_node = try cfg.addNode(IrNode.initFull(.try_expr, try_init_node, try_range));
+        try cfg.addEdge(prev_node, try_node);
+
+        // Error path: propagate to function exit
+        try cfg.addEdgeWithKind(try_node, cfg.exit, .try_error);
+
+        // Success path: continue to var decl (try_success edge)
+        const decl_node = try cfg.addNode(IrNode.initFull(.var_decl, var_decl_node, var_range));
+        try cfg.addEdgeWithKind(try_node, decl_node, .try_success);
+
+        return .{ .last = decl_node, .terminates = false };
+    }
+
+    fn processVarDeclWithCatch(
+        self: *CfgBuilder,
+        cfg: *Cfg,
+        source: *Source,
+        var_decl_node: u32,
+        catch_init_node: u32,
+        prev_node: u32,
+        var_range: SourceRange,
+    ) !ProcessResult {
+        const tree = try source.ast();
+        const catch_range = try getSourceRange(source, catch_init_node);
+        const data = tree.nodes.items(.data);
+
+        // Catch expression in var decl initializer:
+        //   prev -> catch_node -> var_decl_node
+        //   catch_node has success and error paths that both lead to var_decl
+        const catch_node = try cfg.addNode(IrNode.initFull(.catch_expr, catch_init_node, catch_range));
+        try cfg.addEdge(prev_node, catch_node);
+
+        // Get the RHS (catch handler body) from the catch node
+        // For catch nodes, data is node_and_node where [0] is LHS (operand), [1] is RHS (handler)
+        const catch_data = data[catch_init_node].node_and_node;
+        const handler_ast = @intFromEnum(catch_data[1]);
+
+        // Create the var decl node that both paths lead to
+        const decl_node = try cfg.addNode(IrNode.initFull(.var_decl, var_decl_node, var_range));
+
+        // Success path: no error, value is unwrapped, goes to var decl
+        try cfg.addEdgeWithKind(catch_node, decl_node, .catch_success);
+
+        // Error path: process handler if present, then go to var decl
+        if (handler_ast != 0) {
+            const handler_result = try self.processNode(cfg, source, handler_ast, catch_node);
+
+            if (handler_result.last) |handler_end| {
+                // Handler produced nodes - mark edge from catch to handler as error edge
+                self.markEdgeFromCatchError(cfg, catch_node);
+                if (!handler_result.terminates) {
+                    try cfg.addEdge(handler_end, decl_node);
+                }
+            } else {
+                // Empty handler (e.g., `catch {}`) - add direct catch_error edge
+                try cfg.addEdgeWithKind(catch_node, decl_node, .catch_error);
+            }
+        } else {
+            // No handler body (catch default value like `catch 0`)
+            // Error edge goes directly to var decl
+            try cfg.addEdgeWithKind(catch_node, decl_node, .catch_error);
+        }
+
         return .{ .last = decl_node, .terminates = false };
     }
 
@@ -421,10 +627,102 @@ pub const CfgBuilder = struct {
         ast_node: u32,
         prev_node: u32,
     ) !ProcessResult {
-        _ = self;
+        const tree = try source.ast();
         const range = try getSourceRange(source, ast_node);
+
+        // Check if the RHS contains a try or catch expression
+        // Assign node data: lhs and rhs
+        const data = tree.nodes.items(.data);
+        const assign_data = data[ast_node].node_and_node;
+        const rhs_idx = @intFromEnum(assign_data[1]);
+        const tags = tree.nodes.items(.tag);
+        if (rhs_idx < tags.len) {
+            const rhs_tag = tags[rhs_idx];
+            if (rhs_tag == .@"try") {
+                return try self.processAssignWithTry(cfg, source, ast_node, rhs_idx, prev_node, range);
+            } else if (rhs_tag == .@"catch") {
+                return try self.processAssignWithCatch(cfg, source, ast_node, rhs_idx, prev_node, range);
+            }
+        }
+
         const assign_node = try cfg.addNode(IrNode.initFull(.assign, ast_node, range));
         try cfg.addEdge(prev_node, assign_node);
+        return .{ .last = assign_node, .terminates = false };
+    }
+
+    fn processAssignWithTry(
+        self: *CfgBuilder,
+        cfg: *Cfg,
+        source: *Source,
+        assign_node_ast: u32,
+        try_expr_node: u32,
+        prev_node: u32,
+        assign_range: SourceRange,
+    ) !ProcessResult {
+        _ = self;
+        const try_range = try getSourceRange(source, try_expr_node);
+
+        // Assignment with try expression: x = try bar();
+        //   prev -> try_node -> assign_node (success path)
+        //   try_node --[try_error]--> fn_exit (error path)
+        const try_node = try cfg.addNode(IrNode.initFull(.try_expr, try_expr_node, try_range));
+        try cfg.addEdge(prev_node, try_node);
+
+        // Error path: propagate to function exit
+        try cfg.addEdgeWithKind(try_node, cfg.exit, .try_error);
+
+        // Success path: continue to assignment
+        const assign_node = try cfg.addNode(IrNode.initFull(.assign, assign_node_ast, assign_range));
+        try cfg.addEdgeWithKind(try_node, assign_node, .try_success);
+
+        return .{ .last = assign_node, .terminates = false };
+    }
+
+    fn processAssignWithCatch(
+        self: *CfgBuilder,
+        cfg: *Cfg,
+        source: *Source,
+        assign_node_ast: u32,
+        catch_expr_node: u32,
+        prev_node: u32,
+        assign_range: SourceRange,
+    ) !ProcessResult {
+        const tree = try source.ast();
+        const catch_range = try getSourceRange(source, catch_expr_node);
+        const data = tree.nodes.items(.data);
+
+        // Assignment with catch expression
+        const catch_node = try cfg.addNode(IrNode.initFull(.catch_expr, catch_expr_node, catch_range));
+        try cfg.addEdge(prev_node, catch_node);
+
+        // Get the handler from catch node
+        const catch_data = data[catch_expr_node].node_and_node;
+        const handler_ast = @intFromEnum(catch_data[1]);
+
+        // Create the assign node
+        const assign_node = try cfg.addNode(IrNode.initFull(.assign, assign_node_ast, assign_range));
+
+        // Success path: no error, value is unwrapped, goes to assign
+        try cfg.addEdgeWithKind(catch_node, assign_node, .catch_success);
+
+        // Error path: process handler if present, then go to assign
+        if (handler_ast != 0) {
+            const handler_result = try self.processNode(cfg, source, handler_ast, catch_node);
+
+            if (handler_result.last) |handler_end| {
+                // Handler produced nodes - mark edge from catch to handler as error edge
+                self.markEdgeFromCatchError(cfg, catch_node);
+                if (!handler_result.terminates) {
+                    try cfg.addEdge(handler_end, assign_node);
+                }
+            } else {
+                // Empty handler (e.g., `catch {}`) - add direct catch_error edge
+                try cfg.addEdgeWithKind(catch_node, assign_node, .catch_error);
+            }
+        } else {
+            try cfg.addEdgeWithKind(catch_node, assign_node, .catch_error);
+        }
+
         return .{ .last = assign_node, .terminates = false };
     }
 
@@ -640,6 +938,103 @@ pub const CfgBuilder = struct {
         try cfg.addEdge(prev_node, errdefer_node);
 
         return .{ .last = errdefer_node, .terminates = false };
+    }
+
+    fn processTry(
+        self: *CfgBuilder,
+        cfg: *Cfg,
+        source: *Source,
+        ast_node: u32,
+        prev_node: u32,
+    ) !ProcessResult {
+        _ = self;
+        const range = try getSourceRange(source, ast_node);
+
+        // Try expression: evaluates an error union and either:
+        // - On success: unwraps the value and continues normally
+        // - On error: propagates the error to the caller (jumps to exit)
+        //
+        // CFG structure:
+        //   prev_node -> try_node
+        //   try_node --[try_success]--> (next statement)
+        //   try_node --[try_error]--> fn_exit
+        const try_node = try cfg.addNode(IrNode.initFull(.try_expr, ast_node, range));
+        try cfg.addEdge(prev_node, try_node);
+
+        // Error path: propagate to function exit
+        try cfg.addEdgeWithKind(try_node, cfg.exit, .try_error);
+
+        // Success path continues to the next statement
+        // The caller will connect the success path
+        return .{ .last = try_node, .terminates = false };
+    }
+
+    fn processCatch(
+        self: *CfgBuilder,
+        cfg: *Cfg,
+        source: *Source,
+        ast_node: u32,
+        prev_node: u32,
+    ) !ProcessResult {
+        const tree = try source.ast();
+        const range = try getSourceRange(source, ast_node);
+        const data = tree.nodes.items(.data);
+
+        // Catch expression: handles errors from an error union
+        // Structure: expr catch |opt_err| handler
+        //
+        // CFG structure:
+        //   prev_node -> catch_node
+        //   catch_node --[catch_success]--> merge_node (value is unwrapped)
+        //   catch_node --[catch_error]--> handler_body -> merge_node
+        const catch_node = try cfg.addNode(IrNode.initFull(.catch_expr, ast_node, range));
+        try cfg.addEdge(prev_node, catch_node);
+
+        // Get the RHS (catch handler body) from the catch node
+        // For catch nodes, data is node_and_node where [0] is LHS (operand), [1] is RHS (handler)
+        const catch_data = data[ast_node].node_and_node;
+        const handler_ast = @intFromEnum(catch_data[1]);
+
+        // Create merge node for after the catch
+        const merge_node = try cfg.addNode(IrNode.init(.nop));
+
+        // Success path: no error, value is unwrapped, goes directly to merge
+        try cfg.addEdgeWithKind(catch_node, merge_node, .catch_success);
+
+        // Error path: go to handler, then to merge
+        if (handler_ast != 0) {
+            const handler_result = try self.processNode(cfg, source, handler_ast, catch_node);
+
+            if (handler_result.last) |handler_end| {
+                // Handler produced nodes - mark edge from catch to handler as error edge
+                self.markEdgeFromCatchError(cfg, catch_node);
+                if (!handler_result.terminates) {
+                    try cfg.addEdge(handler_end, merge_node);
+                }
+            } else {
+                // Empty handler (e.g., `catch {}`) - add direct catch_error edge
+                try cfg.addEdgeWithKind(catch_node, merge_node, .catch_error);
+            }
+        } else {
+            // No handler body (catch default value like `catch 0`)
+            // Error edge goes directly to merge
+            try cfg.addEdgeWithKind(catch_node, merge_node, .catch_error);
+        }
+
+        return .{ .last = merge_node, .terminates = false };
+    }
+
+    fn markEdgeFromCatchError(self: *CfgBuilder, cfg: *Cfg, catch_node: u32) void {
+        _ = self;
+        // Find the most recent edge from catch_node that is normal and mark it as catch_error
+        var i = cfg.edges.items.len;
+        while (i > 0) {
+            i -= 1;
+            if (cfg.edges.items[i].from == catch_node and cfg.edges.items[i].kind == .normal) {
+                cfg.edges.items[i].kind = .catch_error;
+                break;
+            }
+        }
     }
 };
 
@@ -1809,4 +2204,410 @@ test "CfgBuilder while loop back-edge targets header" {
     }
 
     try testing.expect(back_edge_targets_header);
+}
+
+test "CfgBuilder simple try expression" {
+    const testing = std.testing;
+    const allocator = testing.allocator;
+
+    const code: [:0]const u8 =
+        \\fn foo() !void {
+        \\    const x = try bar();
+        \\    _ = x;
+        \\}
+    ;
+
+    var source = Source.init(allocator, "test.zig", code);
+    defer source.deinit();
+
+    var builder = CfgBuilder.init(allocator);
+    const tree = try source.ast();
+    const root_decls = tree.rootDecls();
+
+    const fn_node = @intFromEnum(root_decls[0]);
+    const maybe_cfg = try builder.buildFromFn(&source, fn_node);
+
+    try testing.expect(maybe_cfg != null);
+
+    var cfg = maybe_cfg.?;
+    defer cfg.deinit();
+
+    // Should have try_expr node
+    var try_expr_count: usize = 0;
+    for (cfg.nodes.items) |node| {
+        if (node.ir_node.tag == .try_expr) try_expr_count += 1;
+    }
+
+    try testing.expectEqual(@as(usize, 1), try_expr_count);
+
+    // Should have try_error edge to exit
+    var try_error_count: usize = 0;
+    for (cfg.edges.items) |edge| {
+        if (edge.kind == .try_error and edge.to == cfg.exit) {
+            try_error_count += 1;
+        }
+    }
+
+    try testing.expectEqual(@as(usize, 1), try_error_count);
+}
+
+test "CfgBuilder try expression has error and success paths" {
+    const testing = std.testing;
+    const allocator = testing.allocator;
+
+    const code: [:0]const u8 =
+        \\fn foo() !i32 {
+        \\    const x = try bar();
+        \\    return x + 1;
+        \\}
+    ;
+
+    var source = Source.init(allocator, "test.zig", code);
+    defer source.deinit();
+
+    var builder = CfgBuilder.init(allocator);
+    const tree = try source.ast();
+    const root_decls = tree.rootDecls();
+
+    const fn_node = @intFromEnum(root_decls[0]);
+    const maybe_cfg = try builder.buildFromFn(&source, fn_node);
+
+    try testing.expect(maybe_cfg != null);
+
+    var cfg = maybe_cfg.?;
+    defer cfg.deinit();
+
+    // Find the try_expr node
+    var try_node_idx: ?u32 = null;
+    for (cfg.nodes.items, 0..) |node, i| {
+        if (node.ir_node.tag == .try_expr) {
+            try_node_idx = @intCast(i);
+            break;
+        }
+    }
+
+    try testing.expect(try_node_idx != null);
+
+    // Try node should have 2 outgoing edges: one error (to exit), one normal (to next)
+    var succs: std.ArrayList(u32) = .empty;
+    defer succs.deinit(allocator);
+
+    try cfg.getSuccessors(allocator, try_node_idx.?, &succs);
+    try testing.expectEqual(@as(usize, 2), succs.items.len);
+
+    // One edge should go to exit (error path)
+    var has_exit_edge = false;
+    for (succs.items) |succ| {
+        if (succ == cfg.exit) has_exit_edge = true;
+    }
+    try testing.expect(has_exit_edge);
+}
+
+test "CfgBuilder simple catch expression" {
+    const testing = std.testing;
+    const allocator = testing.allocator;
+
+    const code: [:0]const u8 =
+        \\fn foo() i32 {
+        \\    const x = bar() catch 0;
+        \\    return x;
+        \\}
+    ;
+
+    var source = Source.init(allocator, "test.zig", code);
+    defer source.deinit();
+
+    var builder = CfgBuilder.init(allocator);
+    const tree = try source.ast();
+    const root_decls = tree.rootDecls();
+
+    const fn_node = @intFromEnum(root_decls[0]);
+    const maybe_cfg = try builder.buildFromFn(&source, fn_node);
+
+    try testing.expect(maybe_cfg != null);
+
+    var cfg = maybe_cfg.?;
+    defer cfg.deinit();
+
+    // Should have catch_expr node
+    var catch_expr_count: usize = 0;
+    for (cfg.nodes.items) |node| {
+        if (node.ir_node.tag == .catch_expr) catch_expr_count += 1;
+    }
+
+    try testing.expectEqual(@as(usize, 1), catch_expr_count);
+
+    // Should have catch_success and catch_error edges
+    var catch_success_count: usize = 0;
+    var catch_error_count: usize = 0;
+    for (cfg.edges.items) |edge| {
+        if (edge.kind == .catch_success) catch_success_count += 1;
+        if (edge.kind == .catch_error) catch_error_count += 1;
+    }
+
+    try testing.expectEqual(@as(usize, 1), catch_success_count);
+    try testing.expectEqual(@as(usize, 1), catch_error_count);
+}
+
+test "CfgBuilder catch with block handler" {
+    const testing = std.testing;
+    const allocator = testing.allocator;
+
+    const code: [:0]const u8 =
+        \\fn foo() i32 {
+        \\    const x = bar() catch |err| {
+        \\        _ = err;
+        \\        return -1;
+        \\    };
+        \\    return x;
+        \\}
+    ;
+
+    var source = Source.init(allocator, "test.zig", code);
+    defer source.deinit();
+
+    var builder = CfgBuilder.init(allocator);
+    const tree = try source.ast();
+    const root_decls = tree.rootDecls();
+
+    const fn_node = @intFromEnum(root_decls[0]);
+    const maybe_cfg = try builder.buildFromFn(&source, fn_node);
+
+    try testing.expect(maybe_cfg != null);
+
+    var cfg = maybe_cfg.?;
+    defer cfg.deinit();
+
+    // Should have catch_expr node
+    var catch_expr_count: usize = 0;
+    for (cfg.nodes.items) |node| {
+        if (node.ir_node.tag == .catch_expr) catch_expr_count += 1;
+    }
+
+    try testing.expectEqual(@as(usize, 1), catch_expr_count);
+
+    // Should have return nodes (one in handler, one at end)
+    var ret_count: usize = 0;
+    for (cfg.nodes.items) |node| {
+        if (node.ir_node.tag == .ret) ret_count += 1;
+    }
+
+    try testing.expectEqual(@as(usize, 2), ret_count);
+}
+
+test "CfgBuilder multiple try expressions" {
+    const testing = std.testing;
+    const allocator = testing.allocator;
+
+    const code: [:0]const u8 =
+        \\fn foo() !i32 {
+        \\    const a = try bar();
+        \\    const b = try baz();
+        \\    return a + b;
+        \\}
+    ;
+
+    var source = Source.init(allocator, "test.zig", code);
+    defer source.deinit();
+
+    var builder = CfgBuilder.init(allocator);
+    const tree = try source.ast();
+    const root_decls = tree.rootDecls();
+
+    const fn_node = @intFromEnum(root_decls[0]);
+    const maybe_cfg = try builder.buildFromFn(&source, fn_node);
+
+    try testing.expect(maybe_cfg != null);
+
+    var cfg = maybe_cfg.?;
+    defer cfg.deinit();
+
+    // Should have 2 try_expr nodes
+    var try_expr_count: usize = 0;
+    for (cfg.nodes.items) |node| {
+        if (node.ir_node.tag == .try_expr) try_expr_count += 1;
+    }
+
+    try testing.expectEqual(@as(usize, 2), try_expr_count);
+
+    // Should have 2 try_error edges to exit
+    var try_error_count: usize = 0;
+    for (cfg.edges.items) |edge| {
+        if (edge.kind == .try_error and edge.to == cfg.exit) {
+            try_error_count += 1;
+        }
+    }
+
+    try testing.expectEqual(@as(usize, 2), try_error_count);
+}
+
+test "CfgBuilder try inside if branch" {
+    const testing = std.testing;
+    const allocator = testing.allocator;
+
+    const code: [:0]const u8 =
+        \\fn foo(cond: bool) !i32 {
+        \\    if (cond) {
+        \\        return try bar();
+        \\    }
+        \\    return 0;
+        \\}
+    ;
+
+    var source = Source.init(allocator, "test.zig", code);
+    defer source.deinit();
+
+    var builder = CfgBuilder.init(allocator);
+    const tree = try source.ast();
+    const root_decls = tree.rootDecls();
+
+    const fn_node = @intFromEnum(root_decls[0]);
+    const maybe_cfg = try builder.buildFromFn(&source, fn_node);
+
+    try testing.expect(maybe_cfg != null);
+
+    var cfg = maybe_cfg.?;
+    defer cfg.deinit();
+
+    // Should have try_expr and branch nodes
+    var try_expr_count: usize = 0;
+    var branch_count: usize = 0;
+    for (cfg.nodes.items) |node| {
+        if (node.ir_node.tag == .try_expr) try_expr_count += 1;
+        if (node.ir_node.tag == .branch) branch_count += 1;
+    }
+
+    try testing.expectEqual(@as(usize, 1), try_expr_count);
+    try testing.expectEqual(@as(usize, 1), branch_count);
+}
+
+test "CfgBuilder catch with empty block" {
+    const testing = std.testing;
+    const allocator = testing.allocator;
+
+    const code: [:0]const u8 =
+        \\fn foo() void {
+        \\    _ = bar() catch {};
+        \\}
+    ;
+
+    var source = Source.init(allocator, "test.zig", code);
+    defer source.deinit();
+
+    var builder = CfgBuilder.init(allocator);
+    const tree = try source.ast();
+    const root_decls = tree.rootDecls();
+
+    const fn_node = @intFromEnum(root_decls[0]);
+    const maybe_cfg = try builder.buildFromFn(&source, fn_node);
+
+    try testing.expect(maybe_cfg != null);
+
+    var cfg = maybe_cfg.?;
+    defer cfg.deinit();
+
+    // Should have catch_expr node
+    var catch_expr_count: usize = 0;
+    for (cfg.nodes.items) |node| {
+        if (node.ir_node.tag == .catch_expr) catch_expr_count += 1;
+    }
+
+    try testing.expectEqual(@as(usize, 1), catch_expr_count);
+
+    // Should have both catch_success and catch_error edges
+    var catch_success_count: usize = 0;
+    var catch_error_count: usize = 0;
+    for (cfg.edges.items) |edge| {
+        if (edge.kind == .catch_success) catch_success_count += 1;
+        if (edge.kind == .catch_error) catch_error_count += 1;
+    }
+
+    try testing.expect(catch_success_count >= 1);
+    try testing.expect(catch_error_count >= 1);
+}
+
+test "CfgBuilder try and catch combined" {
+    const testing = std.testing;
+    const allocator = testing.allocator;
+
+    const code: [:0]const u8 =
+        \\fn foo() !i32 {
+        \\    const x = try bar();
+        \\    const y = baz() catch 0;
+        \\    return x + y;
+        \\}
+    ;
+
+    var source = Source.init(allocator, "test.zig", code);
+    defer source.deinit();
+
+    var builder = CfgBuilder.init(allocator);
+    const tree = try source.ast();
+    const root_decls = tree.rootDecls();
+
+    const fn_node = @intFromEnum(root_decls[0]);
+    const maybe_cfg = try builder.buildFromFn(&source, fn_node);
+
+    try testing.expect(maybe_cfg != null);
+
+    var cfg = maybe_cfg.?;
+    defer cfg.deinit();
+
+    // Should have both try_expr and catch_expr nodes
+    var try_expr_count: usize = 0;
+    var catch_expr_count: usize = 0;
+    for (cfg.nodes.items) |node| {
+        if (node.ir_node.tag == .try_expr) try_expr_count += 1;
+        if (node.ir_node.tag == .catch_expr) catch_expr_count += 1;
+    }
+
+    try testing.expectEqual(@as(usize, 1), try_expr_count);
+    try testing.expectEqual(@as(usize, 1), catch_expr_count);
+}
+
+test "CfgBuilder try in loop" {
+    const testing = std.testing;
+    const allocator = testing.allocator;
+
+    const code: [:0]const u8 =
+        \\fn foo() !void {
+        \\    while (true) {
+        \\        try bar();
+        \\    }
+        \\}
+    ;
+
+    var source = Source.init(allocator, "test.zig", code);
+    defer source.deinit();
+
+    var builder = CfgBuilder.init(allocator);
+    const tree = try source.ast();
+    const root_decls = tree.rootDecls();
+
+    const fn_node = @intFromEnum(root_decls[0]);
+    const maybe_cfg = try builder.buildFromFn(&source, fn_node);
+
+    try testing.expect(maybe_cfg != null);
+
+    var cfg = maybe_cfg.?;
+    defer cfg.deinit();
+
+    // Should have try_expr and loop_header nodes
+    var try_expr_count: usize = 0;
+    var loop_header_count: usize = 0;
+    for (cfg.nodes.items) |node| {
+        if (node.ir_node.tag == .try_expr) try_expr_count += 1;
+        if (node.ir_node.tag == .loop_header) loop_header_count += 1;
+    }
+
+    try testing.expectEqual(@as(usize, 1), try_expr_count);
+    try testing.expectEqual(@as(usize, 1), loop_header_count);
+
+    // Should have try_error edge
+    var try_error_count: usize = 0;
+    for (cfg.edges.items) |edge| {
+        if (edge.kind == .try_error) try_error_count += 1;
+    }
+
+    try testing.expect(try_error_count >= 1);
 }

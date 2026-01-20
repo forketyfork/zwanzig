@@ -430,6 +430,8 @@ The IR (`src/ir.zig`) defines the following node types:
 | `loop_body` | Loop body entry point |
 | `defer_stmt` | Defer statement body |
 | `errdefer_stmt` | Errdefer statement body |
+| `try_expr` | Try expression - propagates errors to caller |
+| `catch_expr` | Catch expression - handles errors locally |
 
 ### IR Node Structure
 
@@ -470,6 +472,10 @@ A CFG consists of:
 | `loop_exit` | Loop exit edge (when condition is false) |
 | `defer_edge` | Defer execution edge (before return/exit) |
 | `errdefer_edge` | Errdefer execution edge (on error path) |
+| `try_error` | Error path from try expression (propagates to caller) |
+| `try_success` | Success path from try expression (continues normally) |
+| `catch_error` | Error path into catch handler |
+| `catch_success` | Success path from catch (value unwrapped) |
 
 ### CFG Builder
 
@@ -486,6 +492,8 @@ The `CfgBuilder` constructs CFGs from Zig AST function declarations. Currently s
 - For loops (with back-edges)
 - Defer statements
 - Errdefer statements
+- Try expressions
+- Catch expressions
 
 **Usage:**
 ```zig
@@ -607,11 +615,102 @@ errdefer_stmt ──► block (errdefer body)
   fn_exit
 ```
 
+### Try/Catch CFG (Error Flow)
+
+The CFG builder models Zig's error handling constructs (`try` and `catch`) to represent error flow:
+
+#### Try Expressions
+
+A `try` expression evaluates an error union and either unwraps the success value or propagates the error to the caller:
+
+1. **Try Node**: A `try_expr` node is created to represent the error-checking point
+2. **Error Path**: A `try_error` edge connects the try node directly to `fn_exit`, representing error propagation
+3. **Success Path**: A `try_success` edge connects to the next statement, representing successful unwrapping
+
+**Example CFG for try:**
+```
+fn_entry
+    │
+    ▼
+try_expr ──────┐
+    │          │
+    │ success  │ error
+    ▼          ▼
+var_decl    fn_exit
+    │
+    ▼
+  fn_exit
+```
+
+#### Catch Expressions
+
+A `catch` expression handles errors locally by providing a fallback value or handler block:
+
+1. **Catch Node**: A `catch_expr` node is created to represent the error-handling point
+2. **Success Path**: A `catch_success` edge connects to the merge point (value unwrapped without error)
+3. **Error Path**: A `catch_error` edge connects to the handler, then the handler continues to the merge point
+
+**Example CFG for catch with handler:**
+```
+fn_entry
+    │
+    ▼
+catch_expr ─────────┐
+    │               │
+    │ success       │ error
+    │               ▼
+    │           handler_body
+    │               │
+    ▼               │
+   nop ◄────────────┘
+    │
+    ▼
+  fn_exit
+```
+
+#### Try in Variable Declarations
+
+When `try` appears in a variable declaration's initializer (e.g., `const x = try foo();`), the CFG correctly models both paths:
+
+```
+fn_entry
+    │
+    ▼
+try_expr ──────┐
+    │          │
+    │ success  │ error
+    ▼          ▼
+var_decl    fn_exit
+    │
+    ▼
+  ...
+```
+
+#### Catch in Variable Declarations
+
+Similarly, `catch` in a variable declaration creates branching for error handling:
+
+```
+fn_entry
+    │
+    ▼
+catch_expr ─────────┐
+    │               │
+    │ success       │ error
+    │               ▼
+    │            handler
+    │               │
+    ▼               │
+var_decl ◄──────────┘
+    │
+    ▼
+  ...
+```
+
 ## Future Enhancements
 
 The current implementation provides a foundation for more sophisticated analysis:
 
-- **Try/Catch Edges**: Error flow representation
 - **Semantic Analysis**: Integration with typed IR for deeper checks
 - **Multiple Output Formats**: JSON, SARIF for CI/CD integration
 - **Configuration Files**: Project-specific rule configuration

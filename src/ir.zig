@@ -34,6 +34,10 @@ pub const IrTag = enum {
     defer_stmt,
     /// Errdefer statement body
     errdefer_stmt,
+    /// Try expression - propagates errors to caller
+    try_expr,
+    /// Catch expression - handles errors locally
+    catch_expr,
 };
 
 /// A single IR node representing a statement or expression.
