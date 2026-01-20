@@ -59,6 +59,12 @@ This document provides a comprehensive overview of the Zwanzig static analyzer i
    - Reports as hint-level diagnostics
    - Handles various TODO formats (with/without colon, inline comments)
 
+7. **rules/file_as_struct.zig** - File Naming Convention Rule
+   - Enforces naming conventions based on file content
+   - Files with top-level fields (struct-like) should have capitalized names
+   - Files without top-level fields (modules) should have lowercase names
+   - Uses AST root declarations to detect top-level fields
+
 ### Design Principles
 
 The architecture follows these key principles:

@@ -57,6 +57,55 @@ fn processData(data: []const u8) void {
 
 This will produce a hint-level diagnostic pointing to the TODO comment with its message.
 
+### file-as-struct
+
+Enforces file naming conventions based on whether the file contains top-level fields (i.e., acts as a struct). In Zig, a file can act as an implicit struct by having top-level fields. This rule enforces the convention that:
+
+- Files with top-level fields should have a capitalized file name (e.g., `MyType.zig`)
+- Files without top-level fields should have a lowercase file name (e.g., `utils.zig`)
+
+**Bad (struct-like file with lowercase name):**
+```zig
+// mytype.zig - should be MyType.zig
+count: usize,
+name: []const u8,
+
+pub fn init() @This() {
+    return .{ .count = 0, .name = "" };
+}
+```
+
+**Good (struct-like file with capitalized name):**
+```zig
+// MyType.zig
+count: usize,
+name: []const u8,
+
+pub fn init() @This() {
+    return .{ .count = 0, .name = "" };
+}
+```
+
+**Bad (module file with capitalized name):**
+```zig
+// Utils.zig - should be utils.zig
+const std = @import("std");
+
+pub fn helper() void {
+    std.debug.print("Hello\n", .{});
+}
+```
+
+**Good (module file with lowercase name):**
+```zig
+// utils.zig
+const std = @import("std");
+
+pub fn helper() void {
+    std.debug.print("Hello\n", .{});
+}
+```
+
 ## Building
 
 ```bash
