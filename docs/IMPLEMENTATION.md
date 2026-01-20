@@ -406,6 +406,107 @@ The conservative approach avoids false positives by:
 - Ignoring underscore-prefixed names (explicit opt-out convention)
 - Ignoring special names like `main` and `panic` (entry points)
 
+### Example: unreachable-code Rule (CFG-based)
+
+The `unreachable-code` rule uses the analysis engine to detect unreachable code:
+
+```zig
+fn check(src: *Source, allocator: std.mem.Allocator, diagnostics: *std.ArrayList(Diagnostic)) RuleError!void {
+    const tree = try src.ast();
+    var builder = CfgBuilder.init(allocator);
+
+    for (function_nodes) |fn_node| {
+        // Build CFG for the function
+        var cfg_opt = try builder.buildFromFn(src, fn_node);
+        if (cfg_opt) |*cfg| {
+            defer cfg.deinit();
+
+            // Run the analysis engine
+            var engine = AnalysisEngine.init(allocator, cfg);
+            defer engine.deinit();
+            try engine.run();
+
+            const graph = engine.getGraph();
+
+            // Check each CFG node to see if it's reachable
+            for (cfg.nodes.items) |cfg_node| {
+                var has_incoming_feasible_edge = false;
+                for (graph.nodes.items) |exploded_node| {
+                    if (exploded_node.point.node_index == cfg_node_idx) {
+                        has_incoming_feasible_edge = true;
+                        break;
+                    }
+                }
+
+                // If no exploded nodes reach this CFG node, it's unreachable
+                if (!has_incoming_feasible_edge) {
+                    try diagnostics.append(allocator, Diagnostic.init(...));
+                }
+            }
+        }
+    }
+}
+```
+
+The rule:
+1. Builds a CFG for each function in the source file
+2. Runs the analysis engine to build the exploded graph
+3. Checks if any exploded nodes reach each CFG node
+4. Reports CFG nodes that have no incoming feasible paths as unreachable
+
+This approach correctly handles:
+- Unconditional returns (code after `return` is unreachable)
+- Fully-terminating branches (code after `if/else` where both branches return)
+- Path-sensitive pruning (branches pruned due to contradictory constraints)
+
+### Example: empty-defer and empty-errdefer Rules
+
+The `empty-defer` and `empty-errdefer` rules detect empty defer/errdefer blocks using AST analysis:
+
+```zig
+fn check(src: *Source, allocator: std.mem.Allocator, diagnostics: *std.ArrayList(Diagnostic)) RuleError!void {
+    const tree = try src.ast();
+    const tags = tree.nodes.items(.tag);
+    const data = tree.nodes.items(.data);
+
+    for (tags, 0..) |tag, i| {
+        if (tag == .@"defer") {  // or .@"errdefer"
+            const defer_body_opt = data[i].opt_node;
+            if (defer_body_opt.unwrap()) |defer_body_node| {
+                const body_tag = tags[defer_body_idx];
+
+                var is_empty = false;
+                switch (body_tag) {
+                    .block, .block_semicolon => {
+                        const extra = data[defer_body_idx].extra_range;
+                        is_empty = (extra.end <= extra.start);
+                    },
+                    .block_two, .block_two_semicolon => {
+                        const opt_nodes = data[defer_body_idx].opt_node_and_opt_node;
+                        is_empty = (opt_nodes[0].unwrap() == null and opt_nodes[1].unwrap() == null);
+                    },
+                    else => {},
+                }
+
+                if (is_empty) {
+                    try diagnostics.append(allocator, Diagnostic.init(...));
+                }
+            }
+        }
+    }
+}
+```
+
+The rules:
+1. Scan AST nodes for `defer` or `errdefer` tags
+2. Extract the defer body from the AST node data
+3. Check if the body is an empty block by examining the block structure
+4. Report empty blocks as violations
+
+These rules help detect:
+- `defer {}` - empty defer blocks that do nothing
+- `errdefer {}` - empty errdefer blocks that don't clean up resources
+
 ## Intermediate Representation (IR)
 
 Zwanzig uses a minimal Intermediate Representation (IR) to bridge AST nodes and control-flow analysis. The IR is designed to be lightweight while capturing the essential structure needed for dataflow analysis.

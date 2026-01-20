@@ -6,6 +6,9 @@ const DupeImportRule = @import("rules/dupe_import.zig").DupeImportRule;
 const TodoCommentRule = @import("rules/todo_comment.zig").TodoCommentRule;
 const FileAsStructRule = @import("rules/file_as_struct.zig").FileAsStructRule;
 const UnusedDeclRule = @import("rules/unused_decl.zig").UnusedDeclRule;
+const UnreachableCodeRule = @import("rules/unreachable_code.zig").UnreachableCodeRule;
+const EmptyDeferRule = @import("rules/empty_defer.zig").EmptyDeferRule;
+const EmptyErrdeferRule = @import("rules/empty_errdefer.zig").EmptyErrdeferRule;
 const RuleFilter = @import("rule_filter.zig").RuleFilter;
 const file_discovery = @import("file_discovery.zig");
 
@@ -147,6 +150,9 @@ pub fn main() !void {
     try analyzer.registerRule(&TodoCommentRule.rule);
     try analyzer.registerRule(&FileAsStructRule.rule);
     try analyzer.registerRule(&UnusedDeclRule.rule);
+    try analyzer.registerRule(&UnreachableCodeRule.rule);
+    try analyzer.registerRule(&EmptyDeferRule.rule);
+    try analyzer.registerRule(&EmptyErrdeferRule.rule);
 
     analyzer.setRuleFilter(cli_args.rule_filter);
 

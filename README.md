@@ -138,6 +138,82 @@ pub fn main() void {
 }
 ```
 
+### unreachable-code
+
+Detects unreachable code using control-flow graph (CFG) analysis. Code is unreachable when no feasible execution path leads to it. This uses the symbolic execution engine to detect code that can never execute.
+
+**Bad:**
+```zig
+fn foo() void {
+    return;
+    const x = 42;  // Unreachable - after unconditional return
+}
+
+fn bar(x: i32) void {
+    if (x > 0) {
+        return;
+    } else {
+        return;
+    }
+    const y = 10;  // Unreachable - both branches return
+}
+```
+
+**Good:**
+```zig
+fn foo() void {
+    const x = 42;
+    return;
+}
+
+fn bar(x: i32) void {
+    const y = 10;
+    if (x > 0) {
+        return;
+    }
+}
+```
+
+### empty-defer
+
+Detects empty `defer {}` blocks using AST analysis. Empty defer blocks serve no purpose and clutter the code.
+
+**Bad:**
+```zig
+fn foo() void {
+    defer {}  // Empty defer - does nothing
+}
+```
+
+**Good:**
+```zig
+fn foo() !void {
+    var file = try std.fs.cwd().openFile("test.txt", .{});
+    defer file.close();
+}
+```
+
+### empty-errdefer
+
+Detects empty `errdefer {}` blocks using AST analysis. Empty errdefer blocks serve no purpose and should be removed.
+
+**Bad:**
+```zig
+fn foo() !void {
+    errdefer {}  // Empty errdefer - does nothing
+}
+```
+
+**Good:**
+```zig
+fn foo() !void {
+    var allocator = std.heap.page_allocator;
+    var buffer = try allocator.alloc(u8, 1024);
+    errdefer allocator.free(buffer);
+    // ...
+}
+```
+
 ## Building
 
 ```bash
