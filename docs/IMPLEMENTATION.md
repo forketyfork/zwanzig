@@ -808,9 +808,166 @@ The ZirBridge provides typed information that can be used by:
 - **CFG-based analysis**: Control flow analysis can use type information to understand error propagation
 - **Future semantic analysis**: Foundation for more sophisticated dataflow analysis
 
+## Analysis Engine
+
+The analysis engine (`src/engine.zig`) implements a worklist-based traversal of the CFG to build an exploded graph. This is the foundation for path-sensitive static analysis.
+
+### Key Concepts
+
+#### ProgramPoint
+
+A `ProgramPoint` identifies a specific location in the analysis:
+
+```zig
+pub const ProgramPoint = struct {
+    node_index: u32,  // CFG node index
+    kind: Kind,       // pre or post
+
+    pub const Kind = enum {
+        pre,   // Before node execution
+        post,  // After node execution
+    };
+};
+```
+
+For each CFG node, there are two program points:
+- **Pre-state**: Before the node executes
+- **Post-state**: After the node has executed
+
+This separation allows the engine to model state changes at each CFG node.
+
+#### ProgramState
+
+A `ProgramState` represents the abstract program state at a given point:
+
+```zig
+pub const ProgramState = struct {
+    state_id: u64,  // Unique identifier for deduplication
+};
+```
+
+Currently a placeholder with just an identifier for deduplication. Future steps will add:
+- **Environment**: Mapping from variables to abstract values
+- **Store**: Heap/memory model
+- **Constraints**: Path conditions from branches
+
+#### ExplodedNode
+
+An `ExplodedNode` combines a program point and state:
+
+```zig
+pub const ExplodedNode = struct {
+    point: ProgramPoint,
+    state: ProgramState,
+    index: u32,
+    predecessors: std.ArrayList(u32),
+    successors: std.ArrayList(u32),
+};
+```
+
+Each exploded node represents a unique (point, state) pair encountered during analysis.
+
+#### ExplodedGraph
+
+The `ExplodedGraph` is the central data structure for path-sensitive analysis:
+
+```zig
+pub const ExplodedGraph = struct {
+    nodes: std.ArrayList(ExplodedNode),
+    node_map: std.AutoHashMap(u64, u32),  // For deduplication
+    cfg: *const Cfg,
+};
+```
+
+Key features:
+- **Deduplication**: Nodes with identical (point, state) pairs are merged
+- **Edge tracking**: Predecessor and successor relationships are maintained
+- **CFG mapping**: Each exploded node maps back to a CFG node
+
+### Worklist Algorithm
+
+The `AnalysisEngine` uses a worklist-based algorithm:
+
+1. **Initialize**: Create entry node at `(pre(entry), initial_state)`
+2. **Process**: While worklist is not empty:
+   - Pop a node from the worklist
+   - If at pre-state: apply transfer function, create post-state node
+   - If at post-state: create pre-state nodes for all CFG successors
+3. **Deduplicate**: Skip nodes that already exist in the graph
+
+```zig
+var engine = AnalysisEngine.init(allocator, &cfg);
+defer engine.deinit();
+
+try engine.run();
+
+const graph = engine.getGraph();
+// Analyze the exploded graph...
+```
+
+### Deduplication
+
+Deduplication is critical for termination when analyzing loops. The engine computes a hash key from (point, state) and checks if a node with that key already exists:
+
+```zig
+const key = ExplodedNode.computeKey(point, state);
+if (self.node_map.get(key)) |existing_index| {
+    return .{ .index = existing_index, .is_new = false };
+}
+```
+
+This ensures that:
+- Loops don't cause infinite exploration
+- Paths that converge to the same state are merged
+- Analysis terminates in finite time
+
+### Transfer Function
+
+The transfer function models how state changes when a CFG node executes:
+
+```zig
+fn transferFunction(self: *AnalysisEngine, point: ProgramPoint, state: ProgramState) ProgramState {
+    // Currently a placeholder - returns the same state
+    // Future steps will add actual state transformations
+    return state.clone();
+}
+```
+
+Future enhancements will implement transfer functions for:
+- Variable declarations and assignments
+- Arithmetic operations
+- Branch conditions (state forking)
+- Function calls
+
+### Usage Example
+
+```zig
+const cfg_mod = @import("cfg.zig");
+const engine_mod = @import("engine.zig");
+
+// Build CFG from source
+var builder = cfg_mod.CfgBuilder.init(allocator);
+const cfg = (try builder.buildFromFn(&source, fn_node)) orelse return;
+defer cfg.deinit();
+
+// Run analysis
+var engine = engine_mod.AnalysisEngine.init(allocator, &cfg);
+defer engine.deinit();
+
+try engine.run();
+
+// Examine results
+const graph = engine.getGraph();
+std.debug.print("Exploded graph has {d} nodes\n", .{graph.nodeCount()});
+```
+
 ## Future Enhancements
 
 The current implementation provides a foundation for more sophisticated analysis:
 
+- **Abstract Values**: Track concrete and abstract values (Unknown, Null, NonNull, IntRange)
+- **Branch Constraints**: Fork state on conditions and prune infeasible paths
+- **Error Semantics**: Model error unions and try/catch propagation
+- **Interprocedural Analysis**: Inline function calls and build summaries
 - **Multiple Output Formats**: JSON, SARIF for CI/CD integration
 - **Configuration Files**: Project-specific rule configuration
