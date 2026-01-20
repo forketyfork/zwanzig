@@ -159,6 +159,9 @@ pub const CfgBuilder = struct {
     const ProcessResult = struct {
         last: ?u32,
         terminates: bool,
+        /// If set, the edge from this node to the next should use this kind.
+        /// Used to properly label try_success edges for standalone try expressions.
+        next_edge_kind: ?EdgeKind = null,
     };
 
     pub fn init(allocator: std.mem.Allocator) CfgBuilder {
@@ -288,13 +291,27 @@ pub const CfgBuilder = struct {
         var current_prev = prev_node;
         var last_processed: ?u32 = null;
         var terminates = false;
+        var pending_edge_kind: ?EdgeKind = null;
 
         for (stmts) |stmt| {
+            const edge_count_before = cfg.edges.items.len;
             const result = try self.processNode(cfg, source, stmt, current_prev);
+
+            // If the previous statement requested a specific edge kind for the
+            // connection to the next statement, apply it now
+            if (pending_edge_kind) |kind| {
+                self.markEdgeFromNode(cfg, edge_count_before, current_prev, kind);
+                pending_edge_kind = null;
+            }
+
             if (result.last) |node_idx| {
                 last_processed = node_idx;
                 current_prev = node_idx;
             }
+
+            // Save the edge kind for the next iteration (e.g., try_success after try)
+            pending_edge_kind = result.next_edge_kind;
+
             if (result.terminates) {
                 terminates = true;
                 break;
@@ -302,6 +319,16 @@ pub const CfgBuilder = struct {
         }
 
         return .{ .last = last_processed, .terminates = terminates };
+    }
+
+    fn markEdgeFromNode(self: *CfgBuilder, cfg: *Cfg, edge_start_idx: usize, from_node: u32, kind: EdgeKind) void {
+        _ = self;
+        for (cfg.edges.items[edge_start_idx..]) |*edge| {
+            if (edge.from == from_node and edge.kind == .normal) {
+                edge.kind = kind;
+                break;
+            }
+        }
     }
 
     fn processIf(
@@ -964,9 +991,9 @@ pub const CfgBuilder = struct {
         // Error path: propagate to function exit
         try cfg.addEdgeWithKind(try_node, cfg.exit, .try_error);
 
-        // Success path continues to the next statement
-        // The caller will connect the success path
-        return .{ .last = try_node, .terminates = false };
+        // Success path continues to the next statement.
+        // Return next_edge_kind so the block processing marks the edge as try_success.
+        return .{ .last = try_node, .terminates = false, .next_edge_kind = .try_success };
     }
 
     fn processCatch(
@@ -2610,4 +2637,54 @@ test "CfgBuilder try in loop" {
     }
 
     try testing.expect(try_error_count >= 1);
+}
+
+test "CfgBuilder standalone try has try_success edge" {
+    const testing = std.testing;
+    const allocator = testing.allocator;
+
+    const code: [:0]const u8 =
+        \\fn foo() !void {
+        \\    try bar();
+        \\    try baz();
+        \\}
+    ;
+
+    var source = Source.init(allocator, "test.zig", code);
+    defer source.deinit();
+
+    var builder = CfgBuilder.init(allocator);
+    const tree = try source.ast();
+    const root_decls = tree.rootDecls();
+
+    const fn_node = @intFromEnum(root_decls[0]);
+    const maybe_cfg = try builder.buildFromFn(&source, fn_node);
+
+    try testing.expect(maybe_cfg != null);
+
+    var cfg = maybe_cfg.?;
+    defer cfg.deinit();
+
+    // Should have 2 try_expr nodes
+    var try_expr_count: usize = 0;
+    for (cfg.nodes.items) |node| {
+        if (node.ir_node.tag == .try_expr) try_expr_count += 1;
+    }
+    try testing.expectEqual(@as(usize, 2), try_expr_count);
+
+    // Should have 2 try_error edges (one per try, going to exit)
+    var try_error_count: usize = 0;
+    for (cfg.edges.items) |edge| {
+        if (edge.kind == .try_error and edge.to == cfg.exit) {
+            try_error_count += 1;
+        }
+    }
+    try testing.expectEqual(@as(usize, 2), try_error_count);
+
+    // Should have at least 1 try_success edge (from first try to second try)
+    var try_success_count: usize = 0;
+    for (cfg.edges.items) |edge| {
+        if (edge.kind == .try_success) try_success_count += 1;
+    }
+    try testing.expect(try_success_count >= 1);
 }
