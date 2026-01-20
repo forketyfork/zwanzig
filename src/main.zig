@@ -13,6 +13,7 @@ test {
     _ = @import("ir.zig");
     _ = @import("cfg.zig");
     _ = @import("checker.zig");
+    _ = @import("zir_bridge.zig");
 }
 
 pub const CliArgs = struct {

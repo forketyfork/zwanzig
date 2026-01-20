@@ -707,10 +707,110 @@ var_decl ◄──────────┘
   ...
 ```
 
+## Typed IR Bridge (ZIR Integration)
+
+The `ZirBridge` module (`src/zir_bridge.zig`) provides a bridge between Zwanzig's analysis pipeline and Zig's typed intermediate representation (ZIR). This enables access to type information that is not available in the raw AST.
+
+### Overview
+
+ZIR (Zig Intermediate Representation) is the typed IR produced by the Zig compiler during semantic analysis. The ZirBridge uses `std.zig.AstGen` to generate ZIR from parsed source code, providing typed information for:
+
+- Declaration types (variables, constants, functions)
+- Function signatures and parameter types
+- Type inference results
+
+### Key Types
+
+#### TypeInfo
+
+Represents type information for a declaration or expression:
+
+```zig
+pub const TypeInfo = struct {
+    kind: TypeKind,      // Type category (int, pointer, function, etc.)
+    size_bits: u16,      // Bit width for numeric types
+    is_signed: bool,     // Signedness for integers
+    is_comptime: bool,   // Whether compile-time known
+};
+
+pub const TypeKind = enum {
+    unknown, void_type, bool_type, int, uint, float,
+    pointer, slice, array, optional, error_union,
+    function, @"struct", @"enum", @"union", type_type,
+};
+```
+
+#### DeclInfo
+
+Information about a declaration extracted from ZIR:
+
+```zig
+pub const DeclInfo = struct {
+    name: []const u8,        // Declaration name
+    type_info: TypeInfo,     // Type information
+    is_pub: bool,            // Whether exported
+    is_const: bool,          // Whether constant
+    is_fn: bool,             // Whether function
+    ast_node: ?u32,          // AST node index
+    zir_inst: ?u32,          // ZIR instruction index
+};
+```
+
+### ZirBridge Usage
+
+```zig
+const ZirBridge = @import("zir_bridge.zig").ZirBridge;
+
+var bridge = ZirBridge.init(allocator);
+defer bridge.deinit();
+
+// Load typed IR from a source file
+try bridge.loadFromSource(&source);
+
+// Query typed information
+if (bridge.hasZir()) {
+    std.debug.print("Instructions: {d}\n", .{bridge.getInstructionCount()});
+
+    // Find a declaration by name
+    if (bridge.findDeclByName("my_function")) |decl| {
+        if (decl.is_fn) {
+            std.debug.print("Found function: {s}\n", .{decl.name});
+        }
+    }
+
+    // Iterate all declarations
+    for (0..bridge.getDeclCount()) |i| {
+        if (bridge.getDecl(i)) |decl| {
+            std.debug.print("{s}: {}\n", .{decl.name, decl.type_info});
+        }
+    }
+}
+```
+
+### How It Works
+
+1. **AST Parsing**: Source code is parsed into a `std.zig.Ast` via the existing `Source` abstraction
+2. **ZIR Generation**: `std.zig.AstGen.generate()` converts the AST to ZIR
+3. **Declaration Extraction**: Root declarations are extracted from both AST and ZIR
+4. **Type Mapping**: ZIR instruction types are mapped to the simplified `TypeInfo` representation
+
+### Limitations
+
+- ZIR generation requires valid, parseable Zig code (no syntax errors)
+- Full type resolution requires the complete compilation context; standalone analysis provides limited type inference
+- Currently supports module-level declarations; nested scopes require future work
+
+### Integration with Analysis
+
+The ZirBridge provides typed information that can be used by:
+
+- **Type-aware rules**: Rules that need to distinguish between integer types, pointers, error unions, etc.
+- **CFG-based analysis**: Control flow analysis can use type information to understand error propagation
+- **Future semantic analysis**: Foundation for more sophisticated dataflow analysis
+
 ## Future Enhancements
 
 The current implementation provides a foundation for more sophisticated analysis:
 
-- **Semantic Analysis**: Integration with typed IR for deeper checks
 - **Multiple Output Formats**: JSON, SARIF for CI/CD integration
 - **Configuration Files**: Project-specific rule configuration
