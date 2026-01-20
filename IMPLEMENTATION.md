@@ -48,6 +48,17 @@ This document provides a comprehensive overview of the Zwanzig static analyzer i
    - Handles whitespace variations
    - Comprehensive unit tests
 
+5. **rules/dupe_import.zig** - Duplicate Import Rule
+   - Detects duplicate `@import` statements
+   - Token-based scanning for import patterns
+   - Tracks first occurrence and reports subsequent duplicates
+
+6. **rules/todo_comment.zig** - TODO Comment Rule
+   - Detects `// TODO` comments
+   - Extracts TODO message for diagnostic output
+   - Reports as hint-level diagnostics
+   - Handles various TODO formats (with/without colon, inline comments)
+
 ### Design Principles
 
 The architecture follows these key principles:

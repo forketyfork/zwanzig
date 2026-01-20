@@ -43,6 +43,20 @@ const std = @import("std");
 const mem = std.mem;  // Use the already imported std
 ```
 
+### todo
+
+Detects `// TODO` comments in Zig code. TODO comments indicate unfinished work that should be tracked. This rule helps identify and track incomplete tasks in the codebase.
+
+**Example:**
+```zig
+fn processData(data: []const u8) void {
+    // TODO: implement error handling
+    _ = data;
+}
+```
+
+This will produce a hint-level diagnostic pointing to the TODO comment with its message.
+
 ## Building
 
 ```bash
