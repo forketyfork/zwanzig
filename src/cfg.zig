@@ -1040,7 +1040,7 @@ pub const CfgBuilder = struct {
                 // Handler produced nodes - mark edge from catch to handler as error edge
                 self.markEdgeFromCatchError(cfg, catch_node);
                 if (!handler_result.terminates) {
-                    try cfg.addEdge(handler_end, merge_node);
+                    try cfg.addEdgeWithKind(handler_end, merge_node, .catch_success);
                 }
             } else {
                 // Empty handler (e.g., `catch {}`) - add direct catch_error edge

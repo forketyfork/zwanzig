@@ -1081,12 +1081,6 @@ pub const AnalysisEngine = struct {
                                     continue;
                                 }
                             },
-                            .normal => {
-                                // Normal edge from error_handled state means exiting catch handler
-                                if (state_copy.error_state == .error_handled) {
-                                    succ_state.setErrorState(.normal);
-                                }
-                            },
                             else => {},
                         }
 
