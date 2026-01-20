@@ -1030,16 +1030,13 @@ pub const AnalysisEngine = struct {
                             }
                         }
 
-                        // If we have a constraint, pre-check if the resulting state would be satisfiable
+                        // If we have a constraint, apply it to the state before deduplication
                         if (constraint_to_apply) |constraint| {
-                            // Create a temporary state to check satisfiability
-                            var temp_state = try succ_state.clone(self.allocator);
-                            defer temp_state.deinit();
-                            try temp_state.addConstraint(constraint);
-                            if (!temp_state.isSatisfiable()) {
+                            try succ_state.addConstraint(constraint);
+                            if (!succ_state.isSatisfiable()) {
                                 self.pruned_path_count += 1;
                                 succ_state.deinit();
-                                continue; // Skip this edge entirely
+                                continue;
                             }
                         }
 
@@ -1050,7 +1047,7 @@ pub const AnalysisEngine = struct {
                         try self.graph.addEdge(node_index, result.index);
 
                         if (result.is_new) {
-                            try self.worklist.append(self.allocator, .{ .node_index = result.index, .edge_kind = edge.kind, .pending_constraint = constraint_to_apply });
+                            try self.worklist.append(self.allocator, .{ .node_index = result.index, .edge_kind = edge.kind, .pending_constraint = null });
                         }
                     }
                 }

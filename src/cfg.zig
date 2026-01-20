@@ -341,15 +341,16 @@ pub const CfgBuilder = struct {
         const tree = try source.ast();
 
         const range = try getSourceRange(source, ast_node);
-        const branch_node = try cfg.addNode(IrNode.initFull(.branch, ast_node, range));
-        try cfg.addEdge(prev_node, branch_node);
-
-        var then_body: u32 = 0;
-        var else_body: ?u32 = null;
 
         const full_if = tree.fullIf(@enumFromInt(ast_node)) orelse return .{ .last = null, .terminates = false };
-        then_body = @intFromEnum(full_if.ast.then_expr);
-        else_body = if (full_if.ast.else_expr.unwrap()) |e| @intFromEnum(e) else null;
+
+        var branch_ir_node = IrNode.initFull(.branch, ast_node, range);
+        branch_ir_node.operand_node = @intFromEnum(full_if.ast.cond_expr);
+        const branch_node = try cfg.addNode(branch_ir_node);
+        try cfg.addEdge(prev_node, branch_node);
+
+        const then_body: u32 = @intFromEnum(full_if.ast.then_expr);
+        const else_body: ?u32 = if (full_if.ast.else_expr.unwrap()) |e| @intFromEnum(e) else null;
 
         const merge_node = try cfg.addNode(IrNode.init(.nop));
 
