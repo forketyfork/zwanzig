@@ -24,6 +24,8 @@ pub const IrTag = enum {
     expr,
     /// No-op placeholder for control flow merge points
     nop,
+    /// Branch condition evaluation (if/else)
+    branch,
 };
 
 /// A single IR node representing a statement or expression.

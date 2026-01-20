@@ -306,6 +306,7 @@ The IR (`src/ir.zig`) defines the following node types:
 | `block` | Block of statements |
 | `expr` | Generic expression |
 | `nop` | No-op placeholder for control flow merge points |
+| `branch` | Branch condition evaluation (if/else) |
 
 ### IR Node Structure
 
@@ -340,6 +341,8 @@ A CFG consists of:
 |------|-------------|
 | `normal` | Sequential control flow |
 | `jump` | Unconditional jump (e.g., from return to exit) |
+| `branch_true` | Edge taken when branch condition is true |
+| `branch_false` | Edge taken when branch condition is false |
 
 ### CFG Builder
 
@@ -351,6 +354,7 @@ The `CfgBuilder` constructs CFGs from Zig AST function declarations. Currently s
 - Variable declarations
 - Assignment expressions
 - Function calls
+- If/else branching (with merge points)
 
 **Usage:**
 ```zig
@@ -393,11 +397,37 @@ if (cfg.getNode(index)) |node| {
 }
 ```
 
+### Branching CFG
+
+The CFG builder supports `if` and `if-else` constructs, creating proper branching structures:
+
+1. **Branch Nodes**: When an `if` statement is encountered, a `branch` IR node is created to represent the condition evaluation
+2. **True/False Edges**: Edges from the branch node to the then-block are marked with `branch_true`, and edges to the else-block (or merge point if no else) are marked with `branch_false`
+3. **Merge Points**: A `nop` node is inserted after the if/else to serve as a merge point where control flow reconverges
+4. **Terminating Branches**: If both branches terminate (e.g., with return statements), the merge point is not connected, correctly representing unreachable code after the if
+
+**Example CFG for if-else:**
+```
+fn_entry
+    │
+    ▼
+  branch ─────┐
+    │         │
+    │ true    │ false
+    ▼         ▼
+ then_body  else_body
+    │         │
+    ▼         ▼
+   nop ◄──────┘
+    │
+    ▼
+  fn_exit
+```
+
 ## Future Enhancements
 
 The current implementation provides a foundation for more sophisticated analysis:
 
-- **Branching CFG**: Support for if/else and switch control flow
 - **Loop CFG**: Support for while/for loops with back-edges
 - **Defer/Errdefer**: Proper modeling of cleanup paths
 - **Try/Catch Edges**: Error flow representation

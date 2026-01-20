@@ -16,6 +16,10 @@ pub const EdgeKind = enum {
     normal,
     /// Unconditional jump (e.g., from return)
     jump,
+    /// Branch taken when condition is true
+    branch_true,
+    /// Branch taken when condition is false
+    branch_false,
 };
 
 /// An edge in the control-flow graph.
@@ -212,6 +216,7 @@ pub const CfgBuilder = struct {
             .simple_var_decl, .local_var_decl, .global_var_decl, .aligned_var_decl => try self.processVarDecl(cfg, source, ast_node, prev_node),
             .assign => try self.processAssign(cfg, source, ast_node, prev_node),
             .call, .call_one, .call_one_comma, .builtin_call, .builtin_call_comma, .builtin_call_two, .builtin_call_two_comma => try self.processCall(cfg, source, ast_node, prev_node),
+            .@"if", .if_simple => try self.processIf(cfg, source, ast_node, prev_node),
             else => try self.processGenericExpr(cfg, source, ast_node, prev_node),
         };
     }
@@ -277,6 +282,97 @@ pub const CfgBuilder = struct {
         }
 
         return last_processed;
+    }
+
+    fn processIf(
+        self: *CfgBuilder,
+        cfg: *Cfg,
+        source: *Source,
+        ast_node: u32,
+        prev_node: u32,
+    ) !?u32 {
+        const tree = try source.ast();
+
+        const range = try getSourceRange(source, ast_node);
+        const branch_node = try cfg.addNode(IrNode.initFull(.branch, ast_node, range));
+        try cfg.addEdge(prev_node, branch_node);
+
+        var then_body: u32 = 0;
+        var else_body: ?u32 = null;
+
+        const full_if = tree.fullIf(@enumFromInt(ast_node)) orelse return null;
+        then_body = @intFromEnum(full_if.ast.then_expr);
+        else_body = if (full_if.ast.else_expr.unwrap()) |e| @intFromEnum(e) else null;
+
+        const merge_node = try cfg.addNode(IrNode.init(.nop));
+
+        var then_terminates = false;
+        if (then_body != 0) {
+            const edge_count_before = cfg.edges.items.len;
+            const then_result = try self.processNode(cfg, source, then_body, branch_node);
+            self.markEdgeFromBranchTrue(cfg, edge_count_before, branch_node);
+
+            if (then_result) |then_end| {
+                if (self.isTerminator(cfg, then_end)) {
+                    then_terminates = true;
+                } else {
+                    try cfg.addEdge(then_end, merge_node);
+                }
+            } else {
+                try cfg.addEdgeWithKind(branch_node, merge_node, .branch_true);
+            }
+        } else {
+            try cfg.addEdgeWithKind(branch_node, merge_node, .branch_true);
+        }
+
+        var else_terminates = false;
+        if (else_body) |else_node| {
+            if (else_node != 0) {
+                const edge_count_before = cfg.edges.items.len;
+                const else_result = try self.processNode(cfg, source, else_node, branch_node);
+                self.markEdgeFromBranchFalse(cfg, edge_count_before, branch_node);
+
+                if (else_result) |else_end| {
+                    if (self.isTerminator(cfg, else_end)) {
+                        else_terminates = true;
+                    } else {
+                        try cfg.addEdge(else_end, merge_node);
+                    }
+                } else {
+                    try cfg.addEdgeWithKind(branch_node, merge_node, .branch_false);
+                }
+            } else {
+                try cfg.addEdgeWithKind(branch_node, merge_node, .branch_false);
+            }
+        } else {
+            try cfg.addEdgeWithKind(branch_node, merge_node, .branch_false);
+        }
+
+        if (then_terminates and else_terminates) {
+            return branch_node;
+        }
+
+        return merge_node;
+    }
+
+    fn markEdgeFromBranchTrue(self: *CfgBuilder, cfg: *Cfg, edge_start_idx: usize, branch_node: u32) void {
+        _ = self;
+        for (cfg.edges.items[edge_start_idx..]) |*edge| {
+            if (edge.from == branch_node and edge.kind == .normal) {
+                edge.kind = .branch_true;
+                break;
+            }
+        }
+    }
+
+    fn markEdgeFromBranchFalse(self: *CfgBuilder, cfg: *Cfg, edge_start_idx: usize, branch_node: u32) void {
+        _ = self;
+        for (cfg.edges.items[edge_start_idx..]) |*edge| {
+            if (edge.from == branch_node and edge.kind == .normal) {
+                edge.kind = .branch_false;
+                break;
+            }
+        }
     }
 
     fn processReturn(
@@ -665,4 +761,244 @@ test "CfgBuilder return terminates block" {
         if (node.ir_node.tag == .var_decl) found_var_decl = true;
     }
     try testing.expect(!found_var_decl);
+}
+
+test "CfgBuilder simple if without else" {
+    const testing = std.testing;
+    const allocator = testing.allocator;
+
+    const code: [:0]const u8 =
+        \\fn foo(x: i32) i32 {
+        \\    if (x > 0) {
+        \\        return 1;
+        \\    }
+        \\    return 0;
+        \\}
+    ;
+
+    var source = Source.init(allocator, "test.zig", code);
+    defer source.deinit();
+
+    var builder = CfgBuilder.init(allocator);
+    const tree = try source.ast();
+    const root_decls = tree.rootDecls();
+
+    const fn_node = @intFromEnum(root_decls[0]);
+    const maybe_cfg = try builder.buildFromFn(&source, fn_node);
+
+    try testing.expect(maybe_cfg != null);
+
+    var cfg = maybe_cfg.?;
+    defer cfg.deinit();
+
+    var found_branch = false;
+    var branch_count: usize = 0;
+    var ret_count: usize = 0;
+    var nop_count: usize = 0;
+
+    for (cfg.nodes.items) |node| {
+        switch (node.ir_node.tag) {
+            .branch => {
+                found_branch = true;
+                branch_count += 1;
+            },
+            .ret => ret_count += 1,
+            .nop => nop_count += 1,
+            else => {},
+        }
+    }
+
+    try testing.expect(found_branch);
+    try testing.expectEqual(@as(usize, 1), branch_count);
+    try testing.expectEqual(@as(usize, 2), ret_count);
+    try testing.expectEqual(@as(usize, 1), nop_count);
+}
+
+test "CfgBuilder if-else branches" {
+    const testing = std.testing;
+    const allocator = testing.allocator;
+
+    const code: [:0]const u8 =
+        \\fn foo(x: i32) i32 {
+        \\    if (x > 0) {
+        \\        return 1;
+        \\    } else {
+        \\        return -1;
+        \\    }
+        \\}
+    ;
+
+    var source = Source.init(allocator, "test.zig", code);
+    defer source.deinit();
+
+    var builder = CfgBuilder.init(allocator);
+    const tree = try source.ast();
+    const root_decls = tree.rootDecls();
+
+    const fn_node = @intFromEnum(root_decls[0]);
+    const maybe_cfg = try builder.buildFromFn(&source, fn_node);
+
+    try testing.expect(maybe_cfg != null);
+
+    var cfg = maybe_cfg.?;
+    defer cfg.deinit();
+
+    var branch_count: usize = 0;
+    var ret_count: usize = 0;
+
+    for (cfg.nodes.items) |node| {
+        switch (node.ir_node.tag) {
+            .branch => branch_count += 1,
+            .ret => ret_count += 1,
+            else => {},
+        }
+    }
+
+    try testing.expectEqual(@as(usize, 1), branch_count);
+    try testing.expectEqual(@as(usize, 2), ret_count);
+
+    var branch_true_edges: usize = 0;
+    var branch_false_edges: usize = 0;
+    for (cfg.edges.items) |edge| {
+        if (edge.kind == .branch_true) branch_true_edges += 1;
+        if (edge.kind == .branch_false) branch_false_edges += 1;
+    }
+
+    try testing.expect(branch_true_edges > 0 or branch_false_edges > 0);
+}
+
+test "CfgBuilder if-else with merge point" {
+    const testing = std.testing;
+    const allocator = testing.allocator;
+
+    const code: [:0]const u8 =
+        \\fn foo(x: i32) i32 {
+        \\    var result: i32 = 0;
+        \\    if (x > 0) {
+        \\        result = 1;
+        \\    } else {
+        \\        result = -1;
+        \\    }
+        \\    return result;
+        \\}
+    ;
+
+    var source = Source.init(allocator, "test.zig", code);
+    defer source.deinit();
+
+    var builder = CfgBuilder.init(allocator);
+    const tree = try source.ast();
+    const root_decls = tree.rootDecls();
+
+    const fn_node = @intFromEnum(root_decls[0]);
+    const maybe_cfg = try builder.buildFromFn(&source, fn_node);
+
+    try testing.expect(maybe_cfg != null);
+
+    var cfg = maybe_cfg.?;
+    defer cfg.deinit();
+
+    var branch_count: usize = 0;
+    var ret_count: usize = 0;
+    var nop_count: usize = 0;
+    var assign_count: usize = 0;
+
+    for (cfg.nodes.items) |node| {
+        switch (node.ir_node.tag) {
+            .branch => branch_count += 1,
+            .ret => ret_count += 1,
+            .nop => nop_count += 1,
+            .assign => assign_count += 1,
+            else => {},
+        }
+    }
+
+    try testing.expectEqual(@as(usize, 1), branch_count);
+    try testing.expectEqual(@as(usize, 1), ret_count);
+    try testing.expectEqual(@as(usize, 1), nop_count);
+    try testing.expectEqual(@as(usize, 2), assign_count);
+}
+
+test "CfgBuilder nested if" {
+    const testing = std.testing;
+    const allocator = testing.allocator;
+
+    const code: [:0]const u8 =
+        \\fn foo(x: i32, y: i32) i32 {
+        \\    if (x > 0) {
+        \\        if (y > 0) {
+        \\            return 1;
+        \\        }
+        \\        return 2;
+        \\    }
+        \\    return 0;
+        \\}
+    ;
+
+    var source = Source.init(allocator, "test.zig", code);
+    defer source.deinit();
+
+    var builder = CfgBuilder.init(allocator);
+    const tree = try source.ast();
+    const root_decls = tree.rootDecls();
+
+    const fn_node = @intFromEnum(root_decls[0]);
+    const maybe_cfg = try builder.buildFromFn(&source, fn_node);
+
+    try testing.expect(maybe_cfg != null);
+
+    var cfg = maybe_cfg.?;
+    defer cfg.deinit();
+
+    var branch_count: usize = 0;
+    var ret_count: usize = 0;
+
+    for (cfg.nodes.items) |node| {
+        switch (node.ir_node.tag) {
+            .branch => branch_count += 1,
+            .ret => ret_count += 1,
+            else => {},
+        }
+    }
+
+    try testing.expectEqual(@as(usize, 2), branch_count);
+    try testing.expectEqual(@as(usize, 3), ret_count);
+}
+
+test "CfgBuilder branch source range" {
+    const testing = std.testing;
+    const allocator = testing.allocator;
+
+    const code: [:0]const u8 =
+        \\fn foo(x: i32) i32 {
+        \\    if (x > 0) {
+        \\        return 1;
+        \\    }
+        \\    return 0;
+        \\}
+    ;
+
+    var source = Source.init(allocator, "test.zig", code);
+    defer source.deinit();
+
+    var builder = CfgBuilder.init(allocator);
+    const tree = try source.ast();
+    const root_decls = tree.rootDecls();
+
+    const fn_node = @intFromEnum(root_decls[0]);
+    const maybe_cfg = try builder.buildFromFn(&source, fn_node);
+
+    try testing.expect(maybe_cfg != null);
+
+    var cfg = maybe_cfg.?;
+    defer cfg.deinit();
+
+    for (cfg.nodes.items) |node| {
+        if (node.ir_node.tag == .branch) {
+            try testing.expect(node.ir_node.source_range != null);
+            const range = node.ir_node.source_range.?;
+            try testing.expectEqual(@as(usize, 2), range.start.line);
+            break;
+        }
+    }
 }
