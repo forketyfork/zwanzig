@@ -1044,3 +1044,202 @@ test "CfgBuilder branch source range" {
         }
     }
 }
+
+test "CfgBuilder fully terminating if-else has no fallthrough edges" {
+    const testing = std.testing;
+    const allocator = testing.allocator;
+
+    const code: [:0]const u8 =
+        \\fn foo(x: i32) i32 {
+        \\    if (x > 0) {
+        \\        return 1;
+        \\    } else {
+        \\        return -1;
+        \\    }
+        \\}
+    ;
+
+    var source = Source.init(allocator, "test.zig", code);
+    defer source.deinit();
+
+    var builder = CfgBuilder.init(allocator);
+    const tree = try source.ast();
+    const root_decls = tree.rootDecls();
+
+    const fn_node = @intFromEnum(root_decls[0]);
+    const maybe_cfg = try builder.buildFromFn(&source, fn_node);
+
+    try testing.expect(maybe_cfg != null);
+
+    var cfg = maybe_cfg.?;
+    defer cfg.deinit();
+
+    // Check that both return nodes connect to exit via jump edges
+    var return_to_exit_jumps: usize = 0;
+    for (cfg.edges.items) |edge| {
+        if (edge.to == cfg.exit and edge.kind == .jump) {
+            return_to_exit_jumps += 1;
+        }
+    }
+    try testing.expectEqual(@as(usize, 2), return_to_exit_jumps);
+
+    // Check there are no normal edges to exit (which would indicate fallthrough)
+    var normal_to_exit: usize = 0;
+    for (cfg.edges.items) |edge| {
+        if (edge.to == cfg.exit and edge.kind == .normal) {
+            normal_to_exit += 1;
+        }
+    }
+    try testing.expectEqual(@as(usize, 0), normal_to_exit);
+}
+
+test "CfgBuilder merge node unreachable when both branches terminate" {
+    const testing = std.testing;
+    const allocator = testing.allocator;
+
+    const code: [:0]const u8 =
+        \\fn foo(x: i32) i32 {
+        \\    if (x > 0) {
+        \\        return 1;
+        \\    } else {
+        \\        return -1;
+        \\    }
+        \\}
+    ;
+
+    var source = Source.init(allocator, "test.zig", code);
+    defer source.deinit();
+
+    var builder = CfgBuilder.init(allocator);
+    const tree = try source.ast();
+    const root_decls = tree.rootDecls();
+
+    const fn_node = @intFromEnum(root_decls[0]);
+    const maybe_cfg = try builder.buildFromFn(&source, fn_node);
+
+    try testing.expect(maybe_cfg != null);
+
+    var cfg = maybe_cfg.?;
+    defer cfg.deinit();
+
+    // Find the merge node (nop node)
+    var merge_node_idx: ?u32 = null;
+    for (cfg.nodes.items, 0..) |node, i| {
+        if (node.ir_node.tag == .nop) {
+            merge_node_idx = @intCast(i);
+            break;
+        }
+    }
+
+    // Merge node should exist but have no incoming edges
+    try testing.expect(merge_node_idx != null);
+    var preds: std.ArrayList(u32) = .empty;
+    defer preds.deinit(allocator);
+
+    try cfg.getPredecessors(allocator, merge_node_idx.?, &preds);
+    try testing.expectEqual(@as(usize, 0), preds.items.len);
+}
+
+test "CfgBuilder only then branch terminates allows fallthrough from else" {
+    const testing = std.testing;
+    const allocator = testing.allocator;
+
+    const code: [:0]const u8 =
+        \\fn foo(x: i32) i32 {
+        \\    var y: i32 = 0;
+        \\    if (x > 0) {
+        \\        return 1;
+        \\    } else {
+        \\        y = -1;
+        \\    }
+        \\    return y;
+        \\}
+    ;
+
+    var source = Source.init(allocator, "test.zig", code);
+    defer source.deinit();
+
+    var builder = CfgBuilder.init(allocator);
+    const tree = try source.ast();
+    const root_decls = tree.rootDecls();
+
+    const fn_node = @intFromEnum(root_decls[0]);
+    const maybe_cfg = try builder.buildFromFn(&source, fn_node);
+
+    try testing.expect(maybe_cfg != null);
+
+    var cfg = maybe_cfg.?;
+    defer cfg.deinit();
+
+    // Should have 2 return nodes (one in if branch, one at end)
+    var ret_count: usize = 0;
+    for (cfg.nodes.items) |node| {
+        if (node.ir_node.tag == .ret) ret_count += 1;
+    }
+    try testing.expectEqual(@as(usize, 2), ret_count);
+
+    // The merge node should have incoming edges (from else branch)
+    var merge_node_idx: ?u32 = null;
+    for (cfg.nodes.items, 0..) |node, i| {
+        if (node.ir_node.tag == .nop) {
+            merge_node_idx = @intCast(i);
+            break;
+        }
+    }
+
+    try testing.expect(merge_node_idx != null);
+    var preds: std.ArrayList(u32) = .empty;
+    defer preds.deinit(allocator);
+
+    try cfg.getPredecessors(allocator, merge_node_idx.?, &preds);
+    try testing.expect(preds.items.len > 0);
+}
+
+test "CfgBuilder trailing statements unreachable after terminating if-else" {
+    const testing = std.testing;
+    const allocator = testing.allocator;
+
+    const code: [:0]const u8 =
+        \\fn foo(x: i32) i32 {
+        \\    if (x > 0) {
+        \\        return 1;
+        \\    } else {
+        \\        return -1;
+        \\    }
+        \\    const a = 1;
+        \\    const b = 2;
+        \\    return a + b;
+        \\}
+    ;
+
+    var source = Source.init(allocator, "test.zig", code);
+    defer source.deinit();
+
+    var builder = CfgBuilder.init(allocator);
+    const tree = try source.ast();
+    const root_decls = tree.rootDecls();
+
+    const fn_node = @intFromEnum(root_decls[0]);
+    const maybe_cfg = try builder.buildFromFn(&source, fn_node);
+
+    try testing.expect(maybe_cfg != null);
+
+    var cfg = maybe_cfg.?;
+    defer cfg.deinit();
+
+    // Trailing statements should not be included in CFG
+    var var_decl_count: usize = 0;
+    var ret_count: usize = 0;
+    for (cfg.nodes.items) |node| {
+        switch (node.ir_node.tag) {
+            .var_decl => var_decl_count += 1,
+            .ret => ret_count += 1,
+            else => {},
+        }
+    }
+
+    // No var decls should be present (they are unreachable)
+    try testing.expectEqual(@as(usize, 0), var_decl_count);
+    // Only the 2 returns inside if/else should be present
+    try testing.expectEqual(@as(usize, 2), ret_count);
+}
