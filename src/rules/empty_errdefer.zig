@@ -18,43 +18,41 @@ pub const EmptyErrdeferRule = struct {
         for (tags, 0..) |tag, i| {
             if (tag == .@"errdefer") {
                 const errdefer_node: u32 = @intCast(i);
-                const errdefer_body_opt = data[errdefer_node].opt_node;
+                const errdefer_body = data[errdefer_node].opt_token_and_node[1];
 
-                if (errdefer_body_opt.unwrap()) |errdefer_body_node| {
-                    const errdefer_body_idx = @intFromEnum(errdefer_body_node);
-                    if (errdefer_body_idx < tags.len) {
-                        const body_tag = tags[errdefer_body_idx];
+                const errdefer_body_idx = @intFromEnum(errdefer_body);
+                if (errdefer_body_idx != 0 and errdefer_body_idx < tags.len) {
+                    const body_tag = tags[errdefer_body_idx];
 
-                        var is_empty = false;
-                        switch (body_tag) {
-                            .block, .block_semicolon => {
-                                const extra = data[errdefer_body_idx].extra_range;
-                                const start: usize = @intFromEnum(extra.start);
-                                const end: usize = @intFromEnum(extra.end);
-                                is_empty = (end <= start);
-                            },
-                            .block_two, .block_two_semicolon => {
-                                const opt_nodes = data[errdefer_body_idx].opt_node_and_opt_node;
-                                is_empty = (opt_nodes[0].unwrap() == null and opt_nodes[1].unwrap() == null);
-                            },
-                            else => {},
-                        }
+                    var is_empty = false;
+                    switch (body_tag) {
+                        .block, .block_semicolon => {
+                            const extra = data[errdefer_body_idx].extra_range;
+                            const start: usize = @intFromEnum(extra.start);
+                            const end: usize = @intFromEnum(extra.end);
+                            is_empty = (end <= start);
+                        },
+                        .block_two, .block_two_semicolon => {
+                            const opt_nodes = data[errdefer_body_idx].opt_node_and_opt_node;
+                            is_empty = (opt_nodes[0].unwrap() == null and opt_nodes[1].unwrap() == null);
+                        },
+                        else => {},
+                    }
 
-                        if (is_empty) {
-                            const main_tokens = tree.nodes.items(.main_token);
-                            const token_starts = tree.tokens.items(.start);
-                            const main_token = main_tokens[errdefer_node];
-                            const errdefer_byte_offset = token_starts[main_token];
-                            const loc = try src.byteToLocation(errdefer_byte_offset);
-                            try diagnostics.append(allocator, Diagnostic.initAtLocation(
-                                src.getFilePath(),
-                                rule.name,
-                                .warning,
-                                "empty errdefer block",
-                                loc.line,
-                                loc.column,
-                            ));
-                        }
+                    if (is_empty) {
+                        const main_tokens = tree.nodes.items(.main_token);
+                        const token_starts = tree.tokens.items(.start);
+                        const main_token = main_tokens[errdefer_node];
+                        const errdefer_byte_offset = token_starts[main_token];
+                        const loc = try src.byteToLocation(errdefer_byte_offset);
+                        try diagnostics.append(allocator, Diagnostic.initAtLocation(
+                            src.getFilePath(),
+                            rule.name,
+                            .warning,
+                            "empty errdefer block",
+                            loc.line,
+                            loc.column,
+                        ));
                     }
                 }
             }

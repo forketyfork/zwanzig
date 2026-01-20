@@ -16,64 +16,207 @@ pub const UnreachableCodeRule = struct {
 
     fn check(src: *Source, allocator: std.mem.Allocator, diagnostics: *std.ArrayList(Diagnostic)) RuleError!void {
         const tree = try src.ast();
-
-        var builder = CfgBuilder.init(allocator);
-
         const tags = tree.nodes.items(.tag);
+
         for (tags, 0..) |tag, i| {
             if (tag == .fn_decl) {
                 const fn_node: u32 = @intCast(i);
-                var cfg_opt = builder.buildFromFn(src, fn_node) catch continue;
-                if (cfg_opt) |*cfg| {
-                    defer cfg.deinit();
+                try checkFunctionForUnreachable(src, allocator, diagnostics, fn_node);
+            }
+        }
+    }
 
-                    var engine = AnalysisEngine.init(allocator, cfg);
-                    defer engine.deinit();
+    fn checkFunctionForUnreachable(
+        src: *Source,
+        allocator: std.mem.Allocator,
+        diagnostics: *std.ArrayList(Diagnostic),
+        fn_node: u32,
+    ) RuleError!void {
+        const tree = try src.ast();
+        const tags = tree.nodes.items(.tag);
+        const data = tree.nodes.items(.data);
 
-                    try engine.run();
+        var body_node: ?u32 = null;
 
-                    const graph = engine.getGraph();
+        if (tags[fn_node] == .fn_decl) {
+            const node_data = data[fn_node];
+            _ = node_data.opt_node_and_opt_node[0].unwrap() orelse return;
+            body_node = @intFromEnum(node_data.opt_node_and_opt_node[1].unwrap() orelse return);
+        }
 
-                    for (cfg.nodes.items, 0..) |cfg_node, node_idx| {
-                        const cfg_node_idx: u32 = @intCast(node_idx);
+        if (body_node) |body| {
+            try checkBlockForUnreachable(src, allocator, diagnostics, body);
+        }
+    }
 
-                        if (cfg_node_idx == cfg.entry or cfg_node_idx == cfg.exit) {
-                            continue;
-                        }
+    fn checkBlockForUnreachable(
+        src: *Source,
+        allocator: std.mem.Allocator,
+        diagnostics: *std.ArrayList(Diagnostic),
+        block_node: u32,
+    ) RuleError!void {
+        const tree = try src.ast();
+        const tags = tree.nodes.items(.tag);
+        const data = tree.nodes.items(.data);
 
-                        if (cfg_node.ir_node.tag == .nop) {
-                            continue;
-                        }
+        const block_tag = tags[block_node];
+        var statements: []const u32 = &.{};
+        var scratch_buf: [2]u32 = undefined;
 
-                        var has_incoming_feasible_edge = false;
-                        for (graph.nodes.items) |exploded_node| {
-                            if (exploded_node.point.node_index == cfg_node_idx) {
-                                has_incoming_feasible_edge = true;
-                                break;
-                            }
-                        }
+        switch (block_tag) {
+            .block, .block_semicolon => {
+                const extra_range = data[block_node].extra_range;
+                const start = @intFromEnum(extra_range.start);
+                const end = @intFromEnum(extra_range.end);
+                statements = tree.extra_data[start..end];
+            },
+            .block_two, .block_two_semicolon => {
+                const opt_nodes = data[block_node].opt_node_and_opt_node;
+                var count: usize = 0;
+                if (opt_nodes[0].unwrap()) |n| {
+                    scratch_buf[count] = @intFromEnum(n);
+                    count += 1;
+                }
+                if (opt_nodes[1].unwrap()) |n| {
+                    scratch_buf[count] = @intFromEnum(n);
+                    count += 1;
+                }
+                statements = scratch_buf[0..count];
+            },
+            else => return,
+        }
 
-                        if (!has_incoming_feasible_edge) {
-                            if (cfg_node.ir_node.ast_node) |ast_node| {
-                                const tree_local = try src.ast();
-                                const main_tokens = tree_local.nodes.items(.main_token);
-                                const token_starts = tree_local.tokens.items(.start);
-                                const main_token = main_tokens[ast_node];
-                                const byte_offset = token_starts[main_token];
-                                const loc = try src.byteToLocation(byte_offset);
-                                try diagnostics.append(allocator, Diagnostic.initAtLocation(
-                                    src.getFilePath(),
-                                    rule.name,
-                                    .warning,
-                                    "unreachable code detected",
-                                    loc.line,
-                                    loc.column,
-                                ));
-                            }
-                        }
-                    }
+        var found_terminator = false;
+        for (statements) |stmt| {
+            if (found_terminator) {
+                const main_tokens = tree.nodes.items(.main_token);
+                const token_starts = tree.tokens.items(.start);
+                const main_token = main_tokens[stmt];
+                const byte_offset = token_starts[main_token];
+                const loc = try src.byteToLocation(byte_offset);
+                try diagnostics.append(allocator, Diagnostic.initAtLocation(
+                    src.getFilePath(),
+                    rule.name,
+                    .warning,
+                    "unreachable code detected",
+                    loc.line,
+                    loc.column,
+                ));
+            }
+
+            const stmt_tag = tags[stmt];
+            if (stmt_tag == .@"return") {
+                found_terminator = true;
+            } else if (stmt_tag == .@"if") {
+                if (try isIfFullyTerminating(src, stmt)) {
+                    found_terminator = true;
                 }
             }
+
+            try checkStatementRecursively(src, allocator, diagnostics, stmt);
+        }
+    }
+
+    fn isIfFullyTerminating(src: *Source, if_node: u32) RuleError!bool {
+        const tree = try src.ast();
+        const data = tree.nodes.items(.data);
+
+        const if_data = data[if_node];
+        const then_expr = @intFromEnum(if_data.opt_node_and_opt_node[0].unwrap() orelse return false);
+        const else_expr_opt = if_data.opt_node_and_opt_node[1].unwrap();
+
+        if (else_expr_opt == null) {
+            return false;
+        }
+
+        const else_expr = @intFromEnum(else_expr_opt.?);
+
+        const then_terminates = try doesBlockTerminate(src, then_expr);
+        const else_terminates = try doesBlockTerminate(src, else_expr);
+
+        return then_terminates and else_terminates;
+    }
+
+    fn doesBlockTerminate(src: *Source, node: u32) RuleError!bool {
+        const tree = try src.ast();
+        const tags = tree.nodes.items(.tag);
+        const data = tree.nodes.items(.data);
+
+        const node_tag = tags[node];
+
+        if (node_tag == .@"return") {
+            return true;
+        }
+
+        var statements: []const u32 = &.{};
+        var scratch_buf: [2]u32 = undefined;
+
+        switch (node_tag) {
+            .block, .block_semicolon => {
+                const extra_range = data[node].extra_range;
+                const start = @intFromEnum(extra_range.start);
+                const end = @intFromEnum(extra_range.end);
+                statements = tree.extra_data[start..end];
+            },
+            .block_two, .block_two_semicolon => {
+                const opt_nodes = data[node].opt_node_and_opt_node;
+                var count: usize = 0;
+                if (opt_nodes[0].unwrap()) |n| {
+                    scratch_buf[count] = @intFromEnum(n);
+                    count += 1;
+                }
+                if (opt_nodes[1].unwrap()) |n| {
+                    scratch_buf[count] = @intFromEnum(n);
+                    count += 1;
+                }
+                statements = scratch_buf[0..count];
+            },
+            else => return false,
+        }
+
+        if (statements.len == 0) {
+            return false;
+        }
+
+        const last_stmt = statements[statements.len - 1];
+        const last_tag = tags[last_stmt];
+
+        if (last_tag == .@"return") {
+            return true;
+        }
+
+        if (last_tag == .@"if") {
+            return try isIfFullyTerminating(src, last_stmt);
+        }
+
+        return false;
+    }
+
+    fn checkStatementRecursively(
+        src: *Source,
+        allocator: std.mem.Allocator,
+        diagnostics: *std.ArrayList(Diagnostic),
+        stmt_node: u32,
+    ) RuleError!void {
+        const tree = try src.ast();
+        const data = tree.nodes.items(.data);
+
+        const stmt_tag = tree.nodes.items(.tag)[stmt_node];
+
+        switch (stmt_tag) {
+            .block, .block_semicolon, .block_two, .block_two_semicolon => {
+                try checkBlockForUnreachable(src, allocator, diagnostics, stmt_node);
+            },
+            .@"if" => {
+                const if_data = data[stmt_node];
+                if (if_data.opt_node_and_opt_node[0].unwrap()) |then_node| {
+                    try checkStatementRecursively(src, allocator, diagnostics, @intFromEnum(then_node));
+                }
+                if (if_data.opt_node_and_opt_node[1].unwrap()) |else_node| {
+                    try checkStatementRecursively(src, allocator, diagnostics, @intFromEnum(else_node));
+                }
+            },
+            else => {},
         }
     }
 };
