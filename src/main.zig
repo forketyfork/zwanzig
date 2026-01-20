@@ -14,6 +14,7 @@ test {
     _ = @import("cfg.zig");
     _ = @import("checker.zig");
     _ = @import("zir_bridge.zig");
+    _ = @import("engine.zig");
 }
 
 pub const CliArgs = struct {

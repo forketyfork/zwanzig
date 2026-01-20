@@ -98,19 +98,19 @@ pub const ExplodedNode = struct {
     /// Indices of successor nodes in the exploded graph
     successors: std.ArrayList(u32),
 
-    pub fn init(allocator: std.mem.Allocator, point: ProgramPoint, state: ProgramState, index: u32) ExplodedNode {
+    pub fn init(point: ProgramPoint, state: ProgramState, index: u32) ExplodedNode {
         return .{
             .point = point,
             .state = state,
             .index = index,
-            .predecessors = std.ArrayList(u32).init(allocator),
-            .successors = std.ArrayList(u32).init(allocator),
+            .predecessors = .empty,
+            .successors = .empty,
         };
     }
 
-    pub fn deinit(self: *ExplodedNode) void {
-        self.predecessors.deinit();
-        self.successors.deinit();
+    pub fn deinit(self: *ExplodedNode, allocator: std.mem.Allocator) void {
+        self.predecessors.deinit(allocator);
+        self.successors.deinit(allocator);
     }
 
     /// Compute a combined hash for point and state (used for deduplication)
@@ -137,7 +137,7 @@ pub const ExplodedGraph = struct {
     pub fn init(allocator: std.mem.Allocator, cfg: *const Cfg) ExplodedGraph {
         return .{
             .allocator = allocator,
-            .nodes = std.ArrayList(ExplodedNode).init(allocator),
+            .nodes = .empty,
             .node_map = std.AutoHashMap(u64, u32).init(allocator),
             .cfg = cfg,
         };
@@ -145,9 +145,9 @@ pub const ExplodedGraph = struct {
 
     pub fn deinit(self: *ExplodedGraph) void {
         for (self.nodes.items) |*node| {
-            node.deinit();
+            node.deinit(self.allocator);
         }
-        self.nodes.deinit();
+        self.nodes.deinit(self.allocator);
         self.node_map.deinit();
     }
 
@@ -161,9 +161,9 @@ pub const ExplodedGraph = struct {
         }
 
         const index: u32 = @intCast(self.nodes.items.len);
-        var node = ExplodedNode.init(self.allocator, point, state, index);
+        const node = ExplodedNode.init(point, state, index);
 
-        try self.nodes.append(node);
+        try self.nodes.append(self.allocator, node);
         try self.node_map.put(key, index);
 
         return .{ .index = index, .is_new = true };
@@ -175,8 +175,8 @@ pub const ExplodedGraph = struct {
             return;
         }
 
-        try self.nodes.items[from_index].successors.append(to_index);
-        try self.nodes.items[to_index].predecessors.append(from_index);
+        try self.nodes.items[from_index].successors.append(self.allocator, to_index);
+        try self.nodes.items[to_index].predecessors.append(self.allocator, from_index);
     }
 
     /// Get a node by index
@@ -213,14 +213,14 @@ pub const AnalysisEngine = struct {
         return .{
             .allocator = allocator,
             .graph = ExplodedGraph.init(allocator, cfg),
-            .worklist = std.ArrayList(WorklistItem).init(allocator),
+            .worklist = .empty,
             .state_counter = 0,
         };
     }
 
     pub fn deinit(self: *AnalysisEngine) void {
         self.graph.deinit();
-        self.worklist.deinit();
+        self.worklist.deinit(self.allocator);
     }
 
     /// Run the analysis on the CFG, building the exploded graph.
@@ -231,10 +231,9 @@ pub const AnalysisEngine = struct {
         const entry_point = ProgramPoint.initPre(cfg.entry);
 
         const result = try self.graph.getOrCreateNode(entry_point, initial_state);
-        try self.worklist.append(.{ .node_index = result.index, .edge_kind = .normal });
+        try self.worklist.append(self.allocator, .{ .node_index = result.index, .edge_kind = .normal });
 
-        while (self.worklist.items.len > 0) {
-            const item = self.worklist.pop();
+        while (self.worklist.pop()) |item| {
             try self.processNode(item.node_index, item.edge_kind);
         }
     }
@@ -261,7 +260,7 @@ pub const AnalysisEngine = struct {
                 try self.graph.addEdge(node_index, result.index);
 
                 if (result.is_new) {
-                    try self.worklist.append(.{ .node_index = result.index, .edge_kind = .normal });
+                    try self.worklist.append(self.allocator, .{ .node_index = result.index, .edge_kind = .normal });
                 }
             },
             .post => {
@@ -279,7 +278,7 @@ pub const AnalysisEngine = struct {
                         try self.graph.addEdge(node_index, result.index);
 
                         if (result.is_new) {
-                            try self.worklist.append(.{ .node_index = result.index, .edge_kind = edge.kind });
+                            try self.worklist.append(self.allocator, .{ .node_index = result.index, .edge_kind = edge.kind });
                         }
                     }
                 }
