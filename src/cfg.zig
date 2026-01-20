@@ -298,7 +298,7 @@ pub const CfgBuilder = struct {
         var then_body: u32 = 0;
         var else_body: ?u32 = null;
 
-        const full_if = tree.fullIf(@enumFromInt(ast_node)) orelse return null;
+        const full_if = tree.fullIf(@enumFromInt(ast_node)) orelse return .{ .last = null, .terminates = false };
         then_body = @intFromEnum(full_if.ast.then_expr);
         else_body = if (full_if.ast.else_expr.unwrap()) |e| @intFromEnum(e) else null;
 
