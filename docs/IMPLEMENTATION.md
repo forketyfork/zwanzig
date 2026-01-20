@@ -377,11 +377,11 @@ The CFG provides methods for traversing the graph:
 ```zig
 // Get all successor node indices
 var succs: std.ArrayList(u32) = .empty;
-try cfg.getSuccessors(node_index, &succs);
+try cfg.getSuccessors(allocator, node_index, &succs);
 
 // Get all predecessor node indices
 var preds: std.ArrayList(u32) = .empty;
-try cfg.getPredecessors(node_index, &preds);
+try cfg.getPredecessors(allocator, node_index, &preds);
 ```
 
 ### Source Location Mapping

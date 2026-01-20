@@ -140,7 +140,11 @@ pub const UnusedDeclRule = struct {
                 .keyword_pub => return true,
                 .keyword_export => return true,
                 .keyword_extern => return true,
-                .keyword_inline, .keyword_noinline => continue,
+                .keyword_inline,
+                .keyword_noinline,
+                .keyword_comptime,
+                .keyword_threadlocal,
+                => continue,
                 else => return false,
             }
         }
@@ -467,6 +471,24 @@ test "pub inline function - no violation" {
 
     const code: [:0]const u8 =
         \\pub inline fn helper() void {}
+    ;
+    var source = Source.init(allocator, "test.zig", code);
+    defer source.deinit();
+    try UnusedDeclRule.rule.check(&source, allocator, &diagnostics);
+
+    try testing.expectEqual(@as(usize, 0), diagnostics.items.len);
+}
+
+test "pub comptime function - no violation" {
+    const testing = std.testing;
+    const allocator = testing.allocator;
+
+    var diagnostics: std.ArrayList(Diagnostic) = .empty;
+    defer diagnostics.deinit(allocator);
+    defer for (diagnostics.items) |diag| allocator.free(@constCast(diag.message));
+
+    const code: [:0]const u8 =
+        \\pub comptime fn helper() void {}
     ;
     var source = Source.init(allocator, "test.zig", code);
     defer source.deinit();

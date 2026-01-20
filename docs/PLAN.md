@@ -330,7 +330,67 @@ Add CFG support for `if/else` and basic branching.
 - `zig build` succeeds.
 - `zig build test` succeeds.
 
-## Step 12: CFG Builder - Loops and Defers
+## Step 12: Checker Interface + Rule Adapter
+
+### Status Quo
+
+Rules are invoked directly by the analyzer and are tightly coupled to the current AST-only pipeline.
+
+### Objectives
+
+Introduce a checker interface and manager, plus an adapter so existing rules continue to work unchanged.
+
+### Tech Notes
+
+- Add a minimal `Checker` interface with a small set of hooks (start with AST-only hooks).
+- Add a `CheckerManager` that owns checker registration and dispatch.
+- Provide a compatibility adapter that wraps existing `Rule` implementations as checkers.
+- Keep rule selection flags working with the new manager.
+
+### Scope Guard
+
+- Do not implement features from later steps.
+- Keep net new/changed code under ~1000 LOC for this step.
+- Limit changes to the files directly needed for this step; avoid broad refactors.
+
+### Acceptance Criteria
+
+- Existing rules still run and emit identical diagnostics.
+- New checker API is documented (IMPLEMENTATION.md).
+- Tests cover checker registration and adapter behavior.
+- `zig build` succeeds.
+- `zig build test` succeeds.
+
+## Step 13: CFG Builder - Termination and Fallthrough
+
+### Status Quo
+
+CFG may incorrectly allow fallthrough after statements that terminate control flow (e.g., fully-terminating `if/else`).
+
+### Objectives
+
+Model termination explicitly and prevent fallthrough edges after paths that must return.
+
+### Tech Notes
+
+- Propagate termination status through CFG builder traversal.
+- Stop block processing after a terminating statement or fully-terminating branch.
+- Ensure no extra edges are added from terminating statements or branches to merge/exit nodes.
+
+### Scope Guard
+
+- Do not implement features from later steps.
+- Keep net new/changed code under ~1000 LOC for this step.
+- Limit changes to the files directly needed for this step; avoid broad refactors.
+
+### Acceptance Criteria
+
+- CFG does not include fallthrough edges after terminating `if/else`.
+- Tests cover if/else termination and unreachable trailing statements.
+- `zig build` succeeds.
+- `zig build test` succeeds.
+
+## Step 14: CFG Builder - Loops and Defers
 
 ### Status Quo
 
@@ -359,7 +419,7 @@ Add CFG support for loops and defer/errdefer ordering.
 - `zig build` succeeds.
 - `zig build test` succeeds.
 
-## Step 13: CFG Builder - Try/Catch Edges
+## Step 15: CFG Builder - Try/Catch Edges
 
 ### Status Quo
 
@@ -388,7 +448,36 @@ Add CFG support for `try`/`catch` control-flow edges.
 - `zig build` succeeds.
 - `zig build test` succeeds.
 
-## Step 14: ProgramPoint + ProgramState Skeleton
+## Step 16: Typed IR Bridge (Single Module)
+
+### Status Quo
+
+Analysis relies on syntax AST without typed information.
+
+### Objectives
+
+Add a front-end bridge that loads typed IR for a single module.
+
+### Tech Notes
+
+- Use Zig tooling outputs (e.g., ZIR/AIR) to obtain typed info.
+- Map typed IR to internal IR/CFG for a small test module.
+
+### Scope Guard
+
+- Do not implement features from later steps.
+- Keep net new/changed code under ~1000 LOC for this step.
+- Limit changes to the files directly needed for this step; avoid broad refactors.
+
+### Acceptance Criteria
+
+- Analyzer can load typed IR for a single test module.
+- Documentation updated to describe typed IR integration.
+- Tests cover typed IR ingestion for a small fixture.
+- `zig build` succeeds.
+- `zig build test` succeeds.
+
+## Step 17: ProgramPoint + ProgramState Skeleton
 
 ### Status Quo
 
@@ -420,7 +509,7 @@ Implement ProgramPoint, ProgramState placeholders, and a worklist traversal.
 - `zig build` succeeds.
 - `zig build test` succeeds.
 
-## Step 15: Abstract Values + Basic Evaluation
+## Step 18: Abstract Values + Basic Evaluation
 
 ### Status Quo
 
@@ -450,7 +539,7 @@ Add abstract values and evaluation for literals/assignments.
 - `zig build` succeeds.
 - `zig build test` succeeds.
 
-## Step 16: Branch Constraints and Pruning
+## Step 19: Branch Constraints and Pruning
 
 ### Status Quo
 
@@ -480,7 +569,7 @@ Introduce a simple constraint manager and branch pruning.
 - `zig build` succeeds.
 - `zig build test` succeeds.
 
-## Step 17: Easy CFG-Based Rules
+## Step 20: Easy CFG-Based Rules
 
 ### Status Quo
 
@@ -509,7 +598,7 @@ Add simple CFG-based rules: `unreachable_code`, `empty_defer`, `empty_errdefer`.
 - `zig build` succeeds.
 - `zig build test` succeeds.
 
-## Step 18: Error Semantics
+## Step 21: Error Semantics
 
 ### Status Quo
 
@@ -539,7 +628,7 @@ Model error flow in ProgramState for `try`, `catch`, and error unions.
 - `zig build` succeeds.
 - `zig build test` succeeds.
 
-## Step 19: Error-Handling Checkers
+## Step 22: Error-Handling Checkers
 
 ### Status Quo
 
@@ -568,7 +657,7 @@ Move `empty_catch` into the engine and add `swallowed_error` checker.
 - `zig build` succeeds.
 - `zig build test` succeeds.
 
-## Step 20: Interprocedural Inlining
+## Step 23: Interprocedural Inlining
 
 ### Status Quo
 
@@ -597,7 +686,7 @@ Add limited inlining for function calls.
 - `zig build` succeeds.
 - `zig build test` succeeds.
 
-## Step 21: Function Summaries and Cache
+## Step 24: Function Summaries and Cache
 
 ### Status Quo
 
@@ -626,36 +715,7 @@ Implement function summaries and caching to avoid re-analysis.
 - `zig build` succeeds.
 - `zig build test` succeeds.
 
-## Step 22: Typed IR Bridge (Single Module)
-
-### Status Quo
-
-Analysis relies on syntax AST without typed information.
-
-### Objectives
-
-Add a front-end bridge that loads typed IR for a single module.
-
-### Tech Notes
-
-- Use Zig tooling outputs (e.g., ZIR/AIR) to obtain typed info.
-- Map typed IR to internal IR/CFG for a small test module.
-
-### Scope Guard
-
-- Do not implement features from later steps.
-- Keep net new/changed code under ~1000 LOC for this step.
-- Limit changes to the files directly needed for this step; avoid broad refactors.
-
-### Acceptance Criteria
-
-- Analyzer can load typed IR for a single test module.
-- Documentation updated to describe typed IR integration.
-- Tests cover typed IR ingestion for a small fixture.
-- `zig build` succeeds.
-- `zig build test` succeeds.
-
-## Step 23: Build Metadata Integration
+## Step 25: Build Metadata Integration
 
 ### Status Quo
 
@@ -684,7 +744,7 @@ Integrate build metadata and target configuration into analysis.
 - `zig build` succeeds.
 - `zig build test` succeeds.
 
-## Step 24: Configuration File Support
+## Step 26: Configuration File Support
 
 ### Status Quo
 
@@ -713,7 +773,7 @@ Add a configuration file to enable/disable rules and set thresholds.
 - `zig build` succeeds.
 - `zig build test` succeeds.
 
-## Step 25: JSON Output
+## Step 27: JSON Output
 
 ### Status Quo
 
@@ -742,7 +802,7 @@ Add JSON output format for diagnostics.
 - `zig build` succeeds.
 - `zig build test` succeeds.
 
-## Step 26: SARIF Output
+## Step 28: SARIF Output
 
 ### Status Quo
 
@@ -771,7 +831,7 @@ Add SARIF output format for diagnostics.
 - `zig build` succeeds.
 - `zig build test` succeeds.
 
-## Step 27: Incremental Cache
+## Step 29: Incremental Cache
 
 ### Status Quo
 

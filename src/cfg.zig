@@ -119,18 +119,18 @@ pub const Cfg = struct {
         return &self.nodes.items[index];
     }
 
-    pub fn getSuccessors(self: *const Cfg, node_index: u32, result: *std.ArrayList(u32)) !void {
+    pub fn getSuccessors(self: *const Cfg, allocator: std.mem.Allocator, node_index: u32, result: *std.ArrayList(u32)) !void {
         for (self.edges.items) |edge| {
             if (edge.from == node_index) {
-                try result.append(self.allocator, edge.to);
+                try result.append(allocator, edge.to);
             }
         }
     }
 
-    pub fn getPredecessors(self: *const Cfg, node_index: u32, result: *std.ArrayList(u32)) !void {
+    pub fn getPredecessors(self: *const Cfg, allocator: std.mem.Allocator, node_index: u32, result: *std.ArrayList(u32)) !void {
         for (self.edges.items) |edge| {
             if (edge.to == node_index) {
-                try result.append(self.allocator, edge.from);
+                try result.append(allocator, edge.from);
             }
         }
     }
@@ -139,6 +139,11 @@ pub const Cfg = struct {
 /// Builds CFG from a Zig AST for a single function.
 pub const CfgBuilder = struct {
     allocator: std.mem.Allocator,
+
+    const ProcessResult = struct {
+        last: ?u32,
+        terminates: bool,
+    };
 
     pub fn init(allocator: std.mem.Allocator) CfgBuilder {
         return .{ .allocator = allocator };
@@ -174,9 +179,9 @@ pub const CfgBuilder = struct {
             return cfg;
         }
 
-        const last_node = try self.processNode(&cfg, source, body_node, entry_idx);
-        if (last_node) |ln| {
-            if (!self.isTerminator(&cfg, ln)) {
+        const result = try self.processNode(&cfg, source, body_node, entry_idx);
+        if (result.last) |ln| {
+            if (!result.terminates) {
                 try cfg.addEdge(ln, exit_idx);
             }
         } else {
@@ -186,26 +191,18 @@ pub const CfgBuilder = struct {
         return cfg;
     }
 
-    fn isTerminator(self: *CfgBuilder, cfg: *const Cfg, node_idx: u32) bool {
-        _ = self;
-        if (cfg.getNode(node_idx)) |node| {
-            return node.ir_node.tag == .ret;
-        }
-        return false;
-    }
-
     fn processNode(
         self: *CfgBuilder,
         cfg: *Cfg,
         source: *Source,
         ast_node: u32,
         prev_node: u32,
-    ) CfgError!?u32 {
+    ) CfgError!ProcessResult {
         const tree = try source.ast();
         const tags = tree.nodes.items(.tag);
 
         if (ast_node == 0 or ast_node >= tags.len) {
-            return null;
+            return .{ .last = null, .terminates = false };
         }
 
         const tag = tags[ast_node];
@@ -227,7 +224,7 @@ pub const CfgBuilder = struct {
         source: *Source,
         ast_node: u32,
         prev_node: u32,
-    ) !?u32 {
+    ) !ProcessResult {
         const tree = try source.ast();
         const tags = tree.nodes.items(.tag);
         const data = tree.nodes.items(.data);
@@ -259,29 +256,30 @@ pub const CfgBuilder = struct {
                 }
                 stmts = inline_stmts[0..count];
             },
-            else => return null,
+            else => return .{ .last = null, .terminates = false },
         }
 
         if (stmts.len == 0) {
-            return null;
+            return .{ .last = null, .terminates = false };
         }
 
         var current_prev = prev_node;
         var last_processed: ?u32 = null;
+        var terminates = false;
 
         for (stmts) |stmt| {
             const result = try self.processNode(cfg, source, stmt, current_prev);
-            if (result) |node_idx| {
+            if (result.last) |node_idx| {
                 last_processed = node_idx;
                 current_prev = node_idx;
-
-                if (self.isTerminator(cfg, node_idx)) {
-                    break;
-                }
+            }
+            if (result.terminates) {
+                terminates = true;
+                break;
             }
         }
 
-        return last_processed;
+        return .{ .last = last_processed, .terminates = terminates };
     }
 
     fn processIf(
@@ -290,7 +288,7 @@ pub const CfgBuilder = struct {
         source: *Source,
         ast_node: u32,
         prev_node: u32,
-    ) !?u32 {
+    ) !ProcessResult {
         const tree = try source.ast();
 
         const range = try getSourceRange(source, ast_node);
@@ -312,8 +310,8 @@ pub const CfgBuilder = struct {
             const then_result = try self.processNode(cfg, source, then_body, branch_node);
             self.markEdgeFromBranchTrue(cfg, edge_count_before, branch_node);
 
-            if (then_result) |then_end| {
-                if (self.isTerminator(cfg, then_end)) {
+            if (then_result.last) |then_end| {
+                if (then_result.terminates) {
                     then_terminates = true;
                 } else {
                     try cfg.addEdge(then_end, merge_node);
@@ -332,8 +330,8 @@ pub const CfgBuilder = struct {
                 const else_result = try self.processNode(cfg, source, else_node, branch_node);
                 self.markEdgeFromBranchFalse(cfg, edge_count_before, branch_node);
 
-                if (else_result) |else_end| {
-                    if (self.isTerminator(cfg, else_end)) {
+                if (else_result.last) |else_end| {
+                    if (else_result.terminates) {
                         else_terminates = true;
                     } else {
                         try cfg.addEdge(else_end, merge_node);
@@ -349,10 +347,10 @@ pub const CfgBuilder = struct {
         }
 
         if (then_terminates and else_terminates) {
-            return branch_node;
+            return .{ .last = branch_node, .terminates = true };
         }
 
-        return merge_node;
+        return .{ .last = merge_node, .terminates = false };
     }
 
     fn markEdgeFromBranchTrue(self: *CfgBuilder, cfg: *Cfg, edge_start_idx: usize, branch_node: u32) void {
@@ -381,13 +379,13 @@ pub const CfgBuilder = struct {
         source: *Source,
         ast_node: u32,
         prev_node: u32,
-    ) !?u32 {
+    ) !ProcessResult {
         _ = self;
         const range = try getSourceRange(source, ast_node);
         const ret_node = try cfg.addNode(IrNode.initFull(.ret, ast_node, range));
         try cfg.addEdge(prev_node, ret_node);
         try cfg.addEdgeWithKind(ret_node, cfg.exit, .jump);
-        return ret_node;
+        return .{ .last = ret_node, .terminates = true };
     }
 
     fn processVarDecl(
@@ -396,12 +394,12 @@ pub const CfgBuilder = struct {
         source: *Source,
         ast_node: u32,
         prev_node: u32,
-    ) !?u32 {
+    ) !ProcessResult {
         _ = self;
         const range = try getSourceRange(source, ast_node);
         const decl_node = try cfg.addNode(IrNode.initFull(.var_decl, ast_node, range));
         try cfg.addEdge(prev_node, decl_node);
-        return decl_node;
+        return .{ .last = decl_node, .terminates = false };
     }
 
     fn processAssign(
@@ -410,12 +408,12 @@ pub const CfgBuilder = struct {
         source: *Source,
         ast_node: u32,
         prev_node: u32,
-    ) !?u32 {
+    ) !ProcessResult {
         _ = self;
         const range = try getSourceRange(source, ast_node);
         const assign_node = try cfg.addNode(IrNode.initFull(.assign, ast_node, range));
         try cfg.addEdge(prev_node, assign_node);
-        return assign_node;
+        return .{ .last = assign_node, .terminates = false };
     }
 
     fn processCall(
@@ -424,12 +422,12 @@ pub const CfgBuilder = struct {
         source: *Source,
         ast_node: u32,
         prev_node: u32,
-    ) !?u32 {
+    ) !ProcessResult {
         _ = self;
         const range = try getSourceRange(source, ast_node);
         const call_node = try cfg.addNode(IrNode.initFull(.call, ast_node, range));
         try cfg.addEdge(prev_node, call_node);
-        return call_node;
+        return .{ .last = call_node, .terminates = false };
     }
 
     fn processGenericExpr(
@@ -438,12 +436,12 @@ pub const CfgBuilder = struct {
         source: *Source,
         ast_node: u32,
         prev_node: u32,
-    ) !?u32 {
+    ) !ProcessResult {
         _ = self;
         const range = try getSourceRange(source, ast_node);
         const expr_node = try cfg.addNode(IrNode.initFull(.expr, ast_node, range));
         try cfg.addEdge(prev_node, expr_node);
-        return expr_node;
+        return .{ .last = expr_node, .terminates = false };
     }
 };
 
@@ -506,19 +504,19 @@ test "Cfg successors and predecessors" {
     var succs: std.ArrayList(u32) = .empty;
     defer succs.deinit(allocator);
 
-    try cfg.getSuccessors(n0, &succs);
+    try cfg.getSuccessors(allocator, n0, &succs);
     try testing.expectEqual(@as(usize, 1), succs.items.len);
     try testing.expectEqual(n1, succs.items[0]);
 
     succs.clearRetainingCapacity();
-    try cfg.getSuccessors(n1, &succs);
+    try cfg.getSuccessors(allocator, n1, &succs);
     try testing.expectEqual(@as(usize, 1), succs.items.len);
     try testing.expectEqual(n2, succs.items[0]);
 
     var preds: std.ArrayList(u32) = .empty;
     defer preds.deinit(allocator);
 
-    try cfg.getPredecessors(n2, &preds);
+    try cfg.getPredecessors(allocator, n2, &preds);
     try testing.expectEqual(@as(usize, 1), preds.items.len);
     try testing.expectEqual(n1, preds.items[0]);
 }
@@ -865,6 +863,50 @@ test "CfgBuilder if-else branches" {
     }
 
     try testing.expect(branch_true_edges > 0 or branch_false_edges > 0);
+}
+
+test "CfgBuilder if-else terminates block" {
+    const testing = std.testing;
+    const allocator = testing.allocator;
+
+    const code: [:0]const u8 =
+        \\fn foo(x: i32) i32 {
+        \\    if (x > 0) {
+        \\        return 1;
+        \\    } else {
+        \\        return -1;
+        \\    }
+        \\    const z = 2;
+        \\}
+    ;
+
+    var source = Source.init(allocator, "test.zig", code);
+    defer source.deinit();
+
+    var builder = CfgBuilder.init(allocator);
+    const tree = try source.ast();
+    const root_decls = tree.rootDecls();
+
+    const fn_node = @intFromEnum(root_decls[0]);
+    const maybe_cfg = try builder.buildFromFn(&source, fn_node);
+
+    try testing.expect(maybe_cfg != null);
+
+    var cfg = maybe_cfg.?;
+    defer cfg.deinit();
+
+    var ret_count: usize = 0;
+    var var_decl_count: usize = 0;
+    for (cfg.nodes.items) |node| {
+        switch (node.ir_node.tag) {
+            .ret => ret_count += 1,
+            .var_decl => var_decl_count += 1,
+            else => {},
+        }
+    }
+
+    try testing.expectEqual(@as(usize, 2), ret_count);
+    try testing.expectEqual(@as(usize, 0), var_decl_count);
 }
 
 test "CfgBuilder if-else with merge point" {
