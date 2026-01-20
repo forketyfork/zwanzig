@@ -53,11 +53,13 @@ pub const DupeImportRule = struct {
                     if (seen_imports.get(import_path)) |_| {
                         const range = try src.byteRangeToSourceRange(start, start + builtin_name.len);
 
+                        const message = allocator.dupe(u8, "Duplicate import detected. This module has already been imported earlier in the file.") catch return RuleError.OutOfMemory;
+
                         try diagnostics.append(allocator, Diagnostic.init(
                             src.getFilePath(),
                             "dupe-import",
                             .warning,
-                            "Duplicate import detected. This module has already been imported earlier in the file.",
+                            message,
                             range,
                         ));
                     } else {
@@ -108,6 +110,7 @@ test "duplicate import detection - single duplicate" {
 
     var diagnostics: std.ArrayList(Diagnostic) = .empty;
     defer diagnostics.deinit(allocator);
+    defer for (diagnostics.items) |diag| allocator.free(@constCast(diag.message));
 
     const code: [:0]const u8 =
         \\const std = @import("std");
@@ -129,6 +132,7 @@ test "duplicate import detection - no duplicates" {
 
     var diagnostics: std.ArrayList(Diagnostic) = .empty;
     defer diagnostics.deinit(allocator);
+    defer for (diagnostics.items) |diag| allocator.free(@constCast(diag.message));
 
     const code: [:0]const u8 =
         \\const std = @import("std");
@@ -148,6 +152,7 @@ test "duplicate import detection - multiple duplicates of same module" {
 
     var diagnostics: std.ArrayList(Diagnostic) = .empty;
     defer diagnostics.deinit(allocator);
+    defer for (diagnostics.items) |diag| allocator.free(@constCast(diag.message));
 
     const code: [:0]const u8 =
         \\const std1 = @import("std");
@@ -169,6 +174,7 @@ test "duplicate import detection - different modules with same name in different
 
     var diagnostics: std.ArrayList(Diagnostic) = .empty;
     defer diagnostics.deinit(allocator);
+    defer for (diagnostics.items) |diag| allocator.free(@constCast(diag.message));
 
     const code: [:0]const u8 =
         \\const utils1 = @import("./utils.zig");
@@ -187,6 +193,7 @@ test "duplicate import detection - duplicate with different paths" {
 
     var diagnostics: std.ArrayList(Diagnostic) = .empty;
     defer diagnostics.deinit(allocator);
+    defer for (diagnostics.items) |diag| allocator.free(@constCast(diag.message));
 
     const code: [:0]const u8 =
         \\const utils1 = @import("./utils.zig");
@@ -205,6 +212,7 @@ test "duplicate import detection - mixed standard and relative imports" {
 
     var diagnostics: std.ArrayList(Diagnostic) = .empty;
     defer diagnostics.deinit(allocator);
+    defer for (diagnostics.items) |diag| allocator.free(@constCast(diag.message));
 
     const code: [:0]const u8 =
         \\const std = @import("std");
@@ -226,6 +234,7 @@ test "duplicate import detection - empty file" {
 
     var diagnostics: std.ArrayList(Diagnostic) = .empty;
     defer diagnostics.deinit(allocator);
+    defer for (diagnostics.items) |diag| allocator.free(@constCast(diag.message));
 
     const code: [:0]const u8 = "";
     var source = Source.init(allocator, "test.zig", code);
@@ -241,6 +250,7 @@ test "duplicate import detection - no imports" {
 
     var diagnostics: std.ArrayList(Diagnostic) = .empty;
     defer diagnostics.deinit(allocator);
+    defer for (diagnostics.items) |diag| allocator.free(@constCast(diag.message));
 
     const code: [:0]const u8 =
         \\const x = 42;
@@ -259,6 +269,7 @@ test "duplicate import detection - import in function" {
 
     var diagnostics: std.ArrayList(Diagnostic) = .empty;
     defer diagnostics.deinit(allocator);
+    defer for (diagnostics.items) |diag| allocator.free(@constCast(diag.message));
 
     const code: [:0]const u8 =
         \\const std = @import("std");
@@ -279,6 +290,7 @@ test "duplicate import detection - with doc comments between tokens" {
 
     var diagnostics: std.ArrayList(Diagnostic) = .empty;
     defer diagnostics.deinit(allocator);
+    defer for (diagnostics.items) |diag| allocator.free(@constCast(diag.message));
 
     const code: [:0]const u8 =
         \\const std = @import("std");

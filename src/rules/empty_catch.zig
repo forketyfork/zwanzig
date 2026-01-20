@@ -37,11 +37,13 @@ pub const EmptyCatchRule = struct {
                     const catch_start = token_starts[main_token];
                     const range = try src.byteRangeToSourceRange(catch_start, catch_start + 4);
 
+                    const message = allocator.dupe(u8, "Empty catch block detected. Consider handling the error or using '_' to explicitly ignore it.") catch return RuleError.OutOfMemory;
+
                     try diagnostics.append(allocator, Diagnostic.init(
                         src.getFilePath(),
                         "empty-catch",
                         .warning,
-                        "Empty catch block detected. Consider handling the error or using '_' to explicitly ignore it.",
+                        message,
                         range,
                     ));
                 }
@@ -107,12 +109,20 @@ pub const EmptyCatchRule = struct {
     }
 };
 
+fn freeDiagnosticMessages(diagnostics: *std.ArrayList(Diagnostic), allocator: std.mem.Allocator) void {
+    for (diagnostics.items) |diag| {
+        allocator.free(@constCast(diag.message));
+    }
+    diagnostics.clearRetainingCapacity();
+}
+
 test "empty catch block detection" {
     const testing = std.testing;
     const allocator = testing.allocator;
 
     var diagnostics: std.ArrayList(Diagnostic) = .empty;
     defer diagnostics.deinit(allocator);
+    defer for (diagnostics.items) |diag| allocator.free(@constCast(diag.message));
 
     // Test case 1: Empty catch block
     const code1: [:0]const u8 =
@@ -127,7 +137,7 @@ test "empty catch block detection" {
     try testing.expectEqual(Severity.warning, diagnostics.items[0].severity);
     try testing.expectEqualStrings("empty-catch", diagnostics.items[0].rule_id);
 
-    diagnostics.clearRetainingCapacity();
+    freeDiagnosticMessages(&diagnostics, allocator);
 
     // Test case 2: Non-empty catch block
     const code2: [:0]const u8 =
@@ -140,7 +150,7 @@ test "empty catch block detection" {
     try EmptyCatchRule.rule.check(&source2, allocator, &diagnostics);
     try testing.expectEqual(@as(usize, 0), diagnostics.items.len);
 
-    diagnostics.clearRetainingCapacity();
+    freeDiagnosticMessages(&diagnostics, allocator);
 
     // Test case 3: Comment-only catch block
     const code3: [:0]const u8 =
@@ -153,7 +163,7 @@ test "empty catch block detection" {
     try EmptyCatchRule.rule.check(&source3, allocator, &diagnostics);
     try testing.expectEqual(@as(usize, 1), diagnostics.items.len);
 
-    diagnostics.clearRetainingCapacity();
+    freeDiagnosticMessages(&diagnostics, allocator);
 
     // Test case 4: Catch with error capture but empty body
     const code4: [:0]const u8 =
@@ -164,7 +174,7 @@ test "empty catch block detection" {
     try EmptyCatchRule.rule.check(&source4, allocator, &diagnostics);
     try testing.expectEqual(@as(usize, 1), diagnostics.items.len);
 
-    diagnostics.clearRetainingCapacity();
+    freeDiagnosticMessages(&diagnostics, allocator);
 
     // Test case 5: Multiple catches
     const code5: [:0]const u8 =
@@ -179,7 +189,7 @@ test "empty catch block detection" {
     try EmptyCatchRule.rule.check(&source5, allocator, &diagnostics);
     try testing.expectEqual(@as(usize, 2), diagnostics.items.len);
 
-    diagnostics.clearRetainingCapacity();
+    freeDiagnosticMessages(&diagnostics, allocator);
 
     // Test case 6: Line tracking after skipping a block
     const code6: [:0]const u8 =
@@ -194,7 +204,7 @@ test "empty catch block detection" {
     try testing.expectEqual(@as(usize, 2), diagnostics.items.len);
     try testing.expectEqual(@as(usize, 4), diagnostics.items[1].range.start.line);
 
-    diagnostics.clearRetainingCapacity();
+    freeDiagnosticMessages(&diagnostics, allocator);
 
     // Test case 7: Malformed code - missing closing brace (should not crash)
     const code7: [:0]const u8 =
@@ -204,7 +214,7 @@ test "empty catch block detection" {
     defer source7.deinit();
     try EmptyCatchRule.rule.check(&source7, allocator, &diagnostics);
 
-    diagnostics.clearRetainingCapacity();
+    freeDiagnosticMessages(&diagnostics, allocator);
 
     // Test case 8: Malformed code - missing closing pipe (should not crash)
     const code8: [:0]const u8 =

@@ -21,6 +21,9 @@ pub const Analyzer = struct {
 
     pub fn deinit(self: *Analyzer) void {
         self.rules.deinit(self.allocator);
+        for (self.diagnostics.items) |diag| {
+            self.allocator.free(@constCast(diag.message));
+        }
         self.diagnostics.deinit(self.allocator);
     }
 
