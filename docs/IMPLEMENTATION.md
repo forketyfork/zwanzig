@@ -287,11 +287,120 @@ The conservative approach avoids false positives by:
 - Ignoring underscore-prefixed names (explicit opt-out convention)
 - Ignoring special names like `main` and `panic` (entry points)
 
+## Intermediate Representation (IR)
+
+Zwanzig uses a minimal Intermediate Representation (IR) to bridge AST nodes and control-flow analysis. The IR is designed to be lightweight while capturing the essential structure needed for dataflow analysis.
+
+### IR Node Types
+
+The IR (`src/ir.zig`) defines the following node types:
+
+| Tag | Description |
+|-----|-------------|
+| `fn_entry` | Function entry point |
+| `fn_exit` | Function exit point (normal return path) |
+| `ret` | Return statement |
+| `var_decl` | Variable declaration (const/var) |
+| `assign` | Assignment expression |
+| `call` | Function call expression |
+| `block` | Block of statements |
+| `expr` | Generic expression |
+| `nop` | No-op placeholder for control flow merge points |
+
+### IR Node Structure
+
+Each `IrNode` contains:
+- **tag**: The kind of IR node (`IrTag`)
+- **ast_node**: Optional index of the corresponding AST node
+- **source_range**: Optional source location for diagnostics
+
+```zig
+pub const IrNode = struct {
+    tag: IrTag,
+    ast_node: ?u32,
+    source_range: ?SourceRange,
+};
+```
+
+## Control Flow Graph (CFG)
+
+The CFG (`src/cfg.zig`) represents the control flow within a single function. It is built from the AST and maps IR nodes to their control flow relationships.
+
+### CFG Structure
+
+A CFG consists of:
+- **nodes**: A list of `CfgNode` entries, each containing an IR node
+- **edges**: A list of `CfgEdge` entries connecting nodes
+- **entry**: Index of the function entry node
+- **exit**: Index of the function exit node
+
+### Edge Types
+
+| Kind | Description |
+|------|-------------|
+| `normal` | Sequential control flow |
+| `jump` | Unconditional jump (e.g., from return to exit) |
+
+### CFG Builder
+
+The `CfgBuilder` constructs CFGs from Zig AST function declarations. Currently supported constructs:
+
+- Function entry/exit
+- Block statements
+- Return statements
+- Variable declarations
+- Assignment expressions
+- Function calls
+
+**Usage:**
+```zig
+var builder = CfgBuilder.init(allocator);
+const tree = try source.ast();
+const root_decls = tree.rootDecls();
+
+for (root_decls) |decl| {
+    if (try builder.buildFromFn(&source, decl)) |*cfg| {
+        defer cfg.deinit();
+        // Analyze the CFG...
+    }
+}
+```
+
+### CFG Traversal
+
+The CFG provides methods for traversing the graph:
+
+```zig
+// Get all successor node indices
+var succs: std.ArrayList(u32) = .empty;
+try cfg.getSuccessors(node_index, &succs);
+
+// Get all predecessor node indices
+var preds: std.ArrayList(u32) = .empty;
+try cfg.getPredecessors(node_index, &preds);
+```
+
+### Source Location Mapping
+
+CFG nodes maintain source range information for diagnostic reporting:
+
+```zig
+if (cfg.getNode(index)) |node| {
+    if (node.ir_node.source_range) |range| {
+        // range.start.line, range.start.column
+        // range.end.line, range.end.column
+    }
+}
+```
+
 ## Future Enhancements
 
 The current implementation provides a foundation for more sophisticated analysis:
 
-- **Control Flow Analysis**: CFG construction for inter-procedural analysis
+- **Branching CFG**: Support for if/else and switch control flow
+- **Loop CFG**: Support for while/for loops with back-edges
+- **Defer/Errdefer**: Proper modeling of cleanup paths
+- **Try/Catch Edges**: Error flow representation
 - **Semantic Analysis**: Integration with typed IR for deeper checks
 - **Multiple Output Formats**: JSON, SARIF for CI/CD integration
 - **Configuration Files**: Project-specific rule configuration
