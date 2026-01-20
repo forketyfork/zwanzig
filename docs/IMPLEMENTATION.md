@@ -838,18 +838,84 @@ This separation allows the engine to model state changes at each CFG node.
 
 #### ProgramState
 
-A `ProgramState` represents the abstract program state at a given point:
+A `ProgramState` represents the abstract program state at a given point. It stores the environment mapping variables to abstract values:
 
 ```zig
 pub const ProgramState = struct {
-    state_id: u64,  // Unique identifier for deduplication
+    env: Environment,       // Mapping from variables to abstract values
+    cached_hash: ?u64,      // Cached hash for efficient deduplication
 };
 ```
 
-Currently a placeholder with just an identifier for deduplication. Future steps will add:
-- **Environment**: Mapping from variables to abstract values
+**Key Operations:**
+- `init(allocator)`: Creates an empty state
+- `clone(allocator)`: Creates a deep copy of the state
+- `getVar(var_id)`: Retrieves the abstract value of a variable
+- `setVar(var_id, value)`: Sets a variable's abstract value
+- `eql(other)`: Compares states for structural equality
+- `computeHash()`: Returns a hash for deduplication
+
+Future steps will add:
 - **Store**: Heap/memory model
 - **Constraints**: Path conditions from branches
+
+#### Abstract Values
+
+Abstract values represent possible runtime values of variables and expressions:
+
+```zig
+pub const AbstractValue = union(enum) {
+    unknown,              // No information available
+    null_val,             // Definitely null
+    non_null,             // Definitely not null (actual value unknown)
+    int_range: IntRange,  // Integer within a known range
+    concrete_int: i64,    // Known concrete integer
+};
+```
+
+**Value Categories:**
+| Value | Description | Use Case |
+|-------|-------------|----------|
+| `unknown` | No information | Default for uninitialized variables |
+| `null_val` | Definitely null | Null pointer analysis |
+| `non_null` | Definitely not null | Non-null assertions |
+| `int_range` | Integer in [min, max] | Range analysis |
+| `concrete_int` | Known integer | Constant propagation |
+
+**IntRange Operations:**
+- `init(min, max)`: Creates a range
+- `single(value)`: Creates a single-value range
+- `contains(value)`: Checks if value is in range
+- `overlaps(other)`: Checks if ranges overlap
+- `merge(other)`: Combines two ranges (union)
+
+**AbstractValue Operations:**
+- `eql(other)`: Checks structural equality
+- `hash()`: Computes hash for deduplication
+- `merge(other)`: Computes join of two values
+- `isUnknown()`, `isNull()`, `isNonNull()`, `isConcrete()`: Type predicates
+- `toConcreteInt()`: Extracts concrete value if available
+
+#### Environment
+
+The `Environment` maps variable identifiers to abstract values:
+
+```zig
+pub const Environment = struct {
+    bindings: std.AutoHashMap(u32, AbstractValue),
+    allocator: std.mem.Allocator,
+};
+```
+
+Variables are identified by their AST node index, providing a simple and unique identifier within a module.
+
+**Operations:**
+- `get(var_id)`: Returns the abstract value, or null if not bound
+- `set(var_id, value)`: Binds a variable to a value
+- `remove(var_id)`: Removes a binding
+- `clone()`: Creates a deep copy
+- `eql(other)`: Checks structural equality
+- `computeHash()`: Computes hash for deduplication
 
 #### ExplodedNode
 
@@ -923,18 +989,39 @@ This ensures that:
 
 ### Transfer Function
 
-The transfer function models how state changes when a CFG node executes:
+The transfer function models how state changes when a CFG node executes. It evaluates the semantics of each IR node and updates the environment accordingly:
 
 ```zig
-fn transferFunction(self: *AnalysisEngine, point: ProgramPoint, state: ProgramState) ProgramState {
-    // Currently a placeholder - returns the same state
-    // Future steps will add actual state transformations
-    return state.clone();
+fn transferFunction(self: *AnalysisEngine, point: ProgramPoint, state: *const ProgramState) !ProgramState {
+    const cfg_node = self.graph.cfg.getNode(point.node_index) orelse return try state.clone(self.allocator);
+    var new_state = try state.clone(self.allocator);
+
+    switch (cfg_node.ir_node.tag) {
+        .var_decl => {
+            // Variable declarations start with unknown value
+            if (cfg_node.ir_node.ast_node) |ast_node| {
+                try new_state.setVar(ast_node, .unknown);
+            }
+        },
+        .assign => {
+            // Assignments update the variable's value
+            if (cfg_node.ir_node.ast_node) |ast_node| {
+                try new_state.setVar(ast_node, .unknown);
+            }
+        },
+        else => {},
+    }
+
+    return new_state;
 }
 ```
 
+The transfer function currently handles:
+- **Variable declarations**: Initializes variables with `unknown` value
+- **Assignments**: Updates variable values in the environment
+
 Future enhancements will implement transfer functions for:
-- Variable declarations and assignments
+- Literal evaluation (concrete integer values)
 - Arithmetic operations
 - Branch conditions (state forking)
 - Function calls
@@ -965,7 +1052,6 @@ std.debug.print("Exploded graph has {d} nodes\n", .{graph.nodeCount()});
 
 The current implementation provides a foundation for more sophisticated analysis:
 
-- **Abstract Values**: Track concrete and abstract values (Unknown, Null, NonNull, IntRange)
 - **Branch Constraints**: Fork state on conditions and prune infeasible paths
 - **Error Semantics**: Model error unions and try/catch propagation
 - **Interprocedural Analysis**: Inline function calls and build summaries
