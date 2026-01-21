@@ -213,6 +213,22 @@ pub const Analyzer = struct {
         try writer.writeAll("}\n");
     }
 
+    fn writeJsonString(writer: anytype, s: []const u8) !void {
+        try writer.writeByte('"');
+        for (s) |c| {
+            switch (c) {
+                '"' => try writer.writeAll("\\\""),
+                '\\' => try writer.writeAll("\\\\"),
+                '\n' => try writer.writeAll("\\n"),
+                '\r' => try writer.writeAll("\\r"),
+                '\t' => try writer.writeAll("\\t"),
+                0x00...0x08, 0x0B, 0x0C, 0x0E...0x1F => try writer.print("\\u{x:0>4}", .{c}),
+                else => try writer.writeByte(c),
+            }
+        }
+        try writer.writeByte('"');
+    }
+
     fn printSarifResults(self: *Analyzer, writer: anytype) !void {
         try writer.writeAll("{\n");
         try writer.writeAll("  \"version\": \"2.1.0\",\n");
@@ -223,7 +239,47 @@ pub const Analyzer = struct {
         try writer.writeAll("        \"driver\": {\n");
         try writer.writeAll("          \"name\": \"Zwanzig\",\n");
         try writer.writeAll("          \"informationUri\": \"https://github.com/forketyfork/zwanzig\",\n");
-        try writer.writeAll("          \"version\": \"0.1.0\"\n");
+        try writer.writeAll("          \"version\": \"0.1.0\",\n");
+        try writer.writeAll("          \"rules\": [\n");
+
+        var first = true;
+        for (self.checker_manager.checkers.items) |checker| {
+            if (!first) try writer.writeAll(",\n");
+            first = false;
+            try writer.writeAll("            {\n");
+            try writer.writeAll("              \"id\": ");
+            try writeJsonString(writer, checker.name);
+            try writer.writeAll(",\n");
+            try writer.writeAll("              \"shortDescription\": {\n");
+            try writer.writeAll("                \"text\": ");
+            try writeJsonString(writer, checker.name);
+            try writer.writeAll("\n");
+            try writer.writeAll("              },\n");
+            try writer.writeAll("              \"defaultConfiguration\": {\n");
+            try writer.writeAll("                \"level\": ");
+            try writeJsonString(writer, checker.default_severity.toSarifLevel());
+            try writer.writeAll("\n");
+            try writer.writeAll("              }\n");
+            try writer.writeAll("            }");
+        }
+
+        for (self.checker_manager.adapted_rules.items) |rule| {
+            if (!first) try writer.writeAll(",\n");
+            first = false;
+            try writer.writeAll("            {\n");
+            try writer.writeAll("              \"id\": ");
+            try writeJsonString(writer, rule.name);
+            try writer.writeAll(",\n");
+            try writer.writeAll("              \"shortDescription\": {\n");
+            try writer.writeAll("                \"text\": ");
+            try writeJsonString(writer, rule.name);
+            try writer.writeAll("\n");
+            try writer.writeAll("              }\n");
+            try writer.writeAll("            }");
+        }
+
+        try writer.writeAll("\n");
+        try writer.writeAll("          ]\n");
         try writer.writeAll("        }\n");
         try writer.writeAll("      },\n");
         try writer.writeAll("      \"results\": [\n");
@@ -378,6 +434,7 @@ test "Analyzer SARIF output format" {
     try testing.expect(std.mem.indexOf(u8, output, "\"tool\":") != null);
     try testing.expect(std.mem.indexOf(u8, output, "\"driver\":") != null);
     try testing.expect(std.mem.indexOf(u8, output, "\"name\": \"Zwanzig\"") != null);
+    try testing.expect(std.mem.indexOf(u8, output, "\"rules\":") != null);
     try testing.expect(std.mem.indexOf(u8, output, "\"results\":") != null);
     try testing.expect(std.mem.indexOf(u8, output, "test1.zig") != null);
     try testing.expect(std.mem.indexOf(u8, output, "test2.zig") != null);
