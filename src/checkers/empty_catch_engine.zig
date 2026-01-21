@@ -86,21 +86,25 @@ pub const EmptyCatchEngineChecker = struct {
 
     /// Check if a catch_expr node has an empty handler.
     /// A catch handler is considered empty if the catch_error edge goes directly
-    /// to a merge node (nop or var_decl) without any intervening handler nodes.
+    /// to the same merge node as catch_success (no intervening handler nodes).
     fn hasEmptyHandler(cfg: *const Cfg, catch_node_idx: u32) bool {
-        // Look for catch_error edges from this node
+        // Find both catch_error and catch_success targets
+        var catch_error_target: ?u32 = null;
+        var catch_success_target: ?u32 = null;
+
         for (cfg.edges.items) |edge| {
-            if (edge.from == catch_node_idx and edge.kind == .catch_error) {
-                // Check if the destination is a merge point (nop or var_decl)
-                // For standalone catch: catch_error -> nop
-                // For catch in var decl: catch_error -> var_decl
-                if (cfg.getNode(edge.to)) |dest_node| {
-                    if (dest_node.ir_node.tag == .nop or dest_node.ir_node.tag == .var_decl) {
-                        // Empty handler: catch_error goes directly to merge
-                        return true;
-                    }
+            if (edge.from == catch_node_idx) {
+                if (edge.kind == .catch_error) {
+                    catch_error_target = edge.to;
+                } else if (edge.kind == .catch_success) {
+                    catch_success_target = edge.to;
                 }
             }
+        }
+
+        // Empty handler: catch_error goes directly to the same merge node as catch_success
+        if (catch_error_target != null and catch_success_target != null) {
+            return catch_error_target.? == catch_success_target.?;
         }
         return false;
     }

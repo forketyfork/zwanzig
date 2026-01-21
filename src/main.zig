@@ -1,7 +1,6 @@
 const std = @import("std");
 const Analyzer = @import("analyzer.zig").Analyzer;
 const Rule = @import("rule.zig").Rule;
-const EmptyCatchRule = @import("rules/empty_catch.zig").EmptyCatchRule;
 const DupeImportRule = @import("rules/dupe_import.zig").DupeImportRule;
 const TodoCommentRule = @import("rules/todo_comment.zig").TodoCommentRule;
 const FileAsStructRule = @import("rules/file_as_struct.zig").FileAsStructRule;
@@ -149,7 +148,6 @@ pub fn main() !void {
     var analyzer = Analyzer.init(allocator);
     defer analyzer.deinit();
 
-    try analyzer.registerRule(&EmptyCatchRule.rule);
     try analyzer.registerRule(&DupeImportRule.rule);
     try analyzer.registerRule(&TodoCommentRule.rule);
     try analyzer.registerRule(&FileAsStructRule.rule);

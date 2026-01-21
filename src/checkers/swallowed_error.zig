@@ -114,17 +114,9 @@ pub const SwallowedErrorChecker = struct {
         const entry = handler_entry orelse return false;
 
         // If handler entry is directly the merge node, it's empty (not swallowed)
+        // This is the correct way to detect empty handlers - comparing to merge node
         if (merge_node != null and entry == merge_node.?) {
             return false;
-        }
-
-        // Check if handler entry is a merge point (empty handler)
-        // For standalone catch: merge is a nop
-        // For catch in var decl: merge is a var_decl
-        if (cfg.getNode(entry)) |entry_node| {
-            if (entry_node.ir_node.tag == .nop or entry_node.ir_node.tag == .var_decl) {
-                return false; // Empty handler
-            }
         }
 
         // Trace through the handler to see if it:
