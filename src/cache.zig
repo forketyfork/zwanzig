@@ -222,11 +222,24 @@ pub const Cache = struct {
             return;
         }
 
+        var files_to_delete: std.ArrayList([]const u8) = .empty;
+        defer {
+            for (files_to_delete.items) |name| {
+                self.allocator.free(name);
+            }
+            files_to_delete.deinit(self.allocator);
+        }
+
         var iter = self.cache_dir.?.iterate();
         while (try iter.next()) |entry| {
             if (entry.kind == .file and std.mem.endsWith(u8, entry.name, ".cache")) {
-                try self.cache_dir.?.deleteFile(entry.name);
+                const name_copy = try self.allocator.dupe(u8, entry.name);
+                try files_to_delete.append(self.allocator, name_copy);
             }
+        }
+
+        for (files_to_delete.items) |name| {
+            try self.cache_dir.?.deleteFile(name);
         }
     }
 };
