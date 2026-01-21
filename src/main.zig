@@ -11,6 +11,8 @@ const EmptyDeferRule = @import("rules/empty_defer.zig").EmptyDeferRule;
 const EmptyErrdeferRule = @import("rules/empty_errdefer.zig").EmptyErrdeferRule;
 const RuleFilter = @import("rule_filter.zig").RuleFilter;
 const file_discovery = @import("file_discovery.zig");
+const EmptyCatchEngineChecker = @import("checkers/empty_catch_engine.zig").EmptyCatchEngineChecker;
+const SwallowedErrorChecker = @import("checkers/swallowed_error.zig").SwallowedErrorChecker;
 
 test {
     _ = @import("ir.zig");
@@ -18,6 +20,8 @@ test {
     _ = @import("checker.zig");
     _ = @import("zir_bridge.zig");
     _ = @import("engine.zig");
+    _ = @import("checkers/empty_catch_engine.zig");
+    _ = @import("checkers/swallowed_error.zig");
 }
 
 pub const CliArgs = struct {
@@ -153,6 +157,10 @@ pub fn main() !void {
     try analyzer.registerRule(&UnreachableCodeRule.rule);
     try analyzer.registerRule(&EmptyDeferRule.rule);
     try analyzer.registerRule(&EmptyErrdeferRule.rule);
+
+    // Engine-based error handling checkers
+    try analyzer.registerChecker(&EmptyCatchEngineChecker.checker);
+    try analyzer.registerChecker(&SwallowedErrorChecker.checker);
 
     analyzer.setRuleFilter(cli_args.rule_filter);
 

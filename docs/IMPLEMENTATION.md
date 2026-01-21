@@ -1271,11 +1271,97 @@ const graph = engine.getGraph();
 std.debug.print("Exploded graph has {d} nodes\n", .{graph.nodeCount()});
 ```
 
+## Error-Handling Checkers
+
+The analysis engine supports error-handling checkers that use CFG and error state tracking to detect issues with error handling in Zig code.
+
+### EmptyCatchEngineChecker
+
+The `EmptyCatchEngineChecker` (`src/checkers/empty_catch_engine.zig`) detects empty catch blocks using CFG analysis:
+
+```zig
+fn checkAst(src: *Source, allocator: std.mem.Allocator, diagnostics: *std.ArrayList(Diagnostic)) CheckerError!void {
+    const tree = src.ast() catch return;
+
+    // Find all function declarations
+    for (function_nodes) |fn_node| {
+        var builder = CfgBuilder.init(allocator);
+        var cfg_opt = builder.buildFromFn(src, fn_node) catch return;
+        if (cfg_opt) |*cfg| {
+            defer cfg.deinit();
+
+            var engine = AnalysisEngine.init(allocator, cfg);
+            defer engine.deinit();
+            engine.run() catch return;
+
+            // Examine CFG nodes for catch_expr with empty handlers
+            for (cfg.nodes.items) |cfg_node| {
+                if (cfg_node.ir_node.tag == .catch_expr) {
+                    if (hasEmptyHandler(cfg, cfg_node.index)) {
+                        // Report diagnostic...
+                    }
+                }
+            }
+        }
+    }
+}
+```
+
+The checker identifies empty handlers by checking if the `catch_error` edge goes directly to a merge node (nop) without any intervening handler nodes.
+
+### SwallowedErrorChecker
+
+The `SwallowedErrorChecker` (`src/checkers/swallowed_error.zig`) detects catch blocks that swallow errors without proper handling:
+
+**Detection Strategy:**
+
+1. Build CFG for each function
+2. Run the analysis engine to track error states
+3. For each `catch_expr` node:
+   - Find the `catch_error` edge leading to the handler
+   - Trace through the handler body
+   - Check if it:
+     - Returns (good - might rethrow)
+     - Contains a function call (good - might log)
+     - Just falls through to merge (swallowed error)
+
+**Error State Integration:**
+
+The checker uses the analysis engine's `ErrorState` tracking:
+- `error_active`: Error produced but not yet handled
+- `error_handled`: Error caught and being handled in catch block
+- `normal`: No error or error has been fully processed
+
+When the error handler exits normally without logging or rethrowing, the error is considered swallowed.
+
+```zig
+fn isErrorSwallowed(cfg: *const Cfg, catch_node_idx: u32, engine: *const AnalysisEngine, allocator: std.mem.Allocator) CheckerError!bool {
+    // Find handler entry via catch_error edge
+    // Trace through handler checking for:
+    // - Returns (has_return)
+    // - Function calls (has_call - potential logging)
+    // - Normal exit to merge point (swallowed)
+
+    if (!has_return and !has_call and reaches_merge_from_error) {
+        return true;  // Error is swallowed
+    }
+    return false;
+}
+```
+
+### Registration
+
+Both checkers are registered in `main.zig`:
+
+```zig
+try analyzer.registerChecker(&EmptyCatchEngineChecker.checker);
+try analyzer.registerChecker(&SwallowedErrorChecker.checker);
+```
+
 ## Future Enhancements
 
 The current implementation provides a foundation for more sophisticated analysis:
 
-- **Error Semantics**: Model error unions and try/catch propagation
 - **Interprocedural Analysis**: Inline function calls and build summaries
 - **Multiple Output Formats**: JSON, SARIF for CI/CD integration
 - **Configuration Files**: Project-specific rule configuration

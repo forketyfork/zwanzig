@@ -214,6 +214,74 @@ fn foo() !void {
 }
 ```
 
+### empty-catch-engine
+
+Engine-based checker that detects empty catch blocks using CFG and symbolic execution. This checker uses control-flow analysis to identify catch expressions where the error handler body is empty (no statements).
+
+Unlike the AST-based `empty-catch` rule, this checker leverages the analysis engine's error state tracking for more accurate detection.
+
+**Bad:**
+```zig
+fn foo() !i32 {
+    return 42;
+}
+
+fn bar() void {
+    const x = foo() catch {};  // Empty catch - error ignored
+    _ = x;
+}
+```
+
+**Good:**
+```zig
+fn bar() i32 {
+    const x = foo() catch |err| {
+        std.debug.print("Error: {}\n", .{err});
+        return 0;
+    };
+    return x;
+}
+```
+
+### swallowed-error
+
+Engine-based checker that detects catch blocks that swallow errors without proper handling. An error is considered "swallowed" when the catch handler:
+
+- Has a non-empty body (not just `catch {}`)
+- Does NOT rethrow the error
+- Does NOT log the error (no function calls)
+- Simply ignores the error and continues execution
+
+**Bad:**
+```zig
+fn bar() i32 {
+    var y: i32 = 0;
+    const x = foo() catch |_| {
+        y = 1;  // Swallowed - just assigns, no logging or rethrow
+    };
+    _ = x;
+    return y;
+}
+```
+
+**Good:**
+```zig
+fn bar() !i32 {
+    const x = foo() catch |err| {
+        return err;  // Rethrows error
+    };
+    return x;
+}
+
+fn baz() i32 {
+    const x = foo() catch |err| {
+        std.debug.print("Error: {}\n", .{err});  // Logs error
+        return 0;
+    };
+    return x;
+}
+```
+
 ## Building
 
 ```bash
