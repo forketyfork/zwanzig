@@ -94,14 +94,16 @@ pub const UnreachableCodeRule = struct {
                 const main_token = main_tokens[stmt];
                 const byte_offset = token_starts[main_token];
                 const loc = try src.byteToLocation(byte_offset);
-                try diagnostics.append(allocator, Diagnostic.initAtLocation(
+                const diag = try Diagnostic.initAtLocation(
+                    allocator,
                     src.getFilePath(),
                     rule.name,
                     .warning,
                     "unreachable code detected",
                     loc.line,
                     loc.column,
-                ));
+                );
+                try diagnostics.append(allocator, diag);
             }
 
             const stmt_tag = tags[stmt];

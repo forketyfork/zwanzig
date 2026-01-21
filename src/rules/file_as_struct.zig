@@ -36,35 +36,29 @@ pub const FileAsStructRule = struct {
         const is_capitalized = std.ascii.isUpper(first_char);
 
         if (has_fields and !is_capitalized) {
-            const message = allocator.dupe(
-                u8,
+            const diag = try Diagnostic.initAtLocation(
+                allocator,
+                file_path,
+                "file-as-struct",
+                .warning,
                 "File contains top-level fields but has a lowercase name. " ++
                     "Consider using a capitalized name (e.g., 'MyType.zig') for struct-like files.",
-            ) catch return RuleError.OutOfMemory;
-
-            try diagnostics.append(allocator, Diagnostic.initAtLocation(
+                1,
+                1,
+            );
+            try diagnostics.append(allocator, diag);
+        } else if (!has_fields and is_capitalized) {
+            const diag = try Diagnostic.initAtLocation(
+                allocator,
                 file_path,
                 "file-as-struct",
                 .warning,
-                message,
-                1,
-                1,
-            ));
-        } else if (!has_fields and is_capitalized) {
-            const message = allocator.dupe(
-                u8,
                 "File has a capitalized name but contains no top-level fields. " ++
                     "Consider using a lowercase name (e.g., 'utils.zig') for module files.",
-            ) catch return RuleError.OutOfMemory;
-
-            try diagnostics.append(allocator, Diagnostic.initAtLocation(
-                file_path,
-                "file-as-struct",
-                .warning,
-                message,
                 1,
                 1,
-            ));
+            );
+            try diagnostics.append(allocator, diag);
         }
     }
 
@@ -101,8 +95,8 @@ pub const FileAsStructRule = struct {
 };
 
 fn freeDiagnosticMessages(diagnostics: *std.ArrayList(Diagnostic), allocator: std.mem.Allocator) void {
-    for (diagnostics.items) |diag| {
-        allocator.free(@constCast(diag.message));
+    for (diagnostics.items) |*diag| {
+        diag.deinit(allocator);
     }
     diagnostics.clearRetainingCapacity();
 }
@@ -112,8 +106,10 @@ test "file with top-level fields and lowercase name - violation" {
     const allocator = testing.allocator;
 
     var diagnostics: std.ArrayList(Diagnostic) = .empty;
-    defer diagnostics.deinit(allocator);
-    defer for (diagnostics.items) |diag| allocator.free(@constCast(diag.message));
+    defer {
+        for (diagnostics.items) |*diag| diag.deinit(allocator);
+        diagnostics.deinit(allocator);
+    }
 
     // File with top-level fields (implicit struct)
     const code: [:0]const u8 =
@@ -140,8 +136,10 @@ test "file with top-level fields and capitalized name - no violation" {
     const allocator = testing.allocator;
 
     var diagnostics: std.ArrayList(Diagnostic) = .empty;
-    defer diagnostics.deinit(allocator);
-    defer for (diagnostics.items) |diag| allocator.free(@constCast(diag.message));
+    defer {
+        for (diagnostics.items) |*diag| diag.deinit(allocator);
+        diagnostics.deinit(allocator);
+    }
 
     const code: [:0]const u8 =
         \\count: usize,
@@ -163,8 +161,10 @@ test "file without top-level fields and capitalized name - violation" {
     const allocator = testing.allocator;
 
     var diagnostics: std.ArrayList(Diagnostic) = .empty;
-    defer diagnostics.deinit(allocator);
-    defer for (diagnostics.items) |diag| allocator.free(@constCast(diag.message));
+    defer {
+        for (diagnostics.items) |*diag| diag.deinit(allocator);
+        diagnostics.deinit(allocator);
+    }
 
     // Module file without fields
     const code: [:0]const u8 =
@@ -190,8 +190,10 @@ test "file without top-level fields and lowercase name - no violation" {
     const allocator = testing.allocator;
 
     var diagnostics: std.ArrayList(Diagnostic) = .empty;
-    defer diagnostics.deinit(allocator);
-    defer for (diagnostics.items) |diag| allocator.free(@constCast(diag.message));
+    defer {
+        for (diagnostics.items) |*diag| diag.deinit(allocator);
+        diagnostics.deinit(allocator);
+    }
 
     const code: [:0]const u8 =
         \\const std = @import("std");
@@ -212,8 +214,10 @@ test "file with const/var declarations but no fields - lowercase name - no viola
     const allocator = testing.allocator;
 
     var diagnostics: std.ArrayList(Diagnostic) = .empty;
-    defer diagnostics.deinit(allocator);
-    defer for (diagnostics.items) |diag| allocator.free(@constCast(diag.message));
+    defer {
+        for (diagnostics.items) |*diag| diag.deinit(allocator);
+        diagnostics.deinit(allocator);
+    }
 
     const code: [:0]const u8 =
         \\const std = @import("std");
@@ -232,8 +236,10 @@ test "file with nested struct fields - only top-level counts" {
     const allocator = testing.allocator;
 
     var diagnostics: std.ArrayList(Diagnostic) = .empty;
-    defer diagnostics.deinit(allocator);
-    defer for (diagnostics.items) |diag| allocator.free(@constCast(diag.message));
+    defer {
+        for (diagnostics.items) |*diag| diag.deinit(allocator);
+        diagnostics.deinit(allocator);
+    }
 
     // This file has fields inside a nested struct, but no top-level fields
     const code: [:0]const u8 =
@@ -257,8 +263,10 @@ test "empty file - no violation" {
     const allocator = testing.allocator;
 
     var diagnostics: std.ArrayList(Diagnostic) = .empty;
-    defer diagnostics.deinit(allocator);
-    defer for (diagnostics.items) |diag| allocator.free(@constCast(diag.message));
+    defer {
+        for (diagnostics.items) |*diag| diag.deinit(allocator);
+        diagnostics.deinit(allocator);
+    }
 
     const code: [:0]const u8 = "";
     var source = Source.init(allocator, "empty.zig", code);
@@ -284,8 +292,10 @@ test "file with only a single top-level field" {
     const allocator = testing.allocator;
 
     var diagnostics: std.ArrayList(Diagnostic) = .empty;
-    defer diagnostics.deinit(allocator);
-    defer for (diagnostics.items) |diag| allocator.free(@constCast(diag.message));
+    defer {
+        for (diagnostics.items) |*diag| diag.deinit(allocator);
+        diagnostics.deinit(allocator);
+    }
 
     const code: [:0]const u8 =
         \\value: i32,
@@ -304,8 +314,10 @@ test "file with initialized top-level field" {
     const allocator = testing.allocator;
 
     var diagnostics: std.ArrayList(Diagnostic) = .empty;
-    defer diagnostics.deinit(allocator);
-    defer for (diagnostics.items) |diag| allocator.free(@constCast(diag.message));
+    defer {
+        for (diagnostics.items) |*diag| diag.deinit(allocator);
+        diagnostics.deinit(allocator);
+    }
 
     const code: [:0]const u8 =
         \\value: i32 = 42,
@@ -324,8 +336,10 @@ test "mixed top-level fields and declarations" {
     const allocator = testing.allocator;
 
     var diagnostics: std.ArrayList(Diagnostic) = .empty;
-    defer diagnostics.deinit(allocator);
-    defer for (diagnostics.items) |diag| allocator.free(@constCast(diag.message));
+    defer {
+        for (diagnostics.items) |*diag| diag.deinit(allocator);
+        diagnostics.deinit(allocator);
+    }
 
     const code: [:0]const u8 =
         \\const std = @import("std");
@@ -347,8 +361,10 @@ test "file with aligned top-level field - lowercase name - violation" {
     const allocator = testing.allocator;
 
     var diagnostics: std.ArrayList(Diagnostic) = .empty;
-    defer diagnostics.deinit(allocator);
-    defer for (diagnostics.items) |diag| allocator.free(@constCast(diag.message));
+    defer {
+        for (diagnostics.items) |*diag| diag.deinit(allocator);
+        diagnostics.deinit(allocator);
+    }
 
     const code: [:0]const u8 =
         \\field: u8 align(4),

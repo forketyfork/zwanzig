@@ -59,31 +59,38 @@ pub const Diagnostic = struct {
     range: SourceRange,
 
     pub fn init(
+        allocator: std.mem.Allocator,
         file_path: []const u8,
         rule_id: []const u8,
         severity: Severity,
         message: []const u8,
         range: SourceRange,
-    ) Diagnostic {
+    ) !Diagnostic {
+        const owned_message = try allocator.dupe(u8, message);
         return .{
             .file_path = file_path,
             .rule_id = rule_id,
             .severity = severity,
-            .message = message,
+            .message = owned_message,
             .range = range,
         };
     }
 
     pub fn initAtLocation(
+        allocator: std.mem.Allocator,
         file_path: []const u8,
         rule_id: []const u8,
         severity: Severity,
         message: []const u8,
         line: usize,
         column: usize,
-    ) Diagnostic {
+    ) !Diagnostic {
         const loc = Location.init(line, column);
-        return init(file_path, rule_id, severity, message, SourceRange.fromSingleLocation(loc));
+        return init(allocator, file_path, rule_id, severity, message, SourceRange.fromSingleLocation(loc));
+    }
+
+    pub fn deinit(self: *Diagnostic, allocator: std.mem.Allocator) void {
+        allocator.free(self.message);
     }
 
     pub fn format(self: Diagnostic, writer: anytype) !void {
@@ -259,13 +266,15 @@ test "SourceRange from single location" {
 test "Diagnostic formatting" {
     const testing = std.testing;
 
-    const diag = Diagnostic.init(
+    var diag = try Diagnostic.init(
+        testing.allocator,
         "test.zig",
         "empty-catch",
         .err,
         "Empty catch block detected",
         SourceRange.init(Location.init(5, 10), Location.init(5, 15)),
     );
+    defer diag.deinit(testing.allocator);
 
     var buffer: [256]u8 = undefined;
     var stream = std.io.fixedBufferStream(&buffer);
@@ -278,7 +287,8 @@ test "Diagnostic formatting" {
 test "Diagnostic initAtLocation" {
     const testing = std.testing;
 
-    const diag = Diagnostic.initAtLocation(
+    var diag = try Diagnostic.initAtLocation(
+        testing.allocator,
         "foo.zig",
         "test-rule",
         .warning,
@@ -286,6 +296,7 @@ test "Diagnostic initAtLocation" {
         3,
         12,
     );
+    defer diag.deinit(testing.allocator);
 
     try testing.expectEqualStrings("foo.zig", diag.file_path);
     try testing.expectEqualStrings("test-rule", diag.rule_id);
@@ -382,13 +393,15 @@ test "LocationMapper handles trailing newline" {
 test "Diagnostic writeJson" {
     const testing = std.testing;
 
-    const diag = Diagnostic.init(
+    var diag = try Diagnostic.init(
+        testing.allocator,
         "test.zig",
         "empty-catch",
         .err,
         "Empty catch block detected",
         SourceRange.init(Location.init(5, 10), Location.init(5, 15)),
     );
+    defer diag.deinit(testing.allocator);
 
     var buffer: [512]u8 = undefined;
     var stream = std.io.fixedBufferStream(&buffer);
@@ -412,13 +425,15 @@ test "Diagnostic writeJson" {
 test "Diagnostic writeJson with special characters" {
     const testing = std.testing;
 
-    const diag = Diagnostic.init(
+    var diag = try Diagnostic.init(
+        testing.allocator,
         "path/with\"quotes.zig",
         "test-rule",
         .warning,
         "Message with\nnewline and \"quotes\" and \\ backslash",
         SourceRange.init(Location.init(1, 1), Location.init(1, 1)),
     );
+    defer diag.deinit(testing.allocator);
 
     var buffer: [512]u8 = undefined;
     var stream = std.io.fixedBufferStream(&buffer);
@@ -441,13 +456,15 @@ test "Severity.toSarifLevel" {
 test "Diagnostic writeSarif" {
     const testing = std.testing;
 
-    const diag = Diagnostic.init(
+    var diag = try Diagnostic.init(
+        testing.allocator,
         "test.zig",
         "empty-catch",
         .err,
         "Empty catch block detected",
         SourceRange.init(Location.init(5, 10), Location.init(5, 15)),
     );
+    defer diag.deinit(testing.allocator);
 
     var buffer: [1024]u8 = undefined;
     var stream = std.io.fixedBufferStream(&buffer);

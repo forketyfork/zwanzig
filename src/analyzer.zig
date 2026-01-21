@@ -34,8 +34,8 @@ pub const Analyzer = struct {
 
     pub fn deinit(self: *Analyzer) void {
         self.checker_manager.deinit();
-        for (self.diagnostics.items) |diag| {
-            self.allocator.free(@constCast(diag.message));
+        for (self.diagnostics.items) |*diag| {
+            diag.deinit(self.allocator);
         }
         self.diagnostics.deinit(self.allocator);
         if (self.zir_bridge) |*bridge| {
@@ -349,25 +349,24 @@ test "Analyzer JSON output format" {
     var analyzer = Analyzer.init(allocator);
     defer analyzer.deinit();
 
-    const msg1 = try allocator.dupe(u8, "Test error");
-    const msg2 = try allocator.dupe(u8, "Test warning");
-
-    const diag1 = Diagnostic.init(
+    const diag1 = try Diagnostic.init(
+        allocator,
         "test1.zig",
         "test-rule",
         .err,
-        msg1,
+        "Test error",
         @import("diagnostic.zig").SourceRange.init(
             @import("diagnostic.zig").Location.init(1, 1),
             @import("diagnostic.zig").Location.init(1, 5),
         ),
     );
 
-    const diag2 = Diagnostic.init(
+    const diag2 = try Diagnostic.init(
+        allocator,
         "test2.zig",
         "other-rule",
         .warning,
-        msg2,
+        "Test warning",
         @import("diagnostic.zig").SourceRange.init(
             @import("diagnostic.zig").Location.init(2, 3),
             @import("diagnostic.zig").Location.init(2, 8),
@@ -397,13 +396,12 @@ test "Analyzer text output format" {
     var analyzer = Analyzer.init(allocator);
     defer analyzer.deinit();
 
-    const msg = try allocator.dupe(u8, "Test error");
-
-    const diag = Diagnostic.init(
+    const diag = try Diagnostic.init(
+        allocator,
         "test.zig",
         "test-rule",
         .err,
-        msg,
+        "Test error",
         @import("diagnostic.zig").SourceRange.init(
             @import("diagnostic.zig").Location.init(1, 1),
             @import("diagnostic.zig").Location.init(1, 5),
@@ -428,25 +426,24 @@ test "Analyzer SARIF output format" {
     var analyzer = Analyzer.init(allocator);
     defer analyzer.deinit();
 
-    const msg1 = try allocator.dupe(u8, "Test error");
-    const msg2 = try allocator.dupe(u8, "Test warning");
-
-    const diag1 = Diagnostic.init(
+    const diag1 = try Diagnostic.init(
+        allocator,
         "test1.zig",
         "test-rule",
         .err,
-        msg1,
+        "Test error",
         @import("diagnostic.zig").SourceRange.init(
             @import("diagnostic.zig").Location.init(1, 1),
             @import("diagnostic.zig").Location.init(1, 5),
         ),
     );
 
-    const diag2 = Diagnostic.init(
+    const diag2 = try Diagnostic.init(
+        allocator,
         "test2.zig",
         "other-rule",
         .warning,
-        msg2,
+        "Test warning",
         @import("diagnostic.zig").SourceRange.init(
             @import("diagnostic.zig").Location.init(2, 3),
             @import("diagnostic.zig").Location.init(2, 8),

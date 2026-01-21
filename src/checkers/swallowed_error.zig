@@ -77,15 +77,16 @@ pub const SwallowedErrorChecker = struct {
                     if (try isErrorSwallowed(cfg, cfg_node.index, &engine, allocator)) {
                         // Get source range from IR node
                         if (cfg_node.ir_node.source_range) |range| {
-                            const message = allocator.dupe(u8, "Error is swallowed without logging or rethrowing. Consider handling the error properly.") catch return;
-
-                            diagnostics.append(allocator, Diagnostic.init(
+                            const diag = Diagnostic.init(
+                                allocator,
                                 src.getFilePath(),
                                 "swallowed-error",
                                 .warning,
-                                message,
+                                "Error is swallowed without logging or rethrowing. Consider handling the error properly.",
                                 range,
-                            )) catch return;
+                            ) catch return;
+
+                            diagnostics.append(allocator, diag) catch return;
                         }
                     }
                 }

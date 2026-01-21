@@ -53,15 +53,15 @@ pub const DupeImportRule = struct {
                     if (seen_imports.get(import_path)) |_| {
                         const range = try src.byteRangeToSourceRange(start, start + builtin_name.len);
 
-                        const message = allocator.dupe(u8, "Duplicate import detected. This module has already been imported earlier in the file.") catch return RuleError.OutOfMemory;
-
-                        try diagnostics.append(allocator, Diagnostic.init(
+                        const diag = try Diagnostic.init(
+                            allocator,
                             src.getFilePath(),
                             "dupe-import",
                             .warning,
-                            message,
+                            "Duplicate import detected. This module has already been imported earlier in the file.",
                             range,
-                        ));
+                        );
+                        try diagnostics.append(allocator, diag);
                     } else {
                         try seen_imports.put(import_path, .{
                             .byte_offset = start,

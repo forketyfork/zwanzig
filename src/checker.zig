@@ -239,14 +239,16 @@ test "Checker with checkAstFn" {
         ) CheckerError!void {
             _ = source;
             _ = context;
-            try diagnostics.append(allocator, Diagnostic.initAtLocation(
+            const diag = try Diagnostic.initAtLocation(
+                allocator,
                 "test.zig",
                 "test-checker",
                 .warning,
                 "Test diagnostic",
                 1,
                 1,
-            ));
+            );
+            try diagnostics.append(allocator, diag);
         }
     }.check;
 
@@ -263,7 +265,10 @@ test "Checker with checkAstFn" {
     defer source.deinit();
 
     var diagnostics: std.ArrayList(Diagnostic) = .empty;
-    defer diagnostics.deinit(allocator);
+    defer {
+        for (diagnostics.items) |*diag| diag.deinit(allocator);
+        diagnostics.deinit(allocator);
+    }
 
     const context = CheckerContext{ .build_metadata = null };
     try checker.checkAst(&source, allocator, &diagnostics, context);

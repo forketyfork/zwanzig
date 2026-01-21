@@ -62,19 +62,22 @@ pub const UnusedDeclRule = struct {
             if (!isNameUsed(tree, decl.name, token_tags)) {
                 const range = try src.byteRangeToSourceRange(decl.byte_offset, decl.byte_offset + decl.name.len);
 
-                const message = std.fmt.allocPrint(
+                const message = try std.fmt.allocPrint(
                     allocator,
                     "Declaration '{s}' is never used",
                     .{decl.name},
-                ) catch return RuleError.OutOfMemory;
+                );
+                defer allocator.free(message);
 
-                try diagnostics.append(allocator, Diagnostic.init(
+                const diag = try Diagnostic.init(
+                    allocator,
                     src.getFilePath(),
                     "unused-decl",
                     .warning,
                     message,
                     range,
-                ));
+                );
+                try diagnostics.append(allocator, diag);
             }
         }
     }

@@ -37,15 +37,16 @@ pub const EmptyCatchRule = struct {
                     const catch_start = token_starts[main_token];
                     const range = try src.byteRangeToSourceRange(catch_start, catch_start + 4);
 
-                    const message = allocator.dupe(u8, "Empty catch block detected. Consider handling the error or using '_' to explicitly ignore it.") catch return RuleError.OutOfMemory;
-
-                    try diagnostics.append(allocator, Diagnostic.init(
+                    const diag = try Diagnostic.init(
+                        allocator,
                         src.getFilePath(),
                         "empty-catch",
                         .warning,
-                        message,
+                        "Empty catch block detected. Consider handling the error or using '_' to explicitly ignore it.",
                         range,
-                    ));
+                    );
+
+                    try diagnostics.append(allocator, diag);
                 }
             }
         }
@@ -110,8 +111,8 @@ pub const EmptyCatchRule = struct {
 };
 
 fn freeDiagnosticMessages(diagnostics: *std.ArrayList(Diagnostic), allocator: std.mem.Allocator) void {
-    for (diagnostics.items) |diag| {
-        allocator.free(@constCast(diag.message));
+    for (diagnostics.items) |*diag| {
+        diag.deinit(allocator);
     }
     diagnostics.clearRetainingCapacity();
 }
@@ -121,8 +122,10 @@ test "empty catch block detection" {
     const allocator = testing.allocator;
 
     var diagnostics: std.ArrayList(Diagnostic) = .empty;
-    defer diagnostics.deinit(allocator);
-    defer for (diagnostics.items) |diag| allocator.free(@constCast(diag.message));
+    defer {
+        for (diagnostics.items) |*diag| diag.deinit(allocator);
+        diagnostics.deinit(allocator);
+    }
 
     // Test case 1: Empty catch block
     const code1: [:0]const u8 =

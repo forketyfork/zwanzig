@@ -45,14 +45,16 @@ pub const EmptyErrdeferRule = struct {
                         const main_token = main_tokens[errdefer_node];
                         const errdefer_byte_offset = token_starts[main_token];
                         const loc = try src.byteToLocation(errdefer_byte_offset);
-                        try diagnostics.append(allocator, Diagnostic.initAtLocation(
+                        const diag = try Diagnostic.initAtLocation(
+                            allocator,
                             src.getFilePath(),
                             rule.name,
                             .warning,
                             "empty errdefer block",
                             loc.line,
                             loc.column,
-                        ));
+                        );
+                        try diagnostics.append(allocator, diag);
                     }
                 }
             }

@@ -73,15 +73,16 @@ pub const EmptyCatchEngineChecker = struct {
                     if (hasEmptyHandler(cfg, cfg_node.index)) {
                         // Get source range from IR node
                         if (cfg_node.ir_node.source_range) |range| {
-                            const message = allocator.dupe(u8, "Empty catch block detected. Consider handling the error or using '_' to explicitly ignore it.") catch return;
-
-                            diagnostics.append(allocator, Diagnostic.init(
+                            const diag = Diagnostic.init(
+                                allocator,
                                 src.getFilePath(),
                                 "empty-catch-engine",
                                 .warning,
-                                message,
+                                "Empty catch block detected. Consider handling the error or using '_' to explicitly ignore it.",
                                 range,
-                            )) catch return;
+                            ) catch return;
+
+                            diagnostics.append(allocator, diag) catch return;
                         }
                     }
                 }

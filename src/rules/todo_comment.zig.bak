@@ -54,16 +54,15 @@ pub const TodoCommentRule = struct {
                     const range = try src.byteRangeToSourceRange(comment_start, comment_end);
 
                     const todo_text = extractTodoMessage(content[i..comment_end]);
+                    const message = allocator.dupe(u8, todo_text) catch return RuleError.OutOfMemory;
 
-                    const diag = try Diagnostic.init(
-                        allocator,
+                    try diagnostics.append(allocator, Diagnostic.init(
                         src.getFilePath(),
                         "todo",
                         .hint,
-                        todo_text,
+                        message,
                         range,
-                    );
-                    try diagnostics.append(allocator, diag);
+                    ));
 
                     _ = todo_col;
                     i = comment_end;
