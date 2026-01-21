@@ -89,12 +89,36 @@ pub const Diagnostic = struct {
         });
     }
 
+    fn writeJsonString(writer: anytype, s: []const u8) !void {
+        try writer.writeByte('"');
+        for (s) |c| {
+            switch (c) {
+                '"' => try writer.writeAll("\\\""),
+                '\\' => try writer.writeAll("\\\\"),
+                '\n' => try writer.writeAll("\\n"),
+                '\r' => try writer.writeAll("\\r"),
+                '\t' => try writer.writeAll("\\t"),
+                0x00...0x08, 0x0B, 0x0C, 0x0E...0x1F => try writer.print("\\u{x:0>4}", .{c}),
+                else => try writer.writeByte(c),
+            }
+        }
+        try writer.writeByte('"');
+    }
+
     pub fn writeJson(self: Diagnostic, writer: anytype) !void {
         try writer.writeAll("    {\n");
-        try writer.print("      \"file\": \"{s}\",\n", .{self.file_path});
-        try writer.print("      \"rule\": \"{s}\",\n", .{self.rule_id});
-        try writer.print("      \"severity\": \"{s}\",\n", .{self.severity.toString()});
-        try writer.print("      \"message\": \"{s}\",\n", .{self.message});
+        try writer.writeAll("      \"file\": ");
+        try writeJsonString(writer, self.file_path);
+        try writer.writeAll(",\n");
+        try writer.writeAll("      \"rule\": ");
+        try writeJsonString(writer, self.rule_id);
+        try writer.writeAll(",\n");
+        try writer.writeAll("      \"severity\": ");
+        try writeJsonString(writer, self.severity.toString());
+        try writer.writeAll(",\n");
+        try writer.writeAll("      \"message\": ");
+        try writeJsonString(writer, self.message);
+        try writer.writeAll(",\n");
         try writer.writeAll("      \"location\": {\n");
         try writer.print("        \"start\": {{\"line\": {d}, \"column\": {d}}},\n", .{ self.range.start.line, self.range.start.column });
         try writer.print("        \"end\": {{\"line\": {d}, \"column\": {d}}}\n", .{ self.range.end.line, self.range.end.column });
@@ -342,4 +366,26 @@ test "Diagnostic writeJson" {
         \\    }
     ;
     try testing.expectEqualStrings(expected, stream.getWritten());
+}
+
+test "Diagnostic writeJson with special characters" {
+    const testing = std.testing;
+
+    const diag = Diagnostic.init(
+        "path/with\"quotes.zig",
+        "test-rule",
+        .warning,
+        "Message with\nnewline and \"quotes\" and \\ backslash",
+        SourceRange.init(Location.init(1, 1), Location.init(1, 1)),
+    );
+
+    var buffer: [512]u8 = undefined;
+    var stream = std.io.fixedBufferStream(&buffer);
+    try diag.writeJson(stream.writer());
+
+    const result = stream.getWritten();
+    try testing.expect(std.mem.indexOf(u8, result, "path/with\\\"quotes.zig") != null);
+    try testing.expect(std.mem.indexOf(u8, result, "Message with\\nnewline") != null);
+    try testing.expect(std.mem.indexOf(u8, result, "\\\"quotes\\\"") != null);
+    try testing.expect(std.mem.indexOf(u8, result, "\\\\") != null);
 }
