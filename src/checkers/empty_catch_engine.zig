@@ -8,7 +8,6 @@ const Source = @import("../source.zig").Source;
 const cfg_mod = @import("../cfg.zig");
 const CfgBuilder = cfg_mod.CfgBuilder;
 const Cfg = cfg_mod.Cfg;
-const IrTag = cfg_mod.IrTag;
 const engine_mod = @import("../engine.zig");
 const AnalysisEngine = engine_mod.AnalysisEngine;
 
@@ -59,13 +58,17 @@ pub const EmptyCatchEngineChecker = struct {
         if (cfg_opt) |*cfg| {
             defer cfg.deinit();
 
-            // Run the analysis engine
+            // Run the analysis engine with a worklist limit to avoid pathological cases
             var engine = AnalysisEngine.init(allocator, cfg);
             defer engine.deinit();
+            engine.setMaxWorklistSteps(20_000);
             if (context.build_metadata) |metadata| {
                 engine.setBuildMetadata(metadata);
             }
-            engine.run() catch return;
+            engine.run() catch |err| switch (err) {
+                error.OutOfMemory => return error.OutOfMemory,
+                error.AnalysisLimitExceeded => {},
+            };
 
             // Examine CFG nodes for catch_expr with empty handlers
             for (cfg.nodes.items) |cfg_node| {

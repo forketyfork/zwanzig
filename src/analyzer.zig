@@ -11,6 +11,7 @@ const BuildMetadata = @import("build_metadata.zig").BuildMetadata;
 const cache_mod = @import("cache.zig");
 const Cache = cache_mod.Cache;
 const CacheKey = cache_mod.CacheKey;
+const log = std.log.scoped(.analyzer);
 
 pub const Analyzer = struct {
     allocator: std.mem.Allocator,
@@ -127,6 +128,7 @@ pub const Analyzer = struct {
     }
 
     pub fn analyzeFile(self: *Analyzer, file_path: []const u8) !void {
+        log.debug("analyze: start {s}", .{file_path});
         const file = try std.fs.cwd().openFile(file_path, .{});
         defer file.close();
 
@@ -148,12 +150,14 @@ pub const Analyzer = struct {
             if (self.cache) |*c| {
                 if (try c.get(cache_key)) |cached_data| {
                     defer self.allocator.free(cached_data);
+                    log.debug("analyze: cache hit {s}", .{file_path});
                     return;
                 }
             }
         }
 
         if (self.use_typed_ir) {
+            log.debug("analyze: load typed ir {s}", .{file_path});
             try self.loadTypedIr(&source);
         }
 
@@ -165,6 +169,8 @@ pub const Analyzer = struct {
                 try c.put(cache_key, "");
             }
         }
+
+        log.debug("analyze: done {s}", .{file_path});
     }
 
     /// Load typed IR for a source file using ZirBridge.
@@ -188,14 +194,18 @@ pub const Analyzer = struct {
         // Run native checkers
         for (self.checker_manager.checkers.items) |chkr| {
             if (self.isRuleEnabled(chkr.name)) {
+                log.debug("checker: start {s} ({s})", .{ source.getFilePath(), chkr.name });
                 try chkr.checkAst(source, self.allocator, &self.diagnostics, context);
+                log.debug("checker: done {s} ({s})", .{ source.getFilePath(), chkr.name });
             }
         }
 
         // Run adapted rules
         for (self.checker_manager.adapted_rules.items) |rule| {
             if (self.isRuleEnabled(rule.name)) {
+                log.debug("rule: start {s} ({s})", .{ source.getFilePath(), rule.name });
                 try rule.check(source, self.allocator, &self.diagnostics);
+                log.debug("rule: done {s} ({s})", .{ source.getFilePath(), rule.name });
             }
         }
     }

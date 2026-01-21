@@ -1,4 +1,5 @@
 const std = @import("std");
+const log = std.log.scoped(.file_discovery);
 
 pub const FileDiscoveryError = error{
     OutOfMemory,
@@ -25,9 +26,11 @@ pub fn discoverFiles(allocator: std.mem.Allocator, paths: []const []const u8) Fi
     }
 
     if (paths.len == 0) {
+        log.debug("discover: walking current directory", .{});
         try walkDirectory(allocator, &files, ".");
     } else {
         for (paths) |path| {
+            log.debug("discover: input path {s}", .{path});
             const stat = std.fs.cwd().statFile(path) catch |err| switch (err) {
                 error.FileNotFound => return FileDiscoveryError.FileNotFound,
                 error.AccessDenied => return FileDiscoveryError.AccessDenied,
@@ -36,8 +39,10 @@ pub fn discoverFiles(allocator: std.mem.Allocator, paths: []const []const u8) Fi
             };
 
             if (stat.kind == .directory) {
+                log.debug("discover: walking directory {s}", .{path});
                 try walkDirectory(allocator, &files, path);
             } else if (isZigFile(path)) {
+                log.debug("discover: adding file {s}", .{path});
                 const owned = try allocator.dupe(u8, path);
                 try files.append(allocator, owned);
             }
@@ -64,6 +69,7 @@ fn walkDirectoryRecursive(
     defer if (open_path) |p| allocator.free(p);
 
     const dir_to_open = open_path orelse base_path;
+    log.debug("walk: open dir {s}", .{dir_to_open});
 
     var dir = std.fs.cwd().openDir(dir_to_open, .{ .iterate = true }) catch |err| switch (err) {
         error.AccessDenied => return FileDiscoveryError.AccessDenied,
@@ -79,6 +85,7 @@ fn walkDirectoryRecursive(
         if (entry) |e| {
             if (e.kind == .directory) {
                 if (shouldIgnoreDir(e.name)) {
+                    log.debug("walk: skip dir {s}", .{e.name});
                     continue;
                 }
                 const new_relative = if (relative_path) |rel|
@@ -87,6 +94,7 @@ fn walkDirectoryRecursive(
                     allocator.dupe(u8, e.name) catch return FileDiscoveryError.OutOfMemory;
                 defer allocator.free(new_relative);
 
+                log.debug("walk: enter dir {s}", .{new_relative});
                 try walkDirectoryRecursive(allocator, files, base_path, new_relative);
             } else if (e.kind == .file and isZigFile(e.name)) {
                 const full_path = if (relative_path) |rel|
@@ -100,11 +108,13 @@ fn walkDirectoryRecursive(
                         std.fmt.allocPrint(allocator, "{s}/{s}", .{ rel, e.name }) catch return FileDiscoveryError.OutOfMemory
                     else
                         allocator.dupe(u8, e.name) catch return FileDiscoveryError.OutOfMemory;
+                    log.debug("walk: found file {s}", .{simple_path});
                     files.append(allocator, simple_path) catch {
                         allocator.free(simple_path);
                         return FileDiscoveryError.OutOfMemory;
                     };
                 } else {
+                    log.debug("walk: found file {s}", .{full_path});
                     files.append(allocator, full_path) catch {
                         allocator.free(full_path);
                         return FileDiscoveryError.OutOfMemory;

@@ -8,12 +8,8 @@ const Source = @import("../source.zig").Source;
 const cfg_mod = @import("../cfg.zig");
 const CfgBuilder = cfg_mod.CfgBuilder;
 const Cfg = cfg_mod.Cfg;
-const CfgEdge = cfg_mod.CfgEdge;
-const EdgeKind = cfg_mod.EdgeKind;
-const IrTag = cfg_mod.IrTag;
 const engine_mod = @import("../engine.zig");
 const AnalysisEngine = engine_mod.AnalysisEngine;
-const ErrorState = engine_mod.ErrorState;
 
 /// Engine-based checker that detects catch blocks that swallow errors.
 /// An error is considered "swallowed" when:
@@ -62,19 +58,29 @@ pub const SwallowedErrorChecker = struct {
         var cfg_opt = builder.buildFromFn(src, fn_node) catch return;
         if (cfg_opt) |*cfg| {
             defer cfg.deinit();
+            const tree = src.ast() catch return;
+            const data = tree.nodes.items(.data);
 
-            // Run the analysis engine to track error states
+            // Run the analysis engine with a worklist limit to avoid pathological cases
             var engine = AnalysisEngine.init(allocator, cfg);
             defer engine.deinit();
+            engine.setMaxWorklistSteps(20_000);
             if (context.build_metadata) |metadata| {
                 engine.setBuildMetadata(metadata);
             }
-            engine.run() catch return;
+            var engine_ok = true;
+            engine.run() catch |err| switch (err) {
+                error.OutOfMemory => return error.OutOfMemory,
+                error.AnalysisLimitExceeded => engine_ok = false,
+            };
 
             // Examine CFG nodes for catch_expr with swallowed errors
             for (cfg.nodes.items) |cfg_node| {
                 if (cfg_node.ir_node.tag == .catch_expr) {
-                    if (try isErrorSwallowed(cfg, cfg_node.index, &engine, allocator)) {
+                    const catch_ast = cfg_node.ir_node.ast_node orelse continue;
+                    const handler_ast = @intFromEnum(data[catch_ast].node_and_node[1]);
+                    const engine_ptr: ?*const AnalysisEngine = if (engine_ok) &engine else null;
+                    if (try isErrorSwallowed(cfg, cfg_node.index, handler_ast, tree, engine_ptr, allocator)) {
                         // Get source range from IR node
                         if (cfg_node.ir_node.source_range) |range| {
                             const diag = Diagnostic.init(
@@ -100,7 +106,14 @@ pub const SwallowedErrorChecker = struct {
     /// 2. The handler does NOT return an error
     /// 3. The handler does NOT appear to log the error
     /// 4. The handler completes normally (reaches merge point)
-    fn isErrorSwallowed(cfg: *const Cfg, catch_node_idx: u32, engine: *const AnalysisEngine, allocator: std.mem.Allocator) CheckerError!bool {
+    fn isErrorSwallowed(
+        cfg: *const Cfg,
+        catch_node_idx: u32,
+        handler_ast: u32,
+        tree: *const std.zig.Ast,
+        engine: ?*const AnalysisEngine,
+        allocator: std.mem.Allocator,
+    ) CheckerError!bool {
         // Find the catch_error edge
         var handler_entry: ?u32 = null;
         var merge_node: ?u32 = null;
@@ -129,8 +142,9 @@ pub const SwallowedErrorChecker = struct {
         // 1. Returns an error (good)
         // 2. Contains a call (potentially logging)
         // 3. Just falls through (swallowed error)
-        var has_return = false;
-        var has_call = false;
+        const scan = scanHandlerTokens(tree, handler_ast);
+        var has_return = scan.has_return;
+        var has_call = scan.has_call;
         var current_nodes: std.ArrayList(u32) = .empty;
         defer current_nodes.deinit(allocator);
         var visited = std.AutoHashMap(u32, void).init(allocator);
@@ -173,22 +187,24 @@ pub const SwallowedErrorChecker = struct {
         }
 
         // Check using the analysis engine for error state paths
-        const graph = engine.getGraph();
-
-        // Look for exploded nodes at the merge point with error_handled state
         var reaches_merge_from_error = false;
-        if (merge_node) |merge| {
-            for (graph.nodes.items) |exploded_node| {
-                if (exploded_node.point.node_index == merge and
-                    exploded_node.point.kind == .pre)
-                {
-                    // This node reached the merge - check if it came from error handler
-                    // by looking at predecessors
-                    for (exploded_node.predecessors.items) |pred_idx| {
-                        if (graph.getNode(pred_idx)) |pred_node| {
-                            if (pred_node.state.getErrorState() == .error_handled) {
-                                reaches_merge_from_error = true;
-                                break;
+        if (engine) |eng| {
+            const graph = eng.getGraph();
+
+            // Look for exploded nodes at the merge point with error_handled state
+            if (merge_node) |merge| {
+                for (graph.nodes.items) |exploded_node| {
+                    if (exploded_node.point.node_index == merge and
+                        exploded_node.point.kind == .pre)
+                    {
+                        // This node reached the merge - check if it came from error handler
+                        // by looking at predecessors
+                        for (exploded_node.predecessors.items) |pred_idx| {
+                            if (graph.getNode(pred_idx)) |pred_node| {
+                                if (pred_node.state.getErrorState() == .error_handled) {
+                                    reaches_merge_from_error = true;
+                                    break;
+                                }
                             }
                         }
                     }
@@ -200,7 +216,7 @@ pub const SwallowedErrorChecker = struct {
         // - Handler reaches merge without return
         // - Handler doesn't have a call (potential logging)
         // - Analysis shows error path reaches normal completion
-        if (!has_return and !has_call and reaches_merge_from_error) {
+        if (engine != null and !has_return and !has_call and reaches_merge_from_error) {
             return true;
         }
 
@@ -222,6 +238,45 @@ pub const SwallowedErrorChecker = struct {
 
         return false;
     }
+
+    const TokenScan = struct {
+        has_return: bool,
+        has_call: bool,
+    };
+
+    fn scanHandlerTokens(tree: *const std.zig.Ast, handler_ast: u32) TokenScan {
+        if (handler_ast == 0) {
+            return .{ .has_return = false, .has_call = false };
+        }
+        const token_tags = tree.tokens.items(.tag);
+        const first = tree.firstToken(@enumFromInt(handler_ast));
+        const last = tree.lastToken(@enumFromInt(handler_ast));
+        if (first >= token_tags.len) {
+            return .{ .has_return = false, .has_call = false };
+        }
+        var has_return = false;
+        var has_call = false;
+        var i = first;
+        const end = if (last < token_tags.len) last else token_tags.len - 1;
+        while (i <= end) : (i += 1) {
+            const tag = token_tags[i];
+            if (tag == .keyword_return) {
+                has_return = true;
+            }
+            if (!has_call and (tag == .identifier or tag == .builtin)) {
+                var j = i + 1;
+                if (j <= end and token_tags[j] == .period) {
+                    while (j + 1 <= end and token_tags[j] == .period and token_tags[j + 1] == .identifier) {
+                        j += 2;
+                    }
+                }
+                if (j <= end and token_tags[j] == .l_paren) {
+                    has_call = true;
+                }
+            }
+        }
+        return .{ .has_return = has_return, .has_call = has_call };
+    }
 };
 
 test "swallowed_error - no diagnostic for catch that returns error" {
@@ -238,6 +293,66 @@ test "swallowed_error - no diagnostic for catch that returns error" {
         \\        return err;
         \\    };
         \\    return x;
+        \\}
+    ;
+    var source = Source.init(allocator, "test.zig", code);
+    defer source.deinit();
+
+    var diagnostics: std.ArrayList(Diagnostic) = .empty;
+    defer diagnostics.deinit(allocator);
+    defer for (diagnostics.items) |diag| allocator.free(@constCast(diag.message));
+
+    const context = checker_mod.CheckerContext{ .build_metadata = null };
+    try SwallowedErrorChecker.checker.checkAst(&source, allocator, &diagnostics, context);
+
+    try testing.expectEqual(@as(usize, 0), diagnostics.items.len);
+}
+
+test "swallowed_error - no diagnostic for catch handler that returns in switch" {
+    const testing = std.testing;
+    const allocator = testing.allocator;
+
+    const code: [:0]const u8 =
+        \\fn foo() !i32 {
+        \\    return error.FontUnavailable;
+        \\}
+        \\fn bar() !i32 {
+        \\    const x = foo() catch |err| switch (err) {
+        \\        error.FontUnavailable => return err,
+        \\        error.OutOfMemory => return err,
+        \\    };
+        \\    return x;
+        \\}
+    ;
+    var source = Source.init(allocator, "test.zig", code);
+    defer source.deinit();
+
+    var diagnostics: std.ArrayList(Diagnostic) = .empty;
+    defer diagnostics.deinit(allocator);
+    defer for (diagnostics.items) |diag| allocator.free(@constCast(diag.message));
+
+    const context = checker_mod.CheckerContext{ .build_metadata = null };
+    try SwallowedErrorChecker.checker.checkAst(&source, allocator, &diagnostics, context);
+
+    try testing.expectEqual(@as(usize, 0), diagnostics.items.len);
+}
+
+test "swallowed_error - no diagnostic for catch handler with call in switch" {
+    const testing = std.testing;
+    const allocator = testing.allocator;
+
+    const code: [:0]const u8 =
+        \\const std = @import("std");
+        \\fn foo() !i32 {
+        \\    return error.Failed;
+        \\}
+        \\fn bar() i32 {
+        \\    const x = foo() catch |err| switch (err) {
+        \\        error.Failed => std.debug.print("oops\\n", .{}),
+        \\        else => {},
+        \\    };
+        \\    _ = x;
+        \\    return 0;
         \\}
     ;
     var source = Source.init(allocator, "test.zig", code);

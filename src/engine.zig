@@ -9,11 +9,12 @@ const CfgBuilder = cfg_mod.CfgBuilder;
 const Source = @import("source.zig").Source;
 const BuildMetadata = @import("build_metadata.zig").BuildMetadata;
 
-pub const EngineError = std.mem.Allocator.Error;
+pub const EngineError = std.mem.Allocator.Error || error{AnalysisLimitExceeded};
 
 /// Default maximum inlining depth for interprocedural analysis.
 /// Functions are inlined up to this depth; deeper calls are treated as unknown effects.
 pub const DEFAULT_MAX_INLINE_DEPTH: u32 = 3;
+pub const DEFAULT_MAX_WORKLIST_STEPS: usize = 200_000;
 
 /// Function summary capturing the effects of a function call.
 /// Summaries store preconditions, postconditions, and error behavior to enable
@@ -1267,6 +1268,8 @@ pub const AnalysisEngine = struct {
     pruned_path_count: u32,
     /// Maximum inline depth for interprocedural analysis
     max_inline_depth: u32,
+    /// Maximum number of worklist steps before aborting analysis
+    max_worklist_steps: usize,
     /// Source file for resolving function calls (optional)
     source: ?*Source,
     /// Cache of built CFGs for functions (by AST node index).
@@ -1304,6 +1307,7 @@ pub const AnalysisEngine = struct {
             .worklist = .empty,
             .pruned_path_count = 0,
             .max_inline_depth = DEFAULT_MAX_INLINE_DEPTH,
+            .max_worklist_steps = DEFAULT_MAX_WORKLIST_STEPS,
             .source = null,
             .function_cfgs = std.AutoHashMap(u32, *Cfg).init(allocator),
             .function_names = std.StringHashMap(u32).init(allocator),
@@ -1339,6 +1343,11 @@ pub const AnalysisEngine = struct {
     /// Set the maximum inline depth for interprocedural analysis.
     pub fn setMaxInlineDepth(self: *AnalysisEngine, depth: u32) void {
         self.max_inline_depth = depth;
+    }
+
+    /// Set the maximum number of worklist steps before aborting analysis.
+    pub fn setMaxWorklistSteps(self: *AnalysisEngine, steps: usize) void {
+        self.max_worklist_steps = steps;
     }
 
     /// Enable or disable the use of function summaries.
@@ -1471,7 +1480,12 @@ pub const AnalysisEngine = struct {
         }
         try self.worklist.append(self.allocator, .{ .node_index = result.index, .edge_kind = .normal, .pending_constraint = null, .cfg = cfg });
 
+        var worklist_steps: usize = 0;
         while (self.worklist.pop()) |item| {
+            worklist_steps += 1;
+            if (worklist_steps > self.max_worklist_steps) {
+                return error.AnalysisLimitExceeded;
+            }
             try self.processNode(item.node_index, item.edge_kind, item.pending_constraint, item.cfg);
         }
     }

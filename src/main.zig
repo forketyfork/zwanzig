@@ -19,6 +19,11 @@ const BuildMetadata = build_metadata.BuildMetadata;
 const TargetConfig = build_metadata.TargetConfig;
 const config = @import("config.zig");
 const Config = config.Config;
+const build_options = @import("build_options");
+
+pub const std_options = std.Options{
+    .log_level = @enumFromInt(@intFromEnum(build_options.log_level)),
+};
 
 test {
     _ = @import("ir.zig");

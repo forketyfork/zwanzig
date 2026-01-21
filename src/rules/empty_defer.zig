@@ -18,45 +18,42 @@ pub const EmptyDeferRule = struct {
         for (tags, 0..) |tag, i| {
             if (tag == .@"defer") {
                 const defer_node: u32 = @intCast(i);
-                const defer_body_opt = data[defer_node].opt_node;
+                const defer_body = data[defer_node].node;
+                const defer_body_idx = @intFromEnum(defer_body);
+                if (defer_body_idx != 0 and defer_body_idx < tags.len) {
+                    const body_tag = tags[defer_body_idx];
 
-                if (defer_body_opt.unwrap()) |defer_body_node| {
-                    const defer_body_idx = @intFromEnum(defer_body_node);
-                    if (defer_body_idx < tags.len) {
-                        const body_tag = tags[defer_body_idx];
+                    var is_empty = false;
+                    switch (body_tag) {
+                        .block, .block_semicolon => {
+                            const extra = data[defer_body_idx].extra_range;
+                            const start: usize = @intFromEnum(extra.start);
+                            const end: usize = @intFromEnum(extra.end);
+                            is_empty = (end <= start);
+                        },
+                        .block_two, .block_two_semicolon => {
+                            const opt_nodes = data[defer_body_idx].opt_node_and_opt_node;
+                            is_empty = (opt_nodes[0].unwrap() == null and opt_nodes[1].unwrap() == null);
+                        },
+                        else => {},
+                    }
 
-                        var is_empty = false;
-                        switch (body_tag) {
-                            .block, .block_semicolon => {
-                                const extra = data[defer_body_idx].extra_range;
-                                const start: usize = @intFromEnum(extra.start);
-                                const end: usize = @intFromEnum(extra.end);
-                                is_empty = (end <= start);
-                            },
-                            .block_two, .block_two_semicolon => {
-                                const opt_nodes = data[defer_body_idx].opt_node_and_opt_node;
-                                is_empty = (opt_nodes[0].unwrap() == null and opt_nodes[1].unwrap() == null);
-                            },
-                            else => {},
-                        }
-
-                        if (is_empty) {
-                            const main_tokens = tree.nodes.items(.main_token);
-                            const token_starts = tree.tokens.items(.start);
-                            const main_token = main_tokens[defer_node];
-                            const defer_byte_offset = token_starts[main_token];
-                            const loc = try src.byteToLocation(defer_byte_offset);
-                            const diag = try Diagnostic.initAtLocation(
-                                allocator,
-                                src.getFilePath(),
-                                rule.name,
-                                .warning,
-                                "empty defer block",
-                                loc.line,
-                                loc.column,
-                            );
-                            try diagnostics.append(allocator, diag);
-                        }
+                    if (is_empty) {
+                        const main_tokens = tree.nodes.items(.main_token);
+                        const token_starts = tree.tokens.items(.start);
+                        const main_token = main_tokens[defer_node];
+                        const defer_byte_offset = token_starts[main_token];
+                        const loc = try src.byteToLocation(defer_byte_offset);
+                        const diag = try Diagnostic.initAtLocation(
+                            allocator,
+                            src.getFilePath(),
+                            rule.name,
+                            .warning,
+                            "empty defer block",
+                            loc.line,
+                            loc.column,
+                        );
+                        try diagnostics.append(allocator, diag);
                     }
                 }
             }

@@ -40,8 +40,9 @@ pub const UnreachableCodeRule = struct {
 
         if (tags[fn_node] == .fn_decl) {
             const node_data = data[fn_node];
-            _ = node_data.opt_node_and_opt_node[0].unwrap() orelse return;
-            body_node = @intFromEnum(node_data.opt_node_and_opt_node[1].unwrap() orelse return);
+            const fn_body = @intFromEnum(node_data.node_and_node[1]);
+            if (fn_body == 0) return;
+            body_node = fn_body;
         }
 
         if (body_node) |body| {
@@ -109,7 +110,7 @@ pub const UnreachableCodeRule = struct {
             const stmt_tag = tags[stmt];
             if (stmt_tag == .@"return") {
                 found_terminator = true;
-            } else if (stmt_tag == .@"if") {
+            } else if (stmt_tag == .@"if" or stmt_tag == .if_simple) {
                 if (try isIfFullyTerminating(src, stmt)) {
                     found_terminator = true;
                 }
@@ -121,17 +122,16 @@ pub const UnreachableCodeRule = struct {
 
     fn isIfFullyTerminating(src: *Source, if_node: u32) RuleError!bool {
         const tree = try src.ast();
-        const data = tree.nodes.items(.data);
+        const full_if = tree.fullIf(@enumFromInt(if_node)) orelse return false;
 
-        const if_data = data[if_node];
-        const then_expr = @intFromEnum(if_data.opt_node_and_opt_node[0].unwrap() orelse return false);
-        const else_expr_opt = if_data.opt_node_and_opt_node[1].unwrap();
+        const then_expr = @intFromEnum(full_if.ast.then_expr);
+        if (then_expr == 0) return false;
 
-        if (else_expr_opt == null) {
-            return false;
-        }
+        const else_expr_opt = full_if.ast.else_expr.unwrap();
+        if (else_expr_opt == null) return false;
 
         const else_expr = @intFromEnum(else_expr_opt.?);
+        if (else_expr == 0) return false;
 
         const then_terminates = try doesBlockTerminate(src, then_expr);
         const else_terminates = try doesBlockTerminate(src, else_expr);
@@ -187,7 +187,7 @@ pub const UnreachableCodeRule = struct {
             return true;
         }
 
-        if (last_tag == .@"if") {
+        if (last_tag == .@"if" or last_tag == .if_simple) {
             return try isIfFullyTerminating(src, last_stmt);
         }
 
@@ -201,7 +201,6 @@ pub const UnreachableCodeRule = struct {
         stmt_node: u32,
     ) RuleError!void {
         const tree = try src.ast();
-        const data = tree.nodes.items(.data);
 
         const stmt_tag = tree.nodes.items(.tag)[stmt_node];
 
@@ -209,13 +208,17 @@ pub const UnreachableCodeRule = struct {
             .block, .block_semicolon, .block_two, .block_two_semicolon => {
                 try checkBlockForUnreachable(src, allocator, diagnostics, stmt_node);
             },
-            .@"if" => {
-                const if_data = data[stmt_node];
-                if (if_data.opt_node_and_opt_node[0].unwrap()) |then_node| {
-                    try checkStatementRecursively(src, allocator, diagnostics, @intFromEnum(then_node));
+            .@"if", .if_simple => {
+                const full_if = tree.fullIf(@enumFromInt(stmt_node)) orelse return;
+                const then_node = @intFromEnum(full_if.ast.then_expr);
+                if (then_node != 0) {
+                    try checkStatementRecursively(src, allocator, diagnostics, then_node);
                 }
-                if (if_data.opt_node_and_opt_node[1].unwrap()) |else_node| {
-                    try checkStatementRecursively(src, allocator, diagnostics, @intFromEnum(else_node));
+                if (full_if.ast.else_expr.unwrap()) |else_node| {
+                    const else_idx = @intFromEnum(else_node);
+                    if (else_idx != 0) {
+                        try checkStatementRecursively(src, allocator, diagnostics, else_idx);
+                    }
                 }
             },
             else => {},
