@@ -238,7 +238,12 @@ test "unreachable_code - basic unreachable after return" {
     defer source.deinit();
 
     var violations: std.ArrayList(Diagnostic) = .empty;
-    defer violations.deinit(allocator);
+    defer {
+        for (violations.items) |*diag| {
+            diag.deinit(allocator);
+        }
+        violations.deinit(allocator);
+    }
 
     try UnreachableCodeRule.rule.check(&source, allocator, &violations);
 
@@ -286,7 +291,12 @@ test "unreachable_code - unreachable in if-else both terminate" {
     defer source.deinit();
 
     var violations: std.ArrayList(Diagnostic) = .empty;
-    defer violations.deinit(allocator);
+    defer {
+        for (violations.items) |*diag| {
+            diag.deinit(allocator);
+        }
+        violations.deinit(allocator);
+    }
 
     try UnreachableCodeRule.rule.check(&source, allocator, &violations);
 

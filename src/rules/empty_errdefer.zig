@@ -76,7 +76,12 @@ test "empty_errdefer - detects empty errdefer" {
     defer source.deinit();
 
     var violations: std.ArrayList(Diagnostic) = .empty;
-    defer violations.deinit(allocator);
+    defer {
+        for (violations.items) |*diag| {
+            diag.deinit(allocator);
+        }
+        violations.deinit(allocator);
+    }
 
     try EmptyErrdeferRule.rule.check(&source, allocator, &violations);
 

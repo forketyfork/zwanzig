@@ -78,7 +78,12 @@ test "empty_defer - detects empty defer" {
     defer source.deinit();
 
     var violations: std.ArrayList(Diagnostic) = .empty;
-    defer violations.deinit(allocator);
+    defer {
+        for (violations.items) |*diag| {
+            diag.deinit(allocator);
+        }
+        violations.deinit(allocator);
+    }
 
     try EmptyDeferRule.rule.check(&source, allocator, &violations);
 
