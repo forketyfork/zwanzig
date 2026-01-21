@@ -107,7 +107,7 @@ pub const Cache = struct {
     cache_dir: ?std.fs.Dir,
 
     pub fn init(allocator: std.mem.Allocator) !Cache {
-        const cache_dir = std.fs.cwd().makeOpenPath(CACHE_DIR_NAME, .{}) catch |err| {
+        const cache_dir = std.fs.cwd().makeOpenPath(CACHE_DIR_NAME, .{ .iterate = true }) catch |err| {
             switch (err) {
                 error.AccessDenied => return Cache{
                     .allocator = allocator,
@@ -299,7 +299,7 @@ test "CacheEntry: write and read" {
 test "Cache: put and get" {
     const allocator = std.testing.allocator;
 
-    const cache_dir = try std.fs.cwd().makeOpenPath("test-cache-tmp", .{});
+    const cache_dir = try std.fs.cwd().makeOpenPath("test-cache-tmp", .{ .iterate = true });
     defer {
         std.fs.cwd().deleteTree("test-cache-tmp") catch {};
     }
@@ -342,7 +342,7 @@ test "Cache: get non-existent key returns null" {
 test "Cache: invalidate removes entry" {
     const allocator = std.testing.allocator;
 
-    const cache_dir = try std.fs.cwd().makeOpenPath("test-cache-tmp2", .{});
+    const cache_dir = try std.fs.cwd().makeOpenPath("test-cache-tmp2", .{ .iterate = true });
     defer {
         std.fs.cwd().deleteTree("test-cache-tmp2") catch {};
     }
@@ -365,7 +365,7 @@ test "Cache: invalidate removes entry" {
 test "Cache: clear removes all entries" {
     const allocator = std.testing.allocator;
 
-    const cache_dir = try std.fs.cwd().makeOpenPath("test-cache-tmp3", .{});
+    const cache_dir = try std.fs.cwd().makeOpenPath("test-cache-tmp3", .{ .iterate = true });
     defer {
         std.fs.cwd().deleteTree("test-cache-tmp3") catch {};
     }
