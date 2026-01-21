@@ -674,11 +674,15 @@ pub const Environment = struct {
 /// Represents a position in the analysis - a specific point in the CFG.
 /// ProgramPoint identifies a CFG node plus whether we are at the pre-state
 /// (before the node executes) or post-state (after the node executes).
+/// Includes the CFG pointer to distinguish nodes from different CFGs during
+/// interprocedural analysis.
 pub const ProgramPoint = struct {
     /// Index of the CFG node
     node_index: u32,
     /// Whether this is a pre-state (before node execution) or post-state (after)
     kind: Kind,
+    /// The CFG this node belongs to (for interprocedural analysis)
+    cfg: *const Cfg,
 
     pub const Kind = enum {
         /// Before the CFG node is executed
@@ -687,29 +691,33 @@ pub const ProgramPoint = struct {
         post,
     };
 
-    pub fn init(node_index: u32, kind: Kind) ProgramPoint {
+    pub fn init(node_index: u32, kind: Kind, cfg: *const Cfg) ProgramPoint {
         return .{
             .node_index = node_index,
             .kind = kind,
+            .cfg = cfg,
         };
     }
 
-    pub fn initPre(node_index: u32) ProgramPoint {
-        return init(node_index, .pre);
+    pub fn initPre(node_index: u32, cfg: *const Cfg) ProgramPoint {
+        return init(node_index, .pre, cfg);
     }
 
-    pub fn initPost(node_index: u32) ProgramPoint {
-        return init(node_index, .post);
+    pub fn initPost(node_index: u32, cfg: *const Cfg) ProgramPoint {
+        return init(node_index, .post, cfg);
     }
 
     pub fn eql(self: ProgramPoint, other: ProgramPoint) bool {
-        return self.node_index == other.node_index and self.kind == other.kind;
+        return self.node_index == other.node_index and
+            self.kind == other.kind and
+            self.cfg == other.cfg;
     }
 
     pub fn hash(self: ProgramPoint) u64 {
         var hasher = std.hash.Wyhash.init(0);
         hasher.update(std.mem.asBytes(&self.node_index));
         hasher.update(std.mem.asBytes(&self.kind));
+        hasher.update(std.mem.asBytes(&@intFromPtr(self.cfg)));
         return hasher.final();
     }
 };
@@ -771,9 +779,20 @@ pub const ProgramState = struct {
 
     pub fn eql(self: *const ProgramState, other: *const ProgramState) bool {
         if (self.inline_depth != other.inline_depth) return false;
-        return self.env.eql(&other.env) and
-            self.constraints.eql(&other.constraints) and
-            self.error_state == other.error_state;
+        if (!self.env.eql(&other.env)) return false;
+        if (!self.constraints.eql(&other.constraints)) return false;
+        if (self.error_state != other.error_state) return false;
+        // Compare call stacks to distinguish different calling contexts
+        if (self.call_stack.items.len != other.call_stack.items.len) return false;
+        for (self.call_stack.items, other.call_stack.items) |cs1, cs2| {
+            if (cs1.call_node != cs2.call_node or
+                cs1.return_node != cs2.return_node or
+                cs1.caller_cfg != cs2.caller_cfg)
+            {
+                return false;
+            }
+        }
+        return true;
     }
 
     pub fn computeHash(self: *ProgramState) u64 {
@@ -785,6 +804,12 @@ pub const ProgramState = struct {
         hasher.update(std.mem.asBytes(&constraints_hash));
         hasher.update(std.mem.asBytes(&self.error_state));
         hasher.update(std.mem.asBytes(&self.inline_depth));
+        // Include call stack in hash to distinguish different calling contexts
+        for (self.call_stack.items) |cs| {
+            hasher.update(std.mem.asBytes(&cs.call_node));
+            hasher.update(std.mem.asBytes(&cs.return_node));
+            hasher.update(std.mem.asBytes(&@intFromPtr(cs.caller_cfg)));
+        }
         const h = hasher.final();
         self.cached_hash = h;
         return h;
@@ -1045,8 +1070,10 @@ pub const AnalysisEngine = struct {
     max_inline_depth: u32,
     /// Source file for resolving function calls (optional)
     source: ?*Source,
-    /// Cache of built CFGs for functions (by AST node index)
-    function_cfgs: std.AutoHashMap(u32, Cfg),
+    /// Cache of built CFGs for functions (by AST node index).
+    /// Stores pointers to heap-allocated CFGs for stable addresses that survive
+    /// hashmap rehashing.
+    function_cfgs: std.AutoHashMap(u32, *Cfg),
     /// Map from function name to AST node index
     function_names: std.StringHashMap(u32),
     /// Count of inlined calls (for testing/debugging)
@@ -1071,7 +1098,7 @@ pub const AnalysisEngine = struct {
             .pruned_path_count = 0,
             .max_inline_depth = DEFAULT_MAX_INLINE_DEPTH,
             .source = null,
-            .function_cfgs = std.AutoHashMap(u32, Cfg).init(allocator),
+            .function_cfgs = std.AutoHashMap(u32, *Cfg).init(allocator),
             .function_names = std.StringHashMap(u32).init(allocator),
             .inlined_call_count = 0,
         };
@@ -1087,10 +1114,11 @@ pub const AnalysisEngine = struct {
     pub fn deinit(self: *AnalysisEngine) void {
         self.graph.deinit();
         self.worklist.deinit(self.allocator);
-        // Deinit all cached CFGs
+        // Deinit and free all cached CFGs
         var iter = self.function_cfgs.valueIterator();
-        while (iter.next()) |cfg| {
-            cfg.deinit();
+        while (iter.next()) |cfg_ptr| {
+            cfg_ptr.*.deinit();
+            self.allocator.destroy(cfg_ptr.*);
         }
         self.function_cfgs.deinit();
         self.function_names.deinit();
@@ -1116,7 +1144,7 @@ pub const AnalysisEngine = struct {
         }
 
         var initial_state = ProgramState.init(self.allocator);
-        const entry_point = ProgramPoint.initPre(cfg.entry);
+        const entry_point = ProgramPoint.initPre(cfg.entry, cfg);
 
         const result = try self.graph.getOrCreateNode(entry_point, &initial_state);
         if (!result.is_new) {
@@ -1134,9 +1162,7 @@ pub const AnalysisEngine = struct {
         const tree = src.ast() catch return;
         const tags = tree.nodes.items(.tag);
         const token_tags = tree.tokens.items(.tag);
-        const token_starts = tree.tokens.items(.start);
         const main_tokens = tree.nodes.items(.main_token);
-        const content = src.getContent();
 
         for (0..tags.len) |i| {
             const tag = tags[i];
@@ -1146,13 +1172,8 @@ pub const AnalysisEngine = struct {
                 // For fn_decl, main_token is the 'fn' keyword, name follows
                 if (main_token + 1 < token_tags.len and token_tags[main_token + 1] == .identifier) {
                     const name_token = main_token + 1;
-                    const name_start = token_starts[name_token];
-                    // Find the end of the identifier
-                    var name_end = name_start;
-                    while (name_end < content.len and (std.ascii.isAlphanumeric(content[name_end]) or content[name_end] == '_')) {
-                        name_end += 1;
-                    }
-                    const name = content[name_start..name_end];
+                    // Use tokenSlice to properly handle all identifier forms including @"escaped"
+                    const name = tree.tokenSlice(name_token);
                     try self.function_names.put(name, @intCast(i));
                 }
             }
@@ -1161,9 +1182,9 @@ pub const AnalysisEngine = struct {
 
     /// Get or build a CFG for a function by its AST node index.
     fn getOrBuildFunctionCfg(self: *AnalysisEngine, fn_ast_node: u32) ?*const Cfg {
-        // Check cache first
-        if (self.function_cfgs.getPtr(fn_ast_node)) |cfg| {
-            return cfg;
+        // Check cache first - returns the pointer stored in the map
+        if (self.function_cfgs.get(fn_ast_node)) |cfg_ptr| {
+            return cfg_ptr;
         }
 
         // Build the CFG if source is available
@@ -1171,8 +1192,15 @@ pub const AnalysisEngine = struct {
         var builder = CfgBuilder.init(self.allocator);
         const cfg_opt = builder.buildFromFn(src, fn_ast_node) catch return null;
         if (cfg_opt) |cfg| {
-            self.function_cfgs.put(fn_ast_node, cfg) catch return null;
-            return self.function_cfgs.getPtr(fn_ast_node);
+            // Allocate CFG on the heap for stable address
+            const cfg_ptr = self.allocator.create(Cfg) catch return null;
+            cfg_ptr.* = cfg;
+            self.function_cfgs.put(fn_ast_node, cfg_ptr) catch {
+                cfg_ptr.deinit();
+                self.allocator.destroy(cfg_ptr);
+                return null;
+            };
+            return cfg_ptr;
         }
         return null;
     }
@@ -1184,9 +1212,7 @@ pub const AnalysisEngine = struct {
         const tree = src.ast() catch return null;
         const tags = tree.nodes.items(.tag);
         const token_tags = tree.tokens.items(.tag);
-        const token_starts = tree.tokens.items(.start);
         const main_tokens = tree.nodes.items(.main_token);
-        const content = src.getContent();
 
         if (call_ast_node >= tags.len) return null;
         const tag = tags[call_ast_node];
@@ -1207,12 +1233,8 @@ pub const AnalysisEngine = struct {
         if (callee_tag == .identifier) {
             const callee_token = main_tokens[callee_node];
             if (callee_token < token_tags.len and token_tags[callee_token] == .identifier) {
-                const name_start = token_starts[callee_token];
-                var name_end = name_start;
-                while (name_end < content.len and (std.ascii.isAlphanumeric(content[name_end]) or content[name_end] == '_')) {
-                    name_end += 1;
-                }
-                const name = content[name_start..name_end];
+                // Use tokenSlice to properly handle all identifier forms including @"escaped"
+                const name = tree.tokenSlice(callee_token);
 
                 // Look up in function index
                 return self.function_names.get(name);
@@ -1249,7 +1271,7 @@ pub const AnalysisEngine = struct {
                     }
                 }
 
-                const post_point = ProgramPoint.initPost(point.node_index);
+                const post_point = ProgramPoint.initPost(point.node_index, current_cfg);
                 var new_state = try self.transferFunction(point, &state_copy, current_cfg);
 
                 // Apply any pending constraint from a branch edge
@@ -1294,7 +1316,7 @@ pub const AnalysisEngine = struct {
 
                 for (current_cfg.edges.items) |edge| {
                     if (edge.from == point.node_index) {
-                        const succ_point = ProgramPoint.initPre(edge.to);
+                        const succ_point = ProgramPoint.initPre(edge.to, current_cfg);
                         var succ_state = try state_copy.clone(self.allocator);
 
                         // Handle error state transitions based on edge kind
@@ -1404,7 +1426,7 @@ pub const AnalysisEngine = struct {
         });
 
         // Create entry point for the callee
-        const callee_entry_point = ProgramPoint.initPre(callee_cfg.entry);
+        const callee_entry_point = ProgramPoint.initPre(callee_cfg.entry, callee_cfg);
         const result = try self.graph.getOrCreateNode(callee_entry_point, &inline_state);
         if (!result.is_new) {
             inline_state.deinit();
@@ -1437,7 +1459,7 @@ pub const AnalysisEngine = struct {
         var return_state = try state.clone(self.allocator);
 
         // Create the return point in the caller
-        const return_point = ProgramPoint.initPre(call_site.return_node);
+        const return_point = ProgramPoint.initPre(call_site.return_node, call_site.caller_cfg);
         const result = try self.graph.getOrCreateNode(return_point, &return_state);
         if (!result.is_new) {
             return_state.deinit();
@@ -1541,22 +1563,33 @@ pub const AnalysisEngine = struct {
 
 test "ProgramPoint basic operations" {
     const testing = std.testing;
+    const allocator = testing.allocator;
 
-    const point1 = ProgramPoint.initPre(5);
+    var cfg1 = Cfg.init(allocator);
+    defer cfg1.deinit();
+    var cfg2 = Cfg.init(allocator);
+    defer cfg2.deinit();
+
+    const point1 = ProgramPoint.initPre(5, &cfg1);
     try testing.expectEqual(@as(u32, 5), point1.node_index);
     try testing.expectEqual(ProgramPoint.Kind.pre, point1.kind);
 
-    const point2 = ProgramPoint.initPost(5);
+    const point2 = ProgramPoint.initPost(5, &cfg1);
     try testing.expectEqual(@as(u32, 5), point2.node_index);
     try testing.expectEqual(ProgramPoint.Kind.post, point2.kind);
 
     try testing.expect(!point1.eql(point2));
 
-    const point3 = ProgramPoint.initPre(5);
+    const point3 = ProgramPoint.initPre(5, &cfg1);
     try testing.expect(point1.eql(point3));
 
     try testing.expect(point1.hash() != point2.hash());
     try testing.expect(point1.hash() == point3.hash());
+
+    // Test CFG identity: same node index but different CFG should not be equal
+    const point4 = ProgramPoint.initPre(5, &cfg2);
+    try testing.expect(!point1.eql(point4));
+    try testing.expect(point1.hash() != point4.hash());
 }
 
 test "ProgramState basic operations" {
@@ -1596,7 +1629,7 @@ test "ExplodedGraph node creation and deduplication" {
     var graph = ExplodedGraph.init(allocator, &cfg);
     defer graph.deinit();
 
-    const point = ProgramPoint.initPre(0);
+    const point = ProgramPoint.initPre(0, &cfg);
 
     var state1 = ProgramState.init(allocator);
     try state1.setVar(1, .{ .concrete_int = 42 });
@@ -1637,8 +1670,8 @@ test "ExplodedGraph edge operations" {
     var graph = ExplodedGraph.init(allocator, &cfg);
     defer graph.deinit();
 
-    const point1 = ProgramPoint.initPre(0);
-    const point2 = ProgramPoint.initPost(0);
+    const point1 = ProgramPoint.initPre(0, &cfg);
+    const point2 = ProgramPoint.initPost(0, &cfg);
 
     var state1 = ProgramState.init(allocator);
     var state2 = ProgramState.init(allocator);
@@ -2198,7 +2231,7 @@ test "AnalysisEngine branch constraint pruning" {
 
     // Manually set the initial state: x = 5
     // This simulates the effect of an assignment before the branch
-    const entry_point = ProgramPoint.initPre(entry);
+    const entry_point = ProgramPoint.initPre(entry, &cfg);
     var initial_state = ProgramState.init(allocator);
     try initial_state.setVar(100, .{ .concrete_int = 5 });
     const result = try engine.graph.getOrCreateNode(entry_point, &initial_state);
