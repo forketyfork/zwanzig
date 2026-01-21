@@ -37,8 +37,11 @@ pub fn loadConfig(allocator: std.mem.Allocator, path: []const u8) ConfigError!Co
     };
     defer file.close();
 
-    const content = file.readToEndAlloc(allocator, 1024 * 1024) catch {
-        return ConfigError.InvalidJson;
+    const content = file.readToEndAlloc(allocator, 1024 * 1024) catch |err| {
+        return switch (err) {
+            error.OutOfMemory => ConfigError.OutOfMemory,
+            else => ConfigError.InvalidJson,
+        };
     };
     defer allocator.free(content);
 
@@ -51,8 +54,11 @@ pub fn parseConfig(allocator: std.mem.Allocator, content: []const u8) ConfigErro
         allocator,
         content,
         .{},
-    ) catch {
-        return ConfigError.InvalidJson;
+    ) catch |err| {
+        return switch (err) {
+            error.OutOfMemory => ConfigError.OutOfMemory,
+            else => ConfigError.InvalidJson,
+        };
     };
     defer parsed.deinit();
 

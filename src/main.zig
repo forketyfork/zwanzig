@@ -222,7 +222,11 @@ pub fn main() !void {
     defer {
         switch (final_rule_filter) {
             .allowlist => |list| {
-                if (final_rule_filter.allowlist.ptr != cli_args.rule_filter.allowlist.ptr) {
+                const should_free = switch (cli_args.rule_filter) {
+                    .allowlist => |cli_list| list.ptr != cli_list.ptr,
+                    else => true,
+                };
+                if (should_free) {
                     for (list) |rule_name| {
                         allocator.free(rule_name);
                     }
@@ -230,7 +234,11 @@ pub fn main() !void {
                 }
             },
             .blocklist => |list| {
-                if (final_rule_filter.blocklist.ptr != cli_args.rule_filter.blocklist.ptr) {
+                const should_free = switch (cli_args.rule_filter) {
+                    .blocklist => |cli_list| list.ptr != cli_list.ptr,
+                    else => true,
+                };
+                if (should_free) {
                     for (list) |rule_name| {
                         allocator.free(rule_name);
                     }
