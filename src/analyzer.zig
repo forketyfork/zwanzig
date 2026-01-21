@@ -73,12 +73,12 @@ pub const Analyzer = struct {
         self.rule_filter = filter;
     }
 
-    pub fn setBuildMetadata(self: *Analyzer, metadata: BuildMetadata) void {
+    pub fn setBuildMetadata(self: *Analyzer, metadata: BuildMetadata) !void {
         if (self.build_metadata) |*meta| {
             var meta_mut = meta.*;
             meta_mut.deinit(self.allocator);
         }
-        self.build_metadata = metadata;
+        self.build_metadata = try metadata.clone(self.allocator);
     }
 
     pub fn getBuildMetadata(self: *const Analyzer) ?*const BuildMetadata {
@@ -148,10 +148,14 @@ pub const Analyzer = struct {
 
     /// Internal method to run checks on a source with the analyzer's filter.
     fn runChecksOnSource(self: *Analyzer, source: *Source) !void {
+        const context = checker_mod.CheckerContext{
+            .build_metadata = self.getBuildMetadata(),
+        };
+
         // Run native checkers
         for (self.checker_manager.checkers.items) |chkr| {
             if (self.isRuleEnabled(chkr.name)) {
-                try chkr.checkAst(source, self.allocator, &self.diagnostics);
+                try chkr.checkAst(source, self.allocator, &self.diagnostics, context);
             }
         }
 

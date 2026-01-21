@@ -35,6 +35,7 @@ pub const SwallowedErrorChecker = struct {
         src: *Source,
         allocator: std.mem.Allocator,
         diagnostics: *std.ArrayList(Diagnostic),
+        context: checker_mod.CheckerContext,
     ) CheckerError!void {
         const tree = src.ast() catch return;
         const tags = tree.nodes.items(.tag);
@@ -43,7 +44,7 @@ pub const SwallowedErrorChecker = struct {
         for (0..tags.len) |i| {
             const tag = tags[i];
             if (tag == .fn_decl) {
-                try analyzeFunction(src, allocator, @intCast(i), diagnostics);
+                try analyzeFunction(src, allocator, @intCast(i), diagnostics, context);
             }
         }
     }
@@ -53,6 +54,7 @@ pub const SwallowedErrorChecker = struct {
         allocator: std.mem.Allocator,
         fn_node: u32,
         diagnostics: *std.ArrayList(Diagnostic),
+        context: checker_mod.CheckerContext,
     ) CheckerError!void {
         var builder = CfgBuilder.init(allocator);
 
@@ -64,6 +66,9 @@ pub const SwallowedErrorChecker = struct {
             // Run the analysis engine to track error states
             var engine = AnalysisEngine.init(allocator, cfg);
             defer engine.deinit();
+            if (context.build_metadata) |metadata| {
+                engine.setBuildMetadata(metadata);
+            }
             engine.run() catch return;
 
             // Examine CFG nodes for catch_expr with swallowed errors
@@ -241,7 +246,8 @@ test "swallowed_error - no diagnostic for catch that returns error" {
     defer diagnostics.deinit(allocator);
     defer for (diagnostics.items) |diag| allocator.free(@constCast(diag.message));
 
-    try SwallowedErrorChecker.checker.checkAst(&source, allocator, &diagnostics);
+    const context = checker_mod.CheckerContext{ .build_metadata = null };
+    try SwallowedErrorChecker.checker.checkAst(&source, allocator, &diagnostics, context);
 
     try testing.expectEqual(@as(usize, 0), diagnostics.items.len);
 }
@@ -271,7 +277,8 @@ test "swallowed_error - no diagnostic for catch with call (logging)" {
     defer diagnostics.deinit(allocator);
     defer for (diagnostics.items) |diag| allocator.free(@constCast(diag.message));
 
-    try SwallowedErrorChecker.checker.checkAst(&source, allocator, &diagnostics);
+    const context = checker_mod.CheckerContext{ .build_metadata = null };
+    try SwallowedErrorChecker.checker.checkAst(&source, allocator, &diagnostics, context);
 
     try testing.expectEqual(@as(usize, 0), diagnostics.items.len);
 }
@@ -297,7 +304,8 @@ test "swallowed_error - no diagnostic for empty catch" {
     defer diagnostics.deinit(allocator);
     defer for (diagnostics.items) |diag| allocator.free(@constCast(diag.message));
 
-    try SwallowedErrorChecker.checker.checkAst(&source, allocator, &diagnostics);
+    const context = checker_mod.CheckerContext{ .build_metadata = null };
+    try SwallowedErrorChecker.checker.checkAst(&source, allocator, &diagnostics, context);
 
     try testing.expectEqual(@as(usize, 0), diagnostics.items.len);
 }
@@ -327,7 +335,8 @@ test "swallowed_error - detects swallowed error with assignment only" {
     defer diagnostics.deinit(allocator);
     defer for (diagnostics.items) |diag| allocator.free(@constCast(diag.message));
 
-    try SwallowedErrorChecker.checker.checkAst(&source, allocator, &diagnostics);
+    const context = checker_mod.CheckerContext{ .build_metadata = null };
+    try SwallowedErrorChecker.checker.checkAst(&source, allocator, &diagnostics, context);
 
     try testing.expectEqual(@as(usize, 1), diagnostics.items.len);
     try testing.expectEqualStrings("swallowed-error", diagnostics.items[0].rule_id);

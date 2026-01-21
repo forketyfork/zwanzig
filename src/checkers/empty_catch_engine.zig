@@ -31,6 +31,7 @@ pub const EmptyCatchEngineChecker = struct {
         src: *Source,
         allocator: std.mem.Allocator,
         diagnostics: *std.ArrayList(Diagnostic),
+        context: checker_mod.CheckerContext,
     ) CheckerError!void {
         const tree = src.ast() catch return;
         const tags = tree.nodes.items(.tag);
@@ -39,7 +40,7 @@ pub const EmptyCatchEngineChecker = struct {
         for (0..tags.len) |i| {
             const tag = tags[i];
             if (tag == .fn_decl) {
-                try analyzeFunction(src, allocator, @intCast(i), diagnostics);
+                try analyzeFunction(src, allocator, @intCast(i), diagnostics, context);
             }
         }
     }
@@ -49,6 +50,7 @@ pub const EmptyCatchEngineChecker = struct {
         allocator: std.mem.Allocator,
         fn_node: u32,
         diagnostics: *std.ArrayList(Diagnostic),
+        context: checker_mod.CheckerContext,
     ) CheckerError!void {
         var builder = CfgBuilder.init(allocator);
 
@@ -60,6 +62,9 @@ pub const EmptyCatchEngineChecker = struct {
             // Run the analysis engine
             var engine = AnalysisEngine.init(allocator, cfg);
             defer engine.deinit();
+            if (context.build_metadata) |metadata| {
+                engine.setBuildMetadata(metadata);
+            }
             engine.run() catch return;
 
             // Examine CFG nodes for catch_expr with empty handlers
@@ -131,7 +136,8 @@ test "empty_catch_engine - detects empty catch via CFG" {
     defer diagnostics.deinit(allocator);
     defer for (diagnostics.items) |diag| allocator.free(@constCast(diag.message));
 
-    try EmptyCatchEngineChecker.checker.checkAst(&source1, allocator, &diagnostics);
+    const context = checker_mod.CheckerContext{ .build_metadata = null };
+    try EmptyCatchEngineChecker.checker.checkAst(&source1, allocator, &diagnostics, context);
 
     try testing.expectEqual(@as(usize, 1), diagnostics.items.len);
     try testing.expectEqualStrings("empty-catch-engine", diagnostics.items[0].rule_id);
@@ -160,7 +166,8 @@ test "empty_catch_engine - no diagnostic for non-empty catch" {
     defer diagnostics.deinit(allocator);
     defer for (diagnostics.items) |diag| allocator.free(@constCast(diag.message));
 
-    try EmptyCatchEngineChecker.checker.checkAst(&source, allocator, &diagnostics);
+    const context = checker_mod.CheckerContext{ .build_metadata = null };
+    try EmptyCatchEngineChecker.checker.checkAst(&source, allocator, &diagnostics, context);
 
     try testing.expectEqual(@as(usize, 0), diagnostics.items.len);
 }
@@ -186,7 +193,8 @@ test "empty_catch_engine - detects catch with capture but empty body" {
     defer diagnostics.deinit(allocator);
     defer for (diagnostics.items) |diag| allocator.free(@constCast(diag.message));
 
-    try EmptyCatchEngineChecker.checker.checkAst(&source, allocator, &diagnostics);
+    const context = checker_mod.CheckerContext{ .build_metadata = null };
+    try EmptyCatchEngineChecker.checker.checkAst(&source, allocator, &diagnostics, context);
 
     try testing.expectEqual(@as(usize, 1), diagnostics.items.len);
 }

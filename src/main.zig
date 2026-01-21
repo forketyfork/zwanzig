@@ -109,6 +109,8 @@ pub fn parseArgs(allocator: std.mem.Allocator, args: []const []const u8) CliErro
             return if (err == error.InvalidTargetTriple) CliError.InvalidTargetTriple else CliError.OutOfMemory;
         };
         build_meta = BuildMetadata.init(target_config, null);
+    } else {
+        build_meta = BuildMetadata.fromNative();
     }
 
     return CliArgs{
@@ -194,7 +196,7 @@ pub fn main() !void {
     analyzer.setRuleFilter(cli_args.rule_filter);
 
     if (cli_args.build_metadata) |metadata| {
-        analyzer.setBuildMetadata(metadata);
+        try analyzer.setBuildMetadata(metadata);
     }
 
     for (files) |file_path| {

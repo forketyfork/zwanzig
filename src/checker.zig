@@ -7,6 +7,12 @@ pub const Location = diagnostic_mod.Location;
 pub const SourceRange = diagnostic_mod.SourceRange;
 const Rule = @import("rule.zig").Rule;
 const RuleError = @import("rule.zig").RuleError;
+const BuildMetadata = @import("build_metadata.zig").BuildMetadata;
+
+/// Context passed to checkers providing access to analyzer-level configuration.
+pub const CheckerContext = struct {
+    build_metadata: ?*const BuildMetadata,
+};
 
 /// Error type for checker operations
 pub const CheckerError = error{
@@ -35,10 +41,12 @@ pub const Checker = struct {
     /// - source: The parsed source file (AST is already cached)
     /// - allocator: Allocator for temporary data structures
     /// - diagnostics: List to append detected issues to
+    /// - context: Optional context with analyzer configuration
     checkAstFn: ?*const fn (
         source: *Source,
         allocator: std.mem.Allocator,
         diagnostics: *std.ArrayList(Diagnostic),
+        context: CheckerContext,
     ) CheckerError!void = null,
 
     /// Invoke the AST check hook if defined.
@@ -47,9 +55,10 @@ pub const Checker = struct {
         source: *Source,
         allocator: std.mem.Allocator,
         diagnostics: *std.ArrayList(Diagnostic),
+        context: CheckerContext,
     ) CheckerError!void {
         if (self.checkAstFn) |f| {
-            try f(source, allocator, diagnostics);
+            try f(source, allocator, diagnostics, context);
         }
     }
 
@@ -105,16 +114,18 @@ pub const CheckerManager = struct {
     /// - source: The source file to analyze
     /// - diagnostics: List to collect diagnostics from all checkers
     /// - filter_fn: Optional function to filter which checkers run (returns true to run)
+    /// - context: Context with analyzer configuration
     pub fn runAstChecks(
         self: *const CheckerManager,
         source: *Source,
         diagnostics: *std.ArrayList(Diagnostic),
         filter_fn: ?*const fn (name: []const u8) bool,
+        context: CheckerContext,
     ) CheckerError!void {
         for (self.checkers.items) |checker| {
             const should_run = if (filter_fn) |f| f(checker.name) else true;
             if (should_run) {
-                try checker.checkAst(source, self.allocator, diagnostics);
+                try checker.checkAst(source, self.allocator, diagnostics, context);
             }
         }
     }
@@ -183,12 +194,13 @@ pub const CheckerManagerWithRules = struct {
         source: *Source,
         diagnostics: *std.ArrayList(Diagnostic),
         filter_fn: ?*const fn (name: []const u8) bool,
+        context: CheckerContext,
     ) CheckerError!void {
         // Run native checkers
         for (self.checkers.items) |checker| {
             const should_run = if (filter_fn) |f| f(checker.name) else true;
             if (should_run) {
-                try checker.checkAst(source, self.allocator, diagnostics);
+                try checker.checkAst(source, self.allocator, diagnostics, context);
             }
         }
 
@@ -223,8 +235,10 @@ test "Checker with checkAstFn" {
             source: *Source,
             allocator: std.mem.Allocator,
             diagnostics: *std.ArrayList(Diagnostic),
+            context: CheckerContext,
         ) CheckerError!void {
             _ = source;
+            _ = context;
             try diagnostics.append(allocator, Diagnostic.initAtLocation(
                 "test.zig",
                 "test-checker",
@@ -251,7 +265,8 @@ test "Checker with checkAstFn" {
     var diagnostics: std.ArrayList(Diagnostic) = .empty;
     defer diagnostics.deinit(allocator);
 
-    try checker.checkAst(&source, allocator, &diagnostics);
+    const context = CheckerContext{ .build_metadata = null };
+    try checker.checkAst(&source, allocator, &diagnostics, context);
     try std.testing.expectEqual(@as(usize, 1), diagnostics.items.len);
     try std.testing.expectEqualStrings("Test diagnostic", diagnostics.items[0].message);
 }
@@ -290,10 +305,12 @@ test "CheckerManager runAstChecks" {
             source: *Source,
             alloc: std.mem.Allocator,
             diagnostics: *std.ArrayList(Diagnostic),
+            context: CheckerContext,
         ) CheckerError!void {
             _ = source;
             _ = alloc;
             _ = diagnostics;
+            _ = context;
             counter.* += 1;
         }
     };
@@ -316,7 +333,8 @@ test "CheckerManager runAstChecks" {
     var diagnostics: std.ArrayList(Diagnostic) = .empty;
     defer diagnostics.deinit(allocator);
 
-    try manager.runAstChecks(&source, &diagnostics, null);
+    const context = CheckerContext{ .build_metadata = null };
+    try manager.runAstChecks(&source, &diagnostics, null, context);
     try std.testing.expectEqual(@as(usize, 1), check_count);
 }
 
@@ -332,10 +350,12 @@ test "CheckerManager runAstChecks with filter" {
             source: *Source,
             alloc: std.mem.Allocator,
             diagnostics: *std.ArrayList(Diagnostic),
+            context: CheckerContext,
         ) CheckerError!void {
             _ = source;
             _ = alloc;
             _ = diagnostics;
+            _ = context;
             counter.* += 1;
         }
     };
@@ -347,10 +367,12 @@ test "CheckerManager runAstChecks with filter" {
             source: *Source,
             alloc: std.mem.Allocator,
             diagnostics: *std.ArrayList(Diagnostic),
+            context: CheckerContext,
         ) CheckerError!void {
             _ = source;
             _ = alloc;
             _ = diagnostics;
+            _ = context;
             counter.* += 1;
         }
     };
@@ -378,7 +400,8 @@ test "CheckerManager runAstChecks with filter" {
         }
     };
 
-    try manager.runAstChecks(&source, &diagnostics, FilterFn.filter);
+    const context = CheckerContext{ .build_metadata = null };
+    try manager.runAstChecks(&source, &diagnostics, FilterFn.filter, context);
 
     try std.testing.expectEqual(@as(usize, 1), check1_count);
     try std.testing.expectEqual(@as(usize, 0), check2_count);
@@ -430,10 +453,12 @@ test "CheckerManagerWithRules runAstChecks with both types" {
             source: *Source,
             alloc: std.mem.Allocator,
             diagnostics: *std.ArrayList(Diagnostic),
+            context: CheckerContext,
         ) CheckerError!void {
             _ = source;
             _ = alloc;
             _ = diagnostics;
+            _ = context;
             ran.* = true;
         }
     };
@@ -474,7 +499,8 @@ test "CheckerManagerWithRules runAstChecks with both types" {
     var diagnostics: std.ArrayList(Diagnostic) = .empty;
     defer diagnostics.deinit(allocator);
 
-    try manager.runAstChecks(&source, &diagnostics, null);
+    const context = CheckerContext{ .build_metadata = null };
+    try manager.runAstChecks(&source, &diagnostics, null, context);
 
     try std.testing.expect(checker_ran);
     try std.testing.expect(rule_ran);
@@ -492,10 +518,12 @@ test "CheckerManagerWithRules filter applies to both" {
             source: *Source,
             alloc: std.mem.Allocator,
             diagnostics: *std.ArrayList(Diagnostic),
+            context: CheckerContext,
         ) CheckerError!void {
             _ = source;
             _ = alloc;
             _ = diagnostics;
+            _ = context;
             ran.* = true;
         }
     };
@@ -542,7 +570,8 @@ test "CheckerManagerWithRules filter applies to both" {
         }
     };
 
-    try manager.runAstChecks(&source, &diagnostics, FilterFn.filter);
+    const context = CheckerContext{ .build_metadata = null };
+    try manager.runAstChecks(&source, &diagnostics, FilterFn.filter, context);
 
     try std.testing.expect(!checker_ran);
     try std.testing.expect(rule_ran);
