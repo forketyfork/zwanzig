@@ -327,7 +327,7 @@ When no paths are specified, zwanzig walks the current directory and discovers a
 
 ### Rule Selection
 
-By default, all rules are run. You can control which rules run using the `--do` and `--skip` flags.
+By default, all rules are run. You can control which rules run using the `--do` and `--skip` flags or a configuration file.
 
 **Run only specific rules (allowlist):**
 
@@ -350,6 +350,44 @@ zwanzig --skip empty-catch --skip unused-var file.zig
 ```
 
 Note: `--do` and `--skip` are mutually exclusive and cannot be used together.
+
+### Configuration File
+
+Zwanzig supports a `.zwanzig.json` configuration file for persistent rule configuration. The config file is automatically loaded from the current directory if it exists, or you can specify a custom path with `--config`.
+
+**Example `.zwanzig.json`:**
+
+```json
+{
+  "enabled_rules": ["empty-catch", "dupe-import", "todo"]
+}
+```
+
+Or to disable specific rules:
+
+```json
+{
+  "disabled_rules": ["todo", "unused-decl"]
+}
+```
+
+**Configuration precedence:**
+
+1. CLI flags (`--do` and `--skip`) always override config file settings
+2. If no CLI flags are provided, config file settings are used
+3. If no config file exists and no CLI flags are provided, all rules run
+
+**Using a custom config file:**
+
+```bash
+zwanzig --config path/to/custom.json src/
+```
+
+**Config file format:**
+
+- `enabled_rules`: Array of rule names to run (allowlist mode)
+- `disabled_rules`: Array of rule names to skip (blocklist mode)
+- These fields are mutually exclusive - only one can be present
 
 ### Target Configuration
 

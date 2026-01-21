@@ -15,6 +15,8 @@ const SwallowedErrorChecker = @import("checkers/swallowed_error.zig").SwallowedE
 const build_metadata = @import("build_metadata.zig");
 const BuildMetadata = build_metadata.BuildMetadata;
 const TargetConfig = build_metadata.TargetConfig;
+const config = @import("config.zig");
+const Config = config.Config;
 
 test {
     _ = @import("ir.zig");
@@ -25,12 +27,14 @@ test {
     _ = @import("checkers/empty_catch_engine.zig");
     _ = @import("checkers/swallowed_error.zig");
     _ = @import("build_metadata.zig");
+    _ = @import("config.zig");
 }
 
 pub const CliArgs = struct {
     paths: []const []const u8,
     rule_filter: RuleFilter,
     build_metadata: ?BuildMetadata,
+    config_path: ?[]const u8,
 };
 
 pub const CliError = error{
@@ -51,6 +55,7 @@ pub fn parseArgs(allocator: std.mem.Allocator, args: []const []const u8) CliErro
     errdefer skip_rules.deinit(allocator);
 
     var target_triple: ?[]const u8 = null;
+    var config_path: ?[]const u8 = null;
     var build_meta: ?BuildMetadata = null;
     errdefer {
         if (build_meta) |*meta| {
@@ -86,6 +91,12 @@ pub fn parseArgs(allocator: std.mem.Allocator, args: []const []const u8) CliErro
             }
             i += 1;
             target_triple = args[i];
+        } else if (std.mem.eql(u8, arg, "--config")) {
+            if (i + 1 >= args.len or std.mem.startsWith(u8, args[i + 1], "--")) {
+                return CliError.MissingFlagValue;
+            }
+            i += 1;
+            config_path = args[i];
         } else if (std.mem.startsWith(u8, arg, "--")) {
             continue;
         } else {
@@ -117,7 +128,39 @@ pub fn parseArgs(allocator: std.mem.Allocator, args: []const []const u8) CliErro
         .paths = try paths.toOwnedSlice(allocator),
         .rule_filter = rule_filter,
         .build_metadata = build_meta,
+        .config_path = config_path,
     };
+}
+
+fn mergeConfig(allocator: std.mem.Allocator, cli_args: CliArgs) !RuleFilter {
+    const config_path = cli_args.config_path orelse ".zwanzig.json";
+
+    const loaded_config = config.loadConfig(allocator, config_path) catch |err| {
+        if (err == config.ConfigError.FileNotFound and cli_args.config_path == null) {
+            return cli_args.rule_filter;
+        }
+        return err;
+    };
+    errdefer {
+        var mutable_config = loaded_config;
+        mutable_config.deinit(allocator);
+    }
+
+    switch (cli_args.rule_filter) {
+        .none => {
+            return loaded_config.rule_filter;
+        },
+        .allowlist => {
+            var mutable_config = loaded_config;
+            mutable_config.deinit(allocator);
+            return cli_args.rule_filter;
+        },
+        .blocklist => {
+            var mutable_config = loaded_config;
+            mutable_config.deinit(allocator);
+            return cli_args.rule_filter;
+        },
+    }
 }
 
 pub fn main() !void {
@@ -151,6 +194,49 @@ pub fn main() !void {
         switch (cli_args.rule_filter) {
             .allowlist => |list| allocator.free(list),
             .blocklist => |list| allocator.free(list),
+            .none => {},
+        }
+    }
+
+    const final_rule_filter = mergeConfig(allocator, cli_args) catch |err| {
+        const stderr = std.fs.File.stderr().deprecatedWriter();
+        switch (err) {
+            config.ConfigError.InvalidJson => {
+                try stderr.writeAll("Error: Invalid JSON in config file\n");
+            },
+            config.ConfigError.InvalidConfigFormat => {
+                try stderr.writeAll("Error: Invalid config file format\n");
+            },
+            config.ConfigError.MutuallyExclusiveFields => {
+                try stderr.writeAll("Error: Config file has both enabled_rules and disabled_rules\n");
+            },
+            config.ConfigError.FileNotFound => {
+                try stderr.writeAll("Error: Config file not found\n");
+            },
+            config.ConfigError.OutOfMemory => {
+                try stderr.writeAll("Error: Out of memory\n");
+            },
+        }
+        std.process.exit(1);
+    };
+    defer {
+        switch (final_rule_filter) {
+            .allowlist => |list| {
+                if (final_rule_filter.allowlist.ptr != cli_args.rule_filter.allowlist.ptr) {
+                    for (list) |rule_name| {
+                        allocator.free(rule_name);
+                    }
+                    allocator.free(list);
+                }
+            },
+            .blocklist => |list| {
+                if (final_rule_filter.blocklist.ptr != cli_args.rule_filter.blocklist.ptr) {
+                    for (list) |rule_name| {
+                        allocator.free(rule_name);
+                    }
+                    allocator.free(list);
+                }
+            },
             .none => {},
         }
     }
@@ -193,7 +279,7 @@ pub fn main() !void {
     try analyzer.registerChecker(&EmptyCatchEngineChecker.checker);
     try analyzer.registerChecker(&SwallowedErrorChecker.checker);
 
-    analyzer.setRuleFilter(cli_args.rule_filter);
+    analyzer.setRuleFilter(final_rule_filter);
 
     if (cli_args.build_metadata) |metadata| {
         try analyzer.setBuildMetadata(metadata);
@@ -215,13 +301,14 @@ fn printUsage() !void {
     try stderr.writeAll("Usage: zwanzig [options] [path...]\n");
     try stderr.writeAll("\nA static analyzer for Zig code.\n");
     try stderr.writeAll("\nOptions:\n");
-    try stderr.writeAll("  --file <path>    Specify a file or directory to analyze (can be repeated)\n");
-    try stderr.writeAll("  --do <rule>      Only run the specified rule (can be repeated)\n");
-    try stderr.writeAll("  --skip <rule>    Skip the specified rule (can be repeated)\n");
+    try stderr.writeAll("  --file <path>     Specify a file or directory to analyze (can be repeated)\n");
+    try stderr.writeAll("  --do <rule>       Only run the specified rule (can be repeated)\n");
+    try stderr.writeAll("  --skip <rule>     Skip the specified rule (can be repeated)\n");
     try stderr.writeAll("  --target <triple> Specify target triple (e.g., x86_64-linux-gnu)\n");
-    try stderr.writeAll("\n  Note: --do and --skip are mutually exclusive.\n");
+    try stderr.writeAll("  --config <path>   Path to config file (default: .zwanzig.json)\n");
+    try stderr.writeAll("\n  Note: --do and --skip are mutually exclusive and override config file.\n");
     try stderr.writeAll("\nArguments:\n");
-    try stderr.writeAll("  [path...]        Files or directories to analyze (default: current directory)\n");
+    try stderr.writeAll("  [path...]         Files or directories to analyze (default: current directory)\n");
     try stderr.writeAll("\nIgnored directories:\n");
     try stderr.writeAll("  zig-cache/, zig-out/, .zigmod/, .gyro/\n");
 }
@@ -487,4 +574,134 @@ test "Analyzer.isRuleEnabled: blocklist" {
     try std.testing.expect(!analyzer.isRuleEnabled("empty-catch"));
     try std.testing.expect(!analyzer.isRuleEnabled("unused-var"));
     try std.testing.expect(analyzer.isRuleEnabled("other-rule"));
+}
+
+test "parseArgs: --config flag" {
+    const allocator = std.testing.allocator;
+    const args = [_][]const u8{ "zwanzig", "--config", "custom.json", "file.zig" };
+    const result = try parseArgs(allocator, &args);
+    defer freeCliArgs(allocator, result);
+
+    try std.testing.expectEqual(@as(usize, 1), result.paths.len);
+    try std.testing.expectEqualStrings("file.zig", result.paths[0]);
+    try std.testing.expect(result.config_path != null);
+    try std.testing.expectEqualStrings("custom.json", result.config_path.?);
+}
+
+test "parseArgs: --config without value" {
+    const allocator = std.testing.allocator;
+    const args = [_][]const u8{ "zwanzig", "--config" };
+    const result = parseArgs(allocator, &args);
+
+    try std.testing.expectError(CliError.MissingFlagValue, result);
+}
+
+test "mergeConfig: CLI overrides config allowlist" {
+    const allocator = std.testing.allocator;
+
+    var tmp_dir = std.testing.tmpDir(.{});
+    defer tmp_dir.cleanup();
+
+    var tmp_path_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const tmp_path = try tmp_dir.dir.realpath(".", &tmp_path_buf);
+
+    var config_path_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const config_path = try std.fmt.bufPrint(&config_path_buf, "{s}/.zwanzig.json", .{tmp_path});
+
+    const config_content =
+        \\{
+        \\  "enabled_rules": ["empty-catch"]
+        \\}
+    ;
+    try tmp_dir.dir.writeFile(.{ .sub_path = ".zwanzig.json", .data = config_content });
+
+    const cli_allowlist = [_][]const u8{"dupe-import"};
+    const cli_args = CliArgs{
+        .paths = &.{},
+        .rule_filter = .{ .allowlist = &cli_allowlist },
+        .build_metadata = null,
+        .config_path = config_path,
+    };
+
+    const result = try mergeConfig(allocator, cli_args);
+
+    switch (result) {
+        .allowlist => |list| {
+            try std.testing.expectEqual(@as(usize, 1), list.len);
+            try std.testing.expectEqualStrings("dupe-import", list[0]);
+        },
+        else => return error.UnexpectedFilterType,
+    }
+}
+
+test "mergeConfig: uses config when no CLI filter" {
+    const allocator = std.testing.allocator;
+
+    var tmp_dir = std.testing.tmpDir(.{});
+    defer tmp_dir.cleanup();
+
+    var tmp_path_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const tmp_path = try tmp_dir.dir.realpath(".", &tmp_path_buf);
+
+    var config_path_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const config_path = try std.fmt.bufPrint(&config_path_buf, "{s}/.zwanzig.json", .{tmp_path});
+
+    const config_content =
+        \\{
+        \\  "disabled_rules": ["todo"]
+        \\}
+    ;
+    try tmp_dir.dir.writeFile(.{ .sub_path = ".zwanzig.json", .data = config_content });
+
+    const cli_args = CliArgs{
+        .paths = &.{},
+        .rule_filter = .none,
+        .build_metadata = null,
+        .config_path = config_path,
+    };
+
+    const result = try mergeConfig(allocator, cli_args);
+    defer switch (result) {
+        .allowlist => |list| {
+            for (list) |rule_name| {
+                allocator.free(rule_name);
+            }
+            allocator.free(list);
+        },
+        .blocklist => |list| {
+            for (list) |rule_name| {
+                allocator.free(rule_name);
+            }
+            allocator.free(list);
+        },
+        .none => {},
+    };
+
+    switch (result) {
+        .blocklist => |list| {
+            try std.testing.expectEqual(@as(usize, 1), list.len);
+            try std.testing.expectEqualStrings("todo", list[0]);
+        },
+        else => return error.UnexpectedFilterType,
+    }
+}
+
+test "mergeConfig: no config file and no CLI filter" {
+    const allocator = std.testing.allocator;
+
+    const cli_args = CliArgs{
+        .paths = &.{},
+        .rule_filter = .none,
+        .build_metadata = null,
+        .config_path = null,
+    };
+
+    const result = try mergeConfig(allocator, cli_args);
+    defer switch (result) {
+        .allowlist => |list| allocator.free(list),
+        .blocklist => |list| allocator.free(list),
+        .none => {},
+    };
+
+    try std.testing.expectEqual(RuleFilter.none, result);
 }
