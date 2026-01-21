@@ -1,0 +1,15 @@
+zig-out/
+zig-cache/
+.zig-cache/
+.zwanzig-cache/
+test-cache-tmp/
+test-cache-tmp2/
+test-cache-tmp3/
+test-analyzer-cache/
+.direnv/
+*.swp
+*.swo
+*~
+.DS_Store
+.stepcat/
+.architect/

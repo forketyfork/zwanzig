@@ -1,0 +1,105 @@
+name: Build
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+
+permissions:
+  contents: read
+  pull-requests: read
+
+jobs:
+  changes:
+    runs-on: ubuntu-latest
+    outputs:
+      code: ${{ steps.filter.outputs.code }}
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dorny/paths-filter@v3
+        id: filter
+        with:
+          filters: |
+            code:
+              - '**'
+              - '!*.md'
+              - '!docs/**'
+
+  build-matrix:
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
+    runs-on: ubuntu-latest
+    env:
+      ZIG_GLOBAL_CACHE_DIR: ${{ github.workspace }}/zwanzig/.zig-cache
+      ZIG_LOCAL_CACHE_DIR: ${{ github.workspace }}/zwanzig/.zig-cache/local
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          path: zwanzig
+
+      - name: Install Nix
+        uses: cachix/install-nix-action@v31
+        with:
+          extra_nix_config: |
+            experimental-features = nix-command flakes
+
+      - name: Cache Zig build cache
+        uses: actions/cache@v5
+        with:
+          path: zwanzig/.zig-cache
+          key: zig-${{ hashFiles('zwanzig/build.zig', 'zwanzig/src/**') }}
+          restore-keys: |
+            zig
+
+      - name: Cache Nix store
+        uses: cachix/cachix-action@v16
+        with:
+          name: forketyfork
+          authToken: '${{ secrets.CACHIX_AUTH_TOKEN }}'
+
+      - name: Build
+        run: |
+          for i in 1 2 3; do
+            nix develop --accept-flake-config --command just build && break
+            if [ $i -eq 3 ]; then exit 1; fi
+            sleep 5
+          done
+        working-directory: zwanzig
+
+      - name: Test
+        run: |
+          for i in 1 2 3; do
+            nix develop --accept-flake-config --command just test && break
+            if [ $i -eq 3 ]; then exit 1; fi
+            sleep 5
+          done
+        working-directory: zwanzig
+
+      - name: Lint
+        run: |
+          for i in 1 2 3; do
+            nix develop --accept-flake-config --command just lint && break
+            if [ $i -eq 3 ]; then exit 1; fi
+            sleep 5
+          done
+        working-directory: zwanzig
+
+  build:
+    name: build
+    needs: [changes, build-matrix]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check result
+        run: |
+          if [[ "${{ needs.changes.outputs.code }}" == "false" ]]; then
+            echo "Documentation-only change, skipping build"
+            exit 0
+          fi
+          if [[ "${{ needs.build-matrix.result }}" == "success" ]]; then
+            echo "Build succeeded"
+            exit 0
+          fi
+          echo "Build failed"
+          exit 1
