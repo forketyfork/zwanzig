@@ -465,6 +465,26 @@ Output example:
 
 JSON output is useful for integration with other tools, CI/CD pipelines, and automated analysis workflows.
 
+**SARIF format:**
+
+```bash
+zwanzig --format sarif src/
+```
+
+Output follows the [SARIF 2.1.0 specification](https://docs.oasis-open.org/sarif/sarif/v2.1.0/sarif-v2.1.0.html), which is an industry-standard format for static analysis results. SARIF output is ideal for integration with code review tools, security scanners, and IDEs that support SARIF.
+
+SARIF output includes:
+- Tool information and version
+- Rule metadata
+- Detailed location information with artifact URIs
+- Standardized severity levels (note, warning, error)
+
+SARIF format is particularly useful for:
+- GitHub Advanced Security and code scanning workflows
+- Visual Studio Code with SARIF extension
+- SonarQube and other code quality platforms
+- Integration with security scanning pipelines
+
 ## Testing
 
 Run the test suite:

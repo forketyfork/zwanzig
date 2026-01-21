@@ -170,6 +170,7 @@ pub const Analyzer = struct {
     pub const OutputFormat = enum {
         text,
         json,
+        sarif,
     };
 
     pub fn printResults(self: *Analyzer, format: OutputFormat) !void {
@@ -178,6 +179,7 @@ pub const Analyzer = struct {
         switch (format) {
             .json => try self.printJsonResults(stdout),
             .text => try self.printTextResults(stdout),
+            .sarif => try self.printSarifResults(stdout),
         }
     }
 
@@ -208,6 +210,36 @@ pub const Analyzer = struct {
 
         try writer.writeAll("  ],\n");
         try writer.print("  \"total\": {d}\n", .{self.diagnostics.items.len});
+        try writer.writeAll("}\n");
+    }
+
+    fn printSarifResults(self: *Analyzer, writer: anytype) !void {
+        try writer.writeAll("{\n");
+        try writer.writeAll("  \"version\": \"2.1.0\",\n");
+        try writer.writeAll("  \"$schema\": \"https://raw.githubusercontent.com/oasis-tcs/sarif-spec/master/Schemata/sarif-schema-2.1.0.json\",\n");
+        try writer.writeAll("  \"runs\": [\n");
+        try writer.writeAll("    {\n");
+        try writer.writeAll("      \"tool\": {\n");
+        try writer.writeAll("        \"driver\": {\n");
+        try writer.writeAll("          \"name\": \"Zwanzig\",\n");
+        try writer.writeAll("          \"informationUri\": \"https://github.com/forketyfork/zwanzig\",\n");
+        try writer.writeAll("          \"version\": \"0.1.0\"\n");
+        try writer.writeAll("        }\n");
+        try writer.writeAll("      },\n");
+        try writer.writeAll("      \"results\": [\n");
+
+        for (self.diagnostics.items, 0..) |diag, i| {
+            try diag.writeSarif(writer);
+            if (i < self.diagnostics.items.len - 1) {
+                try writer.writeAll(",\n");
+            } else {
+                try writer.writeAll("\n");
+            }
+        }
+
+        try writer.writeAll("      ]\n");
+        try writer.writeAll("    }\n");
+        try writer.writeAll("  ]\n");
         try writer.writeAll("}\n");
     }
 
@@ -298,4 +330,57 @@ test "Analyzer text output format" {
     const output = stream.getWritten();
     try testing.expect(std.mem.indexOf(u8, output, "Found 1 issue(s):") != null);
     try testing.expect(std.mem.indexOf(u8, output, "test.zig:1:1") != null);
+}
+
+test "Analyzer SARIF output format" {
+    const testing = std.testing;
+    const allocator = testing.allocator;
+
+    var analyzer = Analyzer.init(allocator);
+    defer analyzer.deinit();
+
+    const msg1 = try allocator.dupe(u8, "Test error");
+    const msg2 = try allocator.dupe(u8, "Test warning");
+
+    const diag1 = Diagnostic.init(
+        "test1.zig",
+        "test-rule",
+        .err,
+        msg1,
+        @import("diagnostic.zig").SourceRange.init(
+            @import("diagnostic.zig").Location.init(1, 1),
+            @import("diagnostic.zig").Location.init(1, 5),
+        ),
+    );
+
+    const diag2 = Diagnostic.init(
+        "test2.zig",
+        "other-rule",
+        .warning,
+        msg2,
+        @import("diagnostic.zig").SourceRange.init(
+            @import("diagnostic.zig").Location.init(2, 3),
+            @import("diagnostic.zig").Location.init(2, 8),
+        ),
+    );
+
+    try analyzer.diagnostics.append(allocator, diag1);
+    try analyzer.diagnostics.append(allocator, diag2);
+
+    var buffer: [2048]u8 = undefined;
+    var stream = std.io.fixedBufferStream(&buffer);
+    try analyzer.printSarifResults(stream.writer());
+
+    const output = stream.getWritten();
+    try testing.expect(std.mem.indexOf(u8, output, "\"version\": \"2.1.0\"") != null);
+    try testing.expect(std.mem.indexOf(u8, output, "\"$schema\":") != null);
+    try testing.expect(std.mem.indexOf(u8, output, "\"runs\":") != null);
+    try testing.expect(std.mem.indexOf(u8, output, "\"tool\":") != null);
+    try testing.expect(std.mem.indexOf(u8, output, "\"driver\":") != null);
+    try testing.expect(std.mem.indexOf(u8, output, "\"name\": \"Zwanzig\"") != null);
+    try testing.expect(std.mem.indexOf(u8, output, "\"results\":") != null);
+    try testing.expect(std.mem.indexOf(u8, output, "test1.zig") != null);
+    try testing.expect(std.mem.indexOf(u8, output, "test2.zig") != null);
+    try testing.expect(std.mem.indexOf(u8, output, "test-rule") != null);
+    try testing.expect(std.mem.indexOf(u8, output, "other-rule") != null);
 }

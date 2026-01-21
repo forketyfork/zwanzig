@@ -35,6 +35,7 @@ test {
 fn outputFormatFromString(s: []const u8) ?OutputFormat {
     if (std.mem.eql(u8, s, "text")) return .text;
     if (std.mem.eql(u8, s, "json")) return .json;
+    if (std.mem.eql(u8, s, "sarif")) return .sarif;
     return null;
 }
 
@@ -205,7 +206,7 @@ pub fn main() !void {
                 try stderr.writeAll("Error: Invalid target triple format\n");
             },
             CliError.InvalidOutputFormat => {
-                try stderr.writeAll("Error: Invalid output format (use 'text' or 'json')\n");
+                try stderr.writeAll("Error: Invalid output format (use 'text', 'json', or 'sarif')\n");
             },
         }
         std.process.exit(1);
@@ -335,7 +336,7 @@ fn printUsage() !void {
     try stderr.writeAll("  --skip <rule>     Skip the specified rule (can be repeated)\n");
     try stderr.writeAll("  --target <triple> Specify target triple (e.g., x86_64-linux-gnu)\n");
     try stderr.writeAll("  --config <path>   Path to config file (default: .zwanzig.json)\n");
-    try stderr.writeAll("  --format <format> Output format: 'text' or 'json' (default: text)\n");
+    try stderr.writeAll("  --format <format> Output format: 'text', 'json', or 'sarif' (default: text)\n");
     try stderr.writeAll("\n  Note: --do and --skip are mutually exclusive and override config file.\n");
     try stderr.writeAll("\nArguments:\n");
     try stderr.writeAll("  [path...]         Files or directories to analyze (default: current directory)\n");
@@ -780,4 +781,13 @@ test "parseArgs: default format is text" {
     defer freeCliArgs(allocator, result);
 
     try std.testing.expectEqual(OutputFormat.text, result.output_format);
+}
+
+test "parseArgs: --format sarif" {
+    const allocator = std.testing.allocator;
+    const args = [_][]const u8{ "zwanzig", "--format", "sarif", "file.zig" };
+    const result = try parseArgs(allocator, &args);
+    defer freeCliArgs(allocator, result);
+
+    try std.testing.expectEqual(OutputFormat.sarif, result.output_format);
 }

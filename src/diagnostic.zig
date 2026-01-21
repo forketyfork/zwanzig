@@ -16,6 +16,14 @@ pub const Severity = enum {
             .err => "error",
         };
     }
+
+    pub fn toSarifLevel(self: Severity) []const u8 {
+        return switch (self) {
+            .hint => "note",
+            .warning => "warning",
+            .err => "error",
+        };
+    }
 };
 
 /// A location in source code (line and column are 1-based)
@@ -124,6 +132,39 @@ pub const Diagnostic = struct {
         try writer.print("        \"end\": {{\"line\": {d}, \"column\": {d}}}\n", .{ self.range.end.line, self.range.end.column });
         try writer.writeAll("      }\n");
         try writer.writeAll("    }");
+    }
+
+    pub fn writeSarif(self: Diagnostic, writer: anytype) !void {
+        try writer.writeAll("        {\n");
+        try writer.writeAll("          \"ruleId\": ");
+        try writeJsonString(writer, self.rule_id);
+        try writer.writeAll(",\n");
+        try writer.writeAll("          \"level\": ");
+        try writeJsonString(writer, self.severity.toSarifLevel());
+        try writer.writeAll(",\n");
+        try writer.writeAll("          \"message\": {\n");
+        try writer.writeAll("            \"text\": ");
+        try writeJsonString(writer, self.message);
+        try writer.writeAll("\n");
+        try writer.writeAll("          },\n");
+        try writer.writeAll("          \"locations\": [\n");
+        try writer.writeAll("            {\n");
+        try writer.writeAll("              \"physicalLocation\": {\n");
+        try writer.writeAll("                \"artifactLocation\": {\n");
+        try writer.writeAll("                  \"uri\": ");
+        try writeJsonString(writer, self.file_path);
+        try writer.writeAll("\n");
+        try writer.writeAll("                },\n");
+        try writer.writeAll("                \"region\": {\n");
+        try writer.print("                  \"startLine\": {d},\n", .{self.range.start.line});
+        try writer.print("                  \"startColumn\": {d},\n", .{self.range.start.column});
+        try writer.print("                  \"endLine\": {d},\n", .{self.range.end.line});
+        try writer.print("                  \"endColumn\": {d}\n", .{self.range.end.column});
+        try writer.writeAll("                }\n");
+        try writer.writeAll("              }\n");
+        try writer.writeAll("            }\n");
+        try writer.writeAll("          ]\n");
+        try writer.writeAll("        }");
     }
 };
 
@@ -388,4 +429,44 @@ test "Diagnostic writeJson with special characters" {
     try testing.expect(std.mem.indexOf(u8, result, "Message with\\nnewline") != null);
     try testing.expect(std.mem.indexOf(u8, result, "\\\"quotes\\\"") != null);
     try testing.expect(std.mem.indexOf(u8, result, "\\\\") != null);
+}
+
+test "Severity.toSarifLevel" {
+    const testing = std.testing;
+    try testing.expectEqualStrings("note", Severity.hint.toSarifLevel());
+    try testing.expectEqualStrings("warning", Severity.warning.toSarifLevel());
+    try testing.expectEqualStrings("error", Severity.err.toSarifLevel());
+}
+
+test "Diagnostic writeSarif" {
+    const testing = std.testing;
+
+    const diag = Diagnostic.init(
+        "test.zig",
+        "empty-catch",
+        .err,
+        "Empty catch block detected",
+        SourceRange.init(Location.init(5, 10), Location.init(5, 15)),
+    );
+
+    var buffer: [1024]u8 = undefined;
+    var stream = std.io.fixedBufferStream(&buffer);
+    try diag.writeSarif(stream.writer());
+
+    const result = stream.getWritten();
+    try testing.expect(std.mem.indexOf(u8, result, "\"ruleId\":") != null);
+    try testing.expect(std.mem.indexOf(u8, result, "\"empty-catch\"") != null);
+    try testing.expect(std.mem.indexOf(u8, result, "\"level\":") != null);
+    try testing.expect(std.mem.indexOf(u8, result, "\"error\"") != null);
+    try testing.expect(std.mem.indexOf(u8, result, "\"message\":") != null);
+    try testing.expect(std.mem.indexOf(u8, result, "Empty catch block detected") != null);
+    try testing.expect(std.mem.indexOf(u8, result, "\"locations\":") != null);
+    try testing.expect(std.mem.indexOf(u8, result, "\"physicalLocation\":") != null);
+    try testing.expect(std.mem.indexOf(u8, result, "\"artifactLocation\":") != null);
+    try testing.expect(std.mem.indexOf(u8, result, "\"uri\": \"test.zig\"") != null);
+    try testing.expect(std.mem.indexOf(u8, result, "\"region\":") != null);
+    try testing.expect(std.mem.indexOf(u8, result, "\"startLine\": 5") != null);
+    try testing.expect(std.mem.indexOf(u8, result, "\"startColumn\": 10") != null);
+    try testing.expect(std.mem.indexOf(u8, result, "\"endLine\": 5") != null);
+    try testing.expect(std.mem.indexOf(u8, result, "\"endColumn\": 15") != null);
 }
