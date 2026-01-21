@@ -409,6 +409,24 @@ zwanzig --target aarch64-freestanding src/
 
 When no target is specified, the analyzer uses the native host target configuration. Target configuration enables platform-specific analysis and rules.
 
+### Incremental Caching
+
+Enable incremental caching to improve performance on repeated runs:
+
+```bash
+zwanzig --cache src/
+```
+
+The cache is stored in `.zwanzig-cache/` in the current directory. The cache is keyed by both file content hash and target configuration, ensuring correctness across different build configurations.
+
+**Cache behavior:**
+- Files that haven't changed since the last run are skipped
+- Cache invalidates automatically when file content changes
+- Cache invalidates automatically when target configuration changes
+- Cache is stored per (file, target) pair
+
+**Note:** Add `.zwanzig-cache/` to your `.gitignore` to avoid committing cache files.
+
 ### Output Formats
 
 Zwanzig supports multiple output formats for diagnostics. Use the `--format` flag to specify the desired format.

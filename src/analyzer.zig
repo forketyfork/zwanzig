@@ -8,6 +8,9 @@ const Checker = checker_mod.Checker;
 const CheckerManagerWithRules = checker_mod.CheckerManagerWithRules;
 const ZirBridge = @import("zir_bridge.zig").ZirBridge;
 const BuildMetadata = @import("build_metadata.zig").BuildMetadata;
+const cache_mod = @import("cache.zig");
+const Cache = cache_mod.Cache;
+const CacheKey = cache_mod.CacheKey;
 
 pub const Analyzer = struct {
     allocator: std.mem.Allocator,
@@ -17,6 +20,8 @@ pub const Analyzer = struct {
     zir_bridge: ?ZirBridge = null,
     use_typed_ir: bool = false,
     build_metadata: ?BuildMetadata = null,
+    cache: ?Cache = null,
+    use_cache: bool = false,
 
     pub fn init(allocator: std.mem.Allocator) Analyzer {
         return Analyzer{
@@ -40,6 +45,9 @@ pub const Analyzer = struct {
             var meta_mut = meta.*;
             meta_mut.deinit(self.allocator);
         }
+        if (self.cache) |*c| {
+            c.deinit();
+        }
     }
 
     /// Enable typed IR analysis using ZirBridge.
@@ -47,6 +55,14 @@ pub const Analyzer = struct {
         self.use_typed_ir = true;
         if (self.zir_bridge == null) {
             self.zir_bridge = ZirBridge.init(self.allocator);
+        }
+    }
+
+    /// Enable incremental caching.
+    pub fn enableCache(self: *Analyzer) !void {
+        self.use_cache = true;
+        if (self.cache == null) {
+            self.cache = try Cache.init(self.allocator);
         }
     }
 
@@ -127,11 +143,28 @@ pub const Analyzer = struct {
         var source = Source.init(self.allocator, file_path, content);
         defer source.deinit();
 
+        if (self.use_cache) {
+            const cache_key = CacheKey.init(content, self.getBuildMetadata());
+            if (self.cache) |*c| {
+                if (try c.get(cache_key)) |cached_data| {
+                    defer self.allocator.free(cached_data);
+                    return;
+                }
+            }
+        }
+
         if (self.use_typed_ir) {
             try self.loadTypedIr(&source);
         }
 
         try self.runChecksOnSource(&source);
+
+        if (self.use_cache and self.cache != null) {
+            const cache_key = CacheKey.init(content, self.getBuildMetadata());
+            if (self.cache) |*c| {
+                try c.put(cache_key, "");
+            }
+        }
     }
 
     /// Load typed IR for a source file using ZirBridge.
@@ -440,4 +473,22 @@ test "Analyzer SARIF output format" {
     try testing.expect(std.mem.indexOf(u8, output, "test2.zig") != null);
     try testing.expect(std.mem.indexOf(u8, output, "test-rule") != null);
     try testing.expect(std.mem.indexOf(u8, output, "other-rule") != null);
+}
+
+test "Analyzer cache enabled" {
+    const testing = std.testing;
+    const allocator = testing.allocator;
+
+    var cache_dir = try std.fs.cwd().makeOpenPath("test-analyzer-cache", .{});
+    defer {
+        cache_dir.close();
+        std.fs.cwd().deleteTree("test-analyzer-cache") catch {};
+    }
+
+    var analyzer = Analyzer.init(allocator);
+    defer analyzer.deinit();
+
+    try analyzer.enableCache();
+    try testing.expect(analyzer.use_cache);
+    try testing.expect(analyzer.cache != null);
 }

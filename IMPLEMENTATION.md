@@ -284,6 +284,56 @@ try analyzer.registerRule(&MyRule.rule);
 ### Step 3: Done!
 No changes to core analyzer needed.
 
+## Incremental Caching
+
+Zwanzig implements an incremental caching system to improve performance on repeated runs. The cache is keyed by file content hash and target configuration to ensure correctness across different build configurations.
+
+### Cache Architecture
+
+The cache system is implemented in `src/cache.zig` and consists of:
+
+1. **CacheKey** - Hash-based identifier
+   - File content hash (SHA-256)
+   - Target configuration hash (arch, OS, ABI)
+   - Ensures cache invalidation when file or target changes
+
+2. **CacheEntry** - Metadata structure
+   - Cache version for compatibility checking
+   - Cache key for validation
+   - Timestamp for future expiration policies
+   - Data length for integrity checks
+
+3. **Cache** - Storage manager
+   - Disk-based storage in `.zwanzig-cache/` directory
+   - Get/put operations for cached data
+   - Invalidation and clearing operations
+   - Graceful handling of access denied scenarios
+
+### Cache Behavior
+
+- **Cache Hit**: Skip analysis for files with matching hash and target
+- **Cache Miss**: Run full analysis and store results
+- **Invalidation**: Automatic when file content or target changes
+- **Storage**: Individual cache files per (file, target) pair
+- **Version Checking**: Incompatible cache versions are automatically ignored
+
+### Usage
+
+Enable caching with the `--cache` CLI flag:
+
+```bash
+zwanzig --cache src/
+```
+
+The cache is stored in `.zwanzig-cache/` in the current directory. Add this to `.gitignore` to avoid committing cache files.
+
+### Cache Limitations
+
+- Currently caches analysis results as markers (empty data)
+- Future enhancements may cache typed IR and function summaries
+- Cache does not handle cross-file dependencies yet
+- No automatic cache expiration policy (manual clear via directory removal)
+
 ## Future Enhancements
 
 While the MVP is complete, possible future additions include:
@@ -301,8 +351,8 @@ While the MVP is complete, possible future additions include:
 
 3. **Performance**
    - Parallel file analysis
-   - Incremental analysis
-   - Caching
+   - Cache typed IR and summaries (not just markers)
+   - Cross-file dependency tracking in cache
 
 4. **Output Formats**
    - JSON output

@@ -30,6 +30,7 @@ test {
     _ = @import("checkers/swallowed_error.zig");
     _ = @import("build_metadata.zig");
     _ = @import("config.zig");
+    _ = @import("cache.zig");
 }
 
 fn outputFormatFromString(s: []const u8) ?OutputFormat {
@@ -45,6 +46,7 @@ pub const CliArgs = struct {
     build_metadata: ?BuildMetadata,
     config_path: ?[]const u8,
     output_format: OutputFormat,
+    use_cache: bool,
 };
 
 pub const CliError = error{
@@ -68,6 +70,7 @@ pub fn parseArgs(allocator: std.mem.Allocator, args: []const []const u8) CliErro
     var target_triple: ?[]const u8 = null;
     var config_path: ?[]const u8 = null;
     var output_format: OutputFormat = .text;
+    var use_cache: bool = false;
     var build_meta: ?BuildMetadata = null;
     errdefer {
         if (build_meta) |*meta| {
@@ -115,6 +118,8 @@ pub fn parseArgs(allocator: std.mem.Allocator, args: []const []const u8) CliErro
             }
             i += 1;
             output_format = outputFormatFromString(args[i]) orelse return CliError.InvalidOutputFormat;
+        } else if (std.mem.eql(u8, arg, "--cache")) {
+            use_cache = true;
         } else if (std.mem.startsWith(u8, arg, "--")) {
             continue;
         } else {
@@ -148,6 +153,7 @@ pub fn parseArgs(allocator: std.mem.Allocator, args: []const []const u8) CliErro
         .build_metadata = build_meta,
         .config_path = config_path,
         .output_format = output_format,
+        .use_cache = use_cache,
     };
 }
 
@@ -315,6 +321,10 @@ pub fn main() !void {
         try analyzer.setBuildMetadata(metadata);
     }
 
+    if (cli_args.use_cache) {
+        try analyzer.enableCache();
+    }
+
     for (files) |file_path| {
         try analyzer.analyzeFile(file_path);
     }
@@ -337,6 +347,7 @@ fn printUsage() !void {
     try stderr.writeAll("  --target <triple> Specify target triple (e.g., x86_64-linux-gnu)\n");
     try stderr.writeAll("  --config <path>   Path to config file (default: .zwanzig.json)\n");
     try stderr.writeAll("  --format <format> Output format: 'text', 'json', or 'sarif' (default: text)\n");
+    try stderr.writeAll("  --cache           Enable incremental caching\n");
     try stderr.writeAll("\n  Note: --do and --skip are mutually exclusive and override config file.\n");
     try stderr.writeAll("\nArguments:\n");
     try stderr.writeAll("  [path...]         Files or directories to analyze (default: current directory)\n");
@@ -653,6 +664,7 @@ test "mergeConfig: CLI overrides config allowlist" {
         .build_metadata = null,
         .config_path = config_path,
         .output_format = .text,
+        .use_cache = false,
     };
 
     const result = try mergeConfig(allocator, cli_args);
@@ -691,6 +703,7 @@ test "mergeConfig: uses config when no CLI filter" {
         .build_metadata = null,
         .config_path = config_path,
         .output_format = .text,
+        .use_cache = false,
     };
 
     const result = try mergeConfig(allocator, cli_args);
@@ -728,6 +741,7 @@ test "mergeConfig: no config file and no CLI filter" {
         .build_metadata = null,
         .config_path = null,
         .output_format = .text,
+        .use_cache = false,
     };
 
     const result = try mergeConfig(allocator, cli_args);
@@ -790,4 +804,24 @@ test "parseArgs: --format sarif" {
     defer freeCliArgs(allocator, result);
 
     try std.testing.expectEqual(OutputFormat.sarif, result.output_format);
+}
+
+test "parseArgs: --cache flag" {
+    const allocator = std.testing.allocator;
+    const args = [_][]const u8{ "zwanzig", "--cache", "file.zig" };
+    const result = try parseArgs(allocator, &args);
+    defer freeCliArgs(allocator, result);
+
+    try std.testing.expect(result.use_cache);
+    try std.testing.expectEqual(@as(usize, 1), result.paths.len);
+    try std.testing.expectEqualStrings("file.zig", result.paths[0]);
+}
+
+test "parseArgs: default no cache" {
+    const allocator = std.testing.allocator;
+    const args = [_][]const u8{ "zwanzig", "file.zig" };
+    const result = try parseArgs(allocator, &args);
+    defer freeCliArgs(allocator, result);
+
+    try std.testing.expect(!result.use_cache);
 }
