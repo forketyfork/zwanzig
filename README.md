@@ -409,6 +409,62 @@ zwanzig --target aarch64-freestanding src/
 
 When no target is specified, the analyzer uses the native host target configuration. Target configuration enables platform-specific analysis and rules.
 
+### Output Formats
+
+Zwanzig supports multiple output formats for diagnostics. Use the `--format` flag to specify the desired format.
+
+**Text format (default):**
+
+```bash
+zwanzig --format text src/
+# or simply
+zwanzig src/
+```
+
+Output example:
+```
+Found 2 issue(s):
+src/main.zig:10:5: error: [empty-catch] Empty catch block detected
+src/utils.zig:23:1: warning: [unused-decl] Unused declaration: helper
+```
+
+**JSON format:**
+
+```bash
+zwanzig --format json src/
+```
+
+Output example:
+```json
+{
+  "diagnostics": [
+    {
+      "file": "src/main.zig",
+      "rule": "empty-catch",
+      "severity": "error",
+      "message": "Empty catch block detected",
+      "location": {
+        "start": {"line": 10, "column": 5},
+        "end": {"line": 10, "column": 20}
+      }
+    },
+    {
+      "file": "src/utils.zig",
+      "rule": "unused-decl",
+      "severity": "warning",
+      "message": "Unused declaration: helper",
+      "location": {
+        "start": {"line": 23, "column": 1},
+        "end": {"line": 23, "column": 25}
+      }
+    }
+  ],
+  "total": 2
+}
+```
+
+JSON output is useful for integration with other tools, CI/CD pipelines, and automated analysis workflows.
+
 ## Testing
 
 Run the test suite:

@@ -88,6 +88,19 @@ pub const Diagnostic = struct {
             self.message,
         });
     }
+
+    pub fn writeJson(self: Diagnostic, writer: anytype) !void {
+        try writer.writeAll("    {\n");
+        try writer.print("      \"file\": \"{s}\",\n", .{self.file_path});
+        try writer.print("      \"rule\": \"{s}\",\n", .{self.rule_id});
+        try writer.print("      \"severity\": \"{s}\",\n", .{self.severity.toString()});
+        try writer.print("      \"message\": \"{s}\",\n", .{self.message});
+        try writer.writeAll("      \"location\": {\n");
+        try writer.print("        \"start\": {{\"line\": {d}, \"column\": {d}}},\n", .{ self.range.start.line, self.range.start.column });
+        try writer.print("        \"end\": {{\"line\": {d}, \"column\": {d}}}\n", .{ self.range.end.line, self.range.end.column });
+        try writer.writeAll("      }\n");
+        try writer.writeAll("    }");
+    }
 };
 
 /// Maps byte offsets in source content to line/column locations.
@@ -299,4 +312,34 @@ test "LocationMapper handles trailing newline" {
     const loc_after_newline = mapper.byteToLocation(6);
     try testing.expectEqual(@as(usize, 2), loc_after_newline.line);
     try testing.expectEqual(@as(usize, 1), loc_after_newline.column);
+}
+
+test "Diagnostic writeJson" {
+    const testing = std.testing;
+
+    const diag = Diagnostic.init(
+        "test.zig",
+        "empty-catch",
+        .err,
+        "Empty catch block detected",
+        SourceRange.init(Location.init(5, 10), Location.init(5, 15)),
+    );
+
+    var buffer: [512]u8 = undefined;
+    var stream = std.io.fixedBufferStream(&buffer);
+    try diag.writeJson(stream.writer());
+
+    const expected =
+        \\    {
+        \\      "file": "test.zig",
+        \\      "rule": "empty-catch",
+        \\      "severity": "error",
+        \\      "message": "Empty catch block detected",
+        \\      "location": {
+        \\        "start": {"line": 5, "column": 10},
+        \\        "end": {"line": 5, "column": 15}
+        \\      }
+        \\    }
+    ;
+    try testing.expectEqualStrings(expected, stream.getWritten());
 }

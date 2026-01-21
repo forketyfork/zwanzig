@@ -167,18 +167,48 @@ pub const Analyzer = struct {
         }
     }
 
-    pub fn printResults(self: *Analyzer) !void {
+    pub const OutputFormat = enum {
+        text,
+        json,
+    };
+
+    pub fn printResults(self: *Analyzer, format: OutputFormat) !void {
         const stdout = std.fs.File.stdout().deprecatedWriter();
 
+        switch (format) {
+            .json => try self.printJsonResults(stdout),
+            .text => try self.printTextResults(stdout),
+        }
+    }
+
+    fn printTextResults(self: *Analyzer, writer: anytype) !void {
         if (self.diagnostics.items.len == 0) {
-            try stdout.writeAll("No issues found.\n");
+            try writer.writeAll("No issues found.\n");
             return;
         }
 
-        try stdout.print("Found {d} issue(s):\n", .{self.diagnostics.items.len});
+        try writer.print("Found {d} issue(s):\n", .{self.diagnostics.items.len});
         for (self.diagnostics.items) |diag| {
-            try diag.format(stdout);
+            try diag.format(writer);
         }
+    }
+
+    fn printJsonResults(self: *Analyzer, writer: anytype) !void {
+        try writer.writeAll("{\n");
+        try writer.print("  \"diagnostics\": [\n", .{});
+
+        for (self.diagnostics.items, 0..) |diag, i| {
+            try diag.writeJson(writer);
+            if (i < self.diagnostics.items.len - 1) {
+                try writer.writeAll(",\n");
+            } else {
+                try writer.writeAll("\n");
+            }
+        }
+
+        try writer.writeAll("  ],\n");
+        try writer.print("  \"total\": {d}\n", .{self.diagnostics.items.len});
+        try writer.writeAll("}\n");
     }
 
     pub fn hasDiagnostics(self: *Analyzer) bool {
@@ -190,3 +220,82 @@ pub const Analyzer = struct {
         return self.checker_manager.totalCount();
     }
 };
+
+test "Analyzer JSON output format" {
+    const testing = std.testing;
+    const allocator = testing.allocator;
+
+    var analyzer = Analyzer.init(allocator);
+    defer analyzer.deinit();
+
+    const msg1 = try allocator.dupe(u8, "Test error");
+    const msg2 = try allocator.dupe(u8, "Test warning");
+
+    const diag1 = Diagnostic.init(
+        "test1.zig",
+        "test-rule",
+        .err,
+        msg1,
+        @import("diagnostic.zig").SourceRange.init(
+            @import("diagnostic.zig").Location.init(1, 1),
+            @import("diagnostic.zig").Location.init(1, 5),
+        ),
+    );
+
+    const diag2 = Diagnostic.init(
+        "test2.zig",
+        "other-rule",
+        .warning,
+        msg2,
+        @import("diagnostic.zig").SourceRange.init(
+            @import("diagnostic.zig").Location.init(2, 3),
+            @import("diagnostic.zig").Location.init(2, 8),
+        ),
+    );
+
+    try analyzer.diagnostics.append(allocator, diag1);
+    try analyzer.diagnostics.append(allocator, diag2);
+
+    var buffer: [1024]u8 = undefined;
+    var stream = std.io.fixedBufferStream(&buffer);
+    try analyzer.printJsonResults(stream.writer());
+
+    const output = stream.getWritten();
+    try testing.expect(std.mem.indexOf(u8, output, "\"diagnostics\":") != null);
+    try testing.expect(std.mem.indexOf(u8, output, "\"total\": 2") != null);
+    try testing.expect(std.mem.indexOf(u8, output, "test1.zig") != null);
+    try testing.expect(std.mem.indexOf(u8, output, "test2.zig") != null);
+    try testing.expect(std.mem.indexOf(u8, output, "test-rule") != null);
+    try testing.expect(std.mem.indexOf(u8, output, "other-rule") != null);
+}
+
+test "Analyzer text output format" {
+    const testing = std.testing;
+    const allocator = testing.allocator;
+
+    var analyzer = Analyzer.init(allocator);
+    defer analyzer.deinit();
+
+    const msg = try allocator.dupe(u8, "Test error");
+
+    const diag = Diagnostic.init(
+        "test.zig",
+        "test-rule",
+        .err,
+        msg,
+        @import("diagnostic.zig").SourceRange.init(
+            @import("diagnostic.zig").Location.init(1, 1),
+            @import("diagnostic.zig").Location.init(1, 5),
+        ),
+    );
+
+    try analyzer.diagnostics.append(allocator, diag);
+
+    var buffer: [512]u8 = undefined;
+    var stream = std.io.fixedBufferStream(&buffer);
+    try analyzer.printTextResults(stream.writer());
+
+    const output = stream.getWritten();
+    try testing.expect(std.mem.indexOf(u8, output, "Found 1 issue(s):") != null);
+    try testing.expect(std.mem.indexOf(u8, output, "test.zig:1:1") != null);
+}

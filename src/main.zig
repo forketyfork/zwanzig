@@ -1,5 +1,7 @@
 const std = @import("std");
-const Analyzer = @import("analyzer.zig").Analyzer;
+const analyzer_mod = @import("analyzer.zig");
+const Analyzer = analyzer_mod.Analyzer;
+const OutputFormat = analyzer_mod.Analyzer.OutputFormat;
 const Rule = @import("rule.zig").Rule;
 const DupeImportRule = @import("rules/dupe_import.zig").DupeImportRule;
 const TodoCommentRule = @import("rules/todo_comment.zig").TodoCommentRule;
@@ -30,11 +32,18 @@ test {
     _ = @import("config.zig");
 }
 
+fn outputFormatFromString(s: []const u8) ?OutputFormat {
+    if (std.mem.eql(u8, s, "text")) return .text;
+    if (std.mem.eql(u8, s, "json")) return .json;
+    return null;
+}
+
 pub const CliArgs = struct {
     paths: []const []const u8,
     rule_filter: RuleFilter,
     build_metadata: ?BuildMetadata,
     config_path: ?[]const u8,
+    output_format: OutputFormat,
 };
 
 pub const CliError = error{
@@ -42,6 +51,7 @@ pub const CliError = error{
     MissingFlagValue,
     OutOfMemory,
     InvalidTargetTriple,
+    InvalidOutputFormat,
 };
 
 pub fn parseArgs(allocator: std.mem.Allocator, args: []const []const u8) CliError!CliArgs {
@@ -56,6 +66,7 @@ pub fn parseArgs(allocator: std.mem.Allocator, args: []const []const u8) CliErro
 
     var target_triple: ?[]const u8 = null;
     var config_path: ?[]const u8 = null;
+    var output_format: OutputFormat = .text;
     var build_meta: ?BuildMetadata = null;
     errdefer {
         if (build_meta) |*meta| {
@@ -97,6 +108,12 @@ pub fn parseArgs(allocator: std.mem.Allocator, args: []const []const u8) CliErro
             }
             i += 1;
             config_path = args[i];
+        } else if (std.mem.eql(u8, arg, "--format")) {
+            if (i + 1 >= args.len or std.mem.startsWith(u8, args[i + 1], "--")) {
+                return CliError.MissingFlagValue;
+            }
+            i += 1;
+            output_format = outputFormatFromString(args[i]) orelse return CliError.InvalidOutputFormat;
         } else if (std.mem.startsWith(u8, arg, "--")) {
             continue;
         } else {
@@ -129,6 +146,7 @@ pub fn parseArgs(allocator: std.mem.Allocator, args: []const []const u8) CliErro
         .rule_filter = rule_filter,
         .build_metadata = build_meta,
         .config_path = config_path,
+        .output_format = output_format,
     };
 }
 
@@ -185,6 +203,9 @@ pub fn main() !void {
             },
             CliError.InvalidTargetTriple => {
                 try stderr.writeAll("Error: Invalid target triple format\n");
+            },
+            CliError.InvalidOutputFormat => {
+                try stderr.writeAll("Error: Invalid output format (use 'text' or 'json')\n");
             },
         }
         std.process.exit(1);
@@ -297,7 +318,7 @@ pub fn main() !void {
         try analyzer.analyzeFile(file_path);
     }
 
-    try analyzer.printResults();
+    try analyzer.printResults(cli_args.output_format);
 
     if (analyzer.hasDiagnostics()) {
         std.process.exit(1);
@@ -314,6 +335,7 @@ fn printUsage() !void {
     try stderr.writeAll("  --skip <rule>     Skip the specified rule (can be repeated)\n");
     try stderr.writeAll("  --target <triple> Specify target triple (e.g., x86_64-linux-gnu)\n");
     try stderr.writeAll("  --config <path>   Path to config file (default: .zwanzig.json)\n");
+    try stderr.writeAll("  --format <format> Output format: 'text' or 'json' (default: text)\n");
     try stderr.writeAll("\n  Note: --do and --skip are mutually exclusive and override config file.\n");
     try stderr.writeAll("\nArguments:\n");
     try stderr.writeAll("  [path...]         Files or directories to analyze (default: current directory)\n");
@@ -629,6 +651,7 @@ test "mergeConfig: CLI overrides config allowlist" {
         .rule_filter = .{ .allowlist = &cli_allowlist },
         .build_metadata = null,
         .config_path = config_path,
+        .output_format = .text,
     };
 
     const result = try mergeConfig(allocator, cli_args);
@@ -666,6 +689,7 @@ test "mergeConfig: uses config when no CLI filter" {
         .rule_filter = .none,
         .build_metadata = null,
         .config_path = config_path,
+        .output_format = .text,
     };
 
     const result = try mergeConfig(allocator, cli_args);
@@ -702,6 +726,7 @@ test "mergeConfig: no config file and no CLI filter" {
         .rule_filter = .none,
         .build_metadata = null,
         .config_path = null,
+        .output_format = .text,
     };
 
     const result = try mergeConfig(allocator, cli_args);
@@ -712,4 +737,47 @@ test "mergeConfig: no config file and no CLI filter" {
     };
 
     try std.testing.expectEqual(RuleFilter.none, result);
+}
+
+test "parseArgs: --format text" {
+    const allocator = std.testing.allocator;
+    const args = [_][]const u8{ "zwanzig", "--format", "text", "file.zig" };
+    const result = try parseArgs(allocator, &args);
+    defer freeCliArgs(allocator, result);
+
+    try std.testing.expectEqual(OutputFormat.text, result.output_format);
+}
+
+test "parseArgs: --format json" {
+    const allocator = std.testing.allocator;
+    const args = [_][]const u8{ "zwanzig", "--format", "json", "file.zig" };
+    const result = try parseArgs(allocator, &args);
+    defer freeCliArgs(allocator, result);
+
+    try std.testing.expectEqual(OutputFormat.json, result.output_format);
+}
+
+test "parseArgs: --format without value" {
+    const allocator = std.testing.allocator;
+    const args = [_][]const u8{ "zwanzig", "--format" };
+    const result = parseArgs(allocator, &args);
+
+    try std.testing.expectError(CliError.MissingFlagValue, result);
+}
+
+test "parseArgs: invalid format" {
+    const allocator = std.testing.allocator;
+    const args = [_][]const u8{ "zwanzig", "--format", "xml" };
+    const result = parseArgs(allocator, &args);
+
+    try std.testing.expectError(CliError.InvalidOutputFormat, result);
+}
+
+test "parseArgs: default format is text" {
+    const allocator = std.testing.allocator;
+    const args = [_][]const u8{ "zwanzig", "file.zig" };
+    const result = try parseArgs(allocator, &args);
+    defer freeCliArgs(allocator, result);
+
+    try std.testing.expectEqual(OutputFormat.text, result.output_format);
 }

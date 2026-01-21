@@ -155,6 +155,36 @@ The `Diagnostic` type (`src/diagnostic.zig`) provides:
 - `SourceRange` struct for start/end location pairs
 - `LocationMapper` for converting byte offsets to line/column positions
 
+**Output Formats:**
+
+The analyzer supports multiple output formats via the `Analyzer.OutputFormat` enum:
+
+- **Text format**: Human-readable output with one diagnostic per line
+  ```
+  file.zig:10:5: error: [rule-name] Message
+  ```
+
+- **JSON format**: Machine-readable structured output for tool integration
+  ```json
+  {
+    "diagnostics": [
+      {
+        "file": "file.zig",
+        "rule": "rule-name",
+        "severity": "error",
+        "message": "Message",
+        "location": {
+          "start": {"line": 10, "column": 5},
+          "end": {"line": 10, "column": 20}
+        }
+      }
+    ],
+    "total": 1
+  }
+  ```
+
+The output format is controlled by the `--format` CLI flag and defaults to text. The `Analyzer.printResults()` method takes an `OutputFormat` parameter and dispatches to the appropriate formatter.
+
 ## Parsing Strategy
 
 Zwanzig uses Zig's standard library parser (`std.zig.Ast.parse`) to build the AST. The parsing happens lazily:
