@@ -351,6 +351,26 @@ zwanzig --skip empty-catch --skip unused-var file.zig
 
 Note: `--do` and `--skip` are mutually exclusive and cannot be used together.
 
+### Target Configuration
+
+Specify the target platform for analysis using the `--target` flag:
+
+```bash
+# Analyze for Linux x86_64
+zwanzig --target x86_64-linux-gnu src/
+
+# Analyze for macOS ARM64
+zwanzig --target aarch64-macos src/
+
+# Analyze for WebAssembly
+zwanzig --target wasm32-wasi src/
+
+# Analyze for freestanding (embedded/kernel)
+zwanzig --target aarch64-freestanding src/
+```
+
+When no target is specified, the analyzer uses the native host target configuration. Target configuration enables platform-specific analysis and rules.
+
 ## Testing
 
 Run the test suite:

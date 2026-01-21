@@ -1552,6 +1552,128 @@ engine.setUseSummaries(false);
 engine.setMaxInlineDepth(5);
 ```
 
+## Step 25: Build Metadata Integration
+
+### Overview
+
+The analyzer now integrates build metadata and target configuration into the analysis pipeline, allowing rules and checkers to access platform-specific information.
+
+### Build Metadata Types
+
+The `build_metadata.zig` module provides types for representing build configuration:
+
+```zig
+pub const TargetArch = enum {
+    x86_64,
+    aarch64,
+    arm,
+    riscv64,
+    wasm32,
+    other,
+};
+
+pub const TargetOS = enum {
+    linux,
+    windows,
+    macos,
+    freestanding,
+    wasi,
+    other,
+};
+
+pub const TargetConfig = struct {
+    arch: TargetArch,
+    os: TargetOS,
+    abi: ?[]const u8,
+};
+
+pub const BuildMetadata = struct {
+    target: TargetConfig,
+    optimize_mode: ?OptimizeMode,
+    root_source_file: ?[]const u8,
+};
+```
+
+### CLI Integration
+
+The `--target` flag allows specifying a target triple:
+
+```bash
+zwanzig --target x86_64-linux-gnu src/
+zwanzig --target aarch64-macos src/
+```
+
+The target triple is parsed and converted to a `BuildMetadata` struct that is propagated through the analyzer.
+
+### Analysis Engine Integration
+
+Build metadata is stored in both the `Analyzer` and `AnalysisEngine`, and is propagated to `ProgramState`:
+
+```zig
+// In Analyzer
+var analyzer = Analyzer.init(allocator);
+if (build_metadata) |metadata| {
+    analyzer.setBuildMetadata(metadata);
+}
+
+// In AnalysisEngine
+var engine = AnalysisEngine.init(allocator, &cfg);
+if (analyzer.getBuildMetadata()) |metadata| {
+    engine.setBuildMetadata(metadata);
+}
+
+// In ProgramState (as a shared pointer)
+pub const ProgramState = struct {
+    env: Environment,
+    constraints: ConstraintManager,
+    error_state: ErrorState,
+    build_metadata: ?*const BuildMetadata,  // Shared, not owned
+    // ...
+};
+```
+
+### Accessing Build Metadata
+
+Rules and checkers can access build metadata from the `ProgramState`:
+
+```zig
+pub fn check(state: *const ProgramState) void {
+    if (state.build_metadata) |metadata| {
+        if (metadata.target.arch == .wasm32) {
+            // Apply WASM-specific checks
+        }
+        if (metadata.target.os == .freestanding) {
+            // Apply freestanding-specific checks
+        }
+    }
+}
+```
+
+### Use Cases
+
+Build metadata enables target-specific analysis:
+
+1. **Platform-specific APIs**: Detect use of platform-specific APIs on incompatible targets
+2. **Size optimization**: Different rules for `.release_small` builds
+3. **Freestanding checks**: Enforce restrictions for embedded/kernel code
+4. **ABI compatibility**: Detect ABI-incompatible patterns
+
+### Native Target Detection
+
+When no `--target` is specified, the analyzer uses native target information from `@import("builtin").target`:
+
+```zig
+pub fn fromNative() BuildMetadata {
+    const native = @import("builtin").target;
+    // Extract arch, os from native target
+    return BuildMetadata{
+        .target = TargetConfig.init(arch, os, null),
+        .optimize_mode = null,
+        .root_source_file = null,
+    };
+}
+```
+
 ## Future Enhancements
 
 The current implementation provides a foundation for more sophisticated analysis:

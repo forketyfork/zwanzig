@@ -12,6 +12,9 @@ const RuleFilter = @import("rule_filter.zig").RuleFilter;
 const file_discovery = @import("file_discovery.zig");
 const EmptyCatchEngineChecker = @import("checkers/empty_catch_engine.zig").EmptyCatchEngineChecker;
 const SwallowedErrorChecker = @import("checkers/swallowed_error.zig").SwallowedErrorChecker;
+const build_metadata = @import("build_metadata.zig");
+const BuildMetadata = build_metadata.BuildMetadata;
+const TargetConfig = build_metadata.TargetConfig;
 
 test {
     _ = @import("ir.zig");
@@ -21,17 +24,20 @@ test {
     _ = @import("engine.zig");
     _ = @import("checkers/empty_catch_engine.zig");
     _ = @import("checkers/swallowed_error.zig");
+    _ = @import("build_metadata.zig");
 }
 
 pub const CliArgs = struct {
     paths: []const []const u8,
     rule_filter: RuleFilter,
+    build_metadata: ?BuildMetadata,
 };
 
 pub const CliError = error{
     MutuallyExclusiveFlags,
     MissingFlagValue,
     OutOfMemory,
+    InvalidTargetTriple,
 };
 
 pub fn parseArgs(allocator: std.mem.Allocator, args: []const []const u8) CliError!CliArgs {
@@ -43,6 +49,14 @@ pub fn parseArgs(allocator: std.mem.Allocator, args: []const []const u8) CliErro
 
     var skip_rules: std.ArrayList([]const u8) = .empty;
     errdefer skip_rules.deinit(allocator);
+
+    var target_triple: ?[]const u8 = null;
+    var build_meta: ?BuildMetadata = null;
+    errdefer {
+        if (build_meta) |*meta| {
+            meta.deinit(allocator);
+        }
+    }
 
     var i: usize = 1;
     while (i < args.len) : (i += 1) {
@@ -66,6 +80,12 @@ pub fn parseArgs(allocator: std.mem.Allocator, args: []const []const u8) CliErro
             }
             i += 1;
             try paths.append(allocator, args[i]);
+        } else if (std.mem.eql(u8, arg, "--target")) {
+            if (i + 1 >= args.len or std.mem.startsWith(u8, args[i + 1], "--")) {
+                return CliError.MissingFlagValue;
+            }
+            i += 1;
+            target_triple = args[i];
         } else if (std.mem.startsWith(u8, arg, "--")) {
             continue;
         } else {
@@ -84,9 +104,17 @@ pub fn parseArgs(allocator: std.mem.Allocator, args: []const []const u8) CliErro
     else
         .none;
 
+    if (target_triple) |triple| {
+        const target_config = TargetConfig.fromTriple(allocator, triple) catch |err| {
+            return if (err == error.InvalidTargetTriple) CliError.InvalidTargetTriple else CliError.OutOfMemory;
+        };
+        build_meta = BuildMetadata.init(target_config, null);
+    }
+
     return CliArgs{
         .paths = try paths.toOwnedSlice(allocator),
         .rule_filter = rule_filter,
+        .build_metadata = build_meta,
     };
 }
 
@@ -109,6 +137,9 @@ pub fn main() !void {
             },
             CliError.OutOfMemory => {
                 try stderr.writeAll("Error: Out of memory\n");
+            },
+            CliError.InvalidTargetTriple => {
+                try stderr.writeAll("Error: Invalid target triple format\n");
             },
         }
         std.process.exit(1);
@@ -162,6 +193,10 @@ pub fn main() !void {
 
     analyzer.setRuleFilter(cli_args.rule_filter);
 
+    if (cli_args.build_metadata) |metadata| {
+        analyzer.setBuildMetadata(metadata);
+    }
+
     for (files) |file_path| {
         try analyzer.analyzeFile(file_path);
     }
@@ -178,12 +213,13 @@ fn printUsage() !void {
     try stderr.writeAll("Usage: zwanzig [options] [path...]\n");
     try stderr.writeAll("\nA static analyzer for Zig code.\n");
     try stderr.writeAll("\nOptions:\n");
-    try stderr.writeAll("  --file <path>  Specify a file or directory to analyze (can be repeated)\n");
-    try stderr.writeAll("  --do <rule>    Only run the specified rule (can be repeated)\n");
-    try stderr.writeAll("  --skip <rule>  Skip the specified rule (can be repeated)\n");
+    try stderr.writeAll("  --file <path>    Specify a file or directory to analyze (can be repeated)\n");
+    try stderr.writeAll("  --do <rule>      Only run the specified rule (can be repeated)\n");
+    try stderr.writeAll("  --skip <rule>    Skip the specified rule (can be repeated)\n");
+    try stderr.writeAll("  --target <triple> Specify target triple (e.g., x86_64-linux-gnu)\n");
     try stderr.writeAll("\n  Note: --do and --skip are mutually exclusive.\n");
     try stderr.writeAll("\nArguments:\n");
-    try stderr.writeAll("  [path...]      Files or directories to analyze (default: current directory)\n");
+    try stderr.writeAll("  [path...]        Files or directories to analyze (default: current directory)\n");
     try stderr.writeAll("\nIgnored directories:\n");
     try stderr.writeAll("  zig-cache/, zig-out/, .zigmod/, .gyro/\n");
 }
@@ -194,6 +230,10 @@ fn freeCliArgs(allocator: std.mem.Allocator, cli_args: CliArgs) void {
         .allowlist => |list| allocator.free(list),
         .blocklist => |list| allocator.free(list),
         .none => {},
+    }
+    if (cli_args.build_metadata) |*meta_const| {
+        var meta = meta_const.*;
+        meta.deinit(allocator);
     }
 }
 
@@ -364,6 +404,52 @@ test "parseArgs: empty paths" {
     defer freeCliArgs(allocator, result);
 
     try std.testing.expectEqual(@as(usize, 0), result.paths.len);
+}
+
+test "parseArgs: --target flag" {
+    const allocator = std.testing.allocator;
+    const args = [_][]const u8{ "zwanzig", "--target", "x86_64-linux-gnu", "file.zig" };
+    const result = try parseArgs(allocator, &args);
+    defer freeCliArgs(allocator, result);
+
+    try std.testing.expectEqual(@as(usize, 1), result.paths.len);
+    try std.testing.expectEqualStrings("file.zig", result.paths[0]);
+
+    try std.testing.expect(result.build_metadata != null);
+    const metadata = result.build_metadata.?;
+    try std.testing.expectEqual(build_metadata.TargetArch.x86_64, metadata.target.arch);
+    try std.testing.expectEqual(build_metadata.TargetOS.linux, metadata.target.os);
+    try std.testing.expect(metadata.target.abi != null);
+    try std.testing.expectEqualStrings("gnu", metadata.target.abi.?);
+}
+
+test "parseArgs: --target without ABI" {
+    const allocator = std.testing.allocator;
+    const args = [_][]const u8{ "zwanzig", "--target", "aarch64-macos", "file.zig" };
+    const result = try parseArgs(allocator, &args);
+    defer freeCliArgs(allocator, result);
+
+    try std.testing.expect(result.build_metadata != null);
+    const metadata = result.build_metadata.?;
+    try std.testing.expectEqual(build_metadata.TargetArch.aarch64, metadata.target.arch);
+    try std.testing.expectEqual(build_metadata.TargetOS.macos, metadata.target.os);
+    try std.testing.expectEqual(@as(?[]const u8, null), metadata.target.abi);
+}
+
+test "parseArgs: --target without value" {
+    const allocator = std.testing.allocator;
+    const args = [_][]const u8{ "zwanzig", "--target" };
+    const result = parseArgs(allocator, &args);
+
+    try std.testing.expectError(CliError.MissingFlagValue, result);
+}
+
+test "parseArgs: invalid target triple" {
+    const allocator = std.testing.allocator;
+    const args = [_][]const u8{ "zwanzig", "--target", "invalid" };
+    const result = parseArgs(allocator, &args);
+
+    try std.testing.expectError(CliError.InvalidTargetTriple, result);
 }
 
 test "Analyzer.isRuleEnabled: no filter" {

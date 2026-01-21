@@ -7,6 +7,7 @@ const EdgeKind = cfg_mod.EdgeKind;
 const IrTag = cfg_mod.IrTag;
 const CfgBuilder = cfg_mod.CfgBuilder;
 const Source = @import("source.zig").Source;
+const BuildMetadata = @import("build_metadata.zig").BuildMetadata;
 
 pub const EngineError = std.mem.Allocator.Error;
 
@@ -953,6 +954,8 @@ pub const ProgramState = struct {
     inline_depth: u32,
     /// Call stack for interprocedural analysis (stored as indices into call_sites)
     call_stack: std.ArrayList(CallSite),
+    /// Build metadata (target configuration, etc.) - shared pointer, not owned
+    build_metadata: ?*const BuildMetadata,
 
     pub fn init(allocator: std.mem.Allocator) ProgramState {
         return .{
@@ -962,6 +965,7 @@ pub const ProgramState = struct {
             .cached_hash = null,
             .inline_depth = 0,
             .call_stack = .empty,
+            .build_metadata = null,
         };
     }
 
@@ -1021,6 +1025,7 @@ pub const ProgramState = struct {
             .cached_hash = self.cached_hash,
             .inline_depth = self.inline_depth,
             .call_stack = new_call_stack,
+            .build_metadata = self.build_metadata,
         };
     }
 
@@ -1278,6 +1283,8 @@ pub const AnalysisEngine = struct {
     use_summaries: bool,
     /// Count of summary applications (for testing/debugging)
     summary_use_count: u32,
+    /// Build metadata (target configuration, etc.) - shared pointer
+    build_metadata: ?*const BuildMetadata,
 
     const WorklistItem = struct {
         /// Index of the exploded graph node to process
@@ -1304,6 +1311,7 @@ pub const AnalysisEngine = struct {
             .summary_cache = SummaryCache.init(allocator),
             .use_summaries = true,
             .summary_use_count = 0,
+            .build_metadata = null,
         };
     }
 
@@ -1351,6 +1359,16 @@ pub const AnalysisEngine = struct {
     /// Get the summary cache for inspection.
     pub fn getSummaryCache(self: *const AnalysisEngine) *const SummaryCache {
         return &self.summary_cache;
+    }
+
+    /// Set build metadata for the analysis engine.
+    pub fn setBuildMetadata(self: *AnalysisEngine, metadata: *const BuildMetadata) void {
+        self.build_metadata = metadata;
+    }
+
+    /// Get the build metadata if set.
+    pub fn getBuildMetadata(self: *const AnalysisEngine) ?*const BuildMetadata {
+        return self.build_metadata;
     }
 
     /// Get or compute a summary for a function.
@@ -1444,6 +1462,7 @@ pub const AnalysisEngine = struct {
         }
 
         var initial_state = ProgramState.init(self.allocator);
+        initial_state.build_metadata = self.build_metadata;
         const entry_point = ProgramPoint.initPre(cfg.entry, cfg);
 
         const result = try self.graph.getOrCreateNode(entry_point, &initial_state);

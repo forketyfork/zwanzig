@@ -7,6 +7,7 @@ const checker_mod = @import("checker.zig");
 const Checker = checker_mod.Checker;
 const CheckerManagerWithRules = checker_mod.CheckerManagerWithRules;
 const ZirBridge = @import("zir_bridge.zig").ZirBridge;
+const BuildMetadata = @import("build_metadata.zig").BuildMetadata;
 
 pub const Analyzer = struct {
     allocator: std.mem.Allocator,
@@ -15,6 +16,7 @@ pub const Analyzer = struct {
     rule_filter: RuleFilter,
     zir_bridge: ?ZirBridge = null,
     use_typed_ir: bool = false,
+    build_metadata: ?BuildMetadata = null,
 
     pub fn init(allocator: std.mem.Allocator) Analyzer {
         return Analyzer{
@@ -33,6 +35,10 @@ pub const Analyzer = struct {
         self.diagnostics.deinit(self.allocator);
         if (self.zir_bridge) |*bridge| {
             bridge.deinit();
+        }
+        if (self.build_metadata) |*meta| {
+            var meta_mut = meta.*;
+            meta_mut.deinit(self.allocator);
         }
     }
 
@@ -65,6 +71,21 @@ pub const Analyzer = struct {
 
     pub fn setRuleFilter(self: *Analyzer, filter: RuleFilter) void {
         self.rule_filter = filter;
+    }
+
+    pub fn setBuildMetadata(self: *Analyzer, metadata: BuildMetadata) void {
+        if (self.build_metadata) |*meta| {
+            var meta_mut = meta.*;
+            meta_mut.deinit(self.allocator);
+        }
+        self.build_metadata = metadata;
+    }
+
+    pub fn getBuildMetadata(self: *const Analyzer) ?*const BuildMetadata {
+        if (self.build_metadata) |*meta| {
+            return meta;
+        }
+        return null;
     }
 
     pub fn isRuleEnabled(self: *const Analyzer, rule_name: []const u8) bool {
