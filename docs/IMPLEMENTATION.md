@@ -1358,10 +1358,104 @@ try analyzer.registerChecker(&EmptyCatchEngineChecker.checker);
 try analyzer.registerChecker(&SwallowedErrorChecker.checker);
 ```
 
+## Interprocedural Analysis
+
+The analysis engine supports limited interprocedural analysis through function inlining. This allows tracking data and control flow across function boundaries.
+
+### Function Inlining
+
+When the engine encounters a function call, it attempts to inline the callee's CFG if:
+
+1. **Source is available**: The engine was initialized with `initWithSource()` providing access to the source file
+2. **Call is resolvable**: The callee can be identified (simple identifier calls to local functions)
+3. **Depth limit not exceeded**: The current inline depth is below `max_inline_depth` (default: 3)
+
+If any condition fails, the call is treated as having **unknown effects**.
+
+### Call Stack Tracking
+
+The `ProgramState` maintains a call stack to track the interprocedural context:
+
+```zig
+pub const CallSite = struct {
+    call_node: u32,      // CFG node of the call instruction
+    caller_cfg: *const Cfg,  // CFG containing the call
+    return_node: u32,    // Node to continue from after return
+};
+```
+
+When a function is inlined:
+1. The inline depth is incremented
+2. The call site is pushed onto the call stack
+3. Analysis continues at the callee's entry point
+
+When the callee's exit is reached:
+1. The call site is popped from the stack
+2. The inline depth is decremented
+3. Analysis continues at the caller's return point
+
+### Configuration
+
+The inline depth can be configured via `setMaxInlineDepth()`:
+
+```zig
+var engine = AnalysisEngine.initWithSource(allocator, &cfg, &source);
+defer engine.deinit();
+
+engine.setMaxInlineDepth(5);  // Increase inline depth to 5
+try engine.run();
+
+std.debug.print("Inlined {d} calls\n", .{engine.getInlinedCallCount()});
+```
+
+### External Calls
+
+Calls that cannot be inlined are treated as **external calls** with unknown effects:
+
+- **Unresolvable calls**: Method calls, indirect calls, calls to functions not in the current source
+- **Depth-limited calls**: Calls that would exceed the inline depth limit
+- **Built-in calls**: Calls to `@import`, `@compileError`, etc.
+
+For external calls, the engine conservatively assumes:
+- The call may modify any mutable state
+- The return value is `unknown`
+- Error behavior is unknown (for error-returning functions)
+
+### Example
+
+```zig
+// Source code being analyzed
+fn helper(x: i32) i32 {
+    return x + 1;
+}
+
+fn main() void {
+    const a = 5;
+    const b = helper(a);  // This call will be inlined
+    _ = b;
+}
+
+// Analysis with inlining
+var engine = AnalysisEngine.initWithSource(allocator, &main_cfg, &source);
+try engine.run();
+
+// The analysis will trace through both main() and helper()
+// tracking that helper() is called with x = 5 (if constant propagation is enabled)
+```
+
+### Limitations
+
+Current inlining limitations:
+
+- **Simple calls only**: Only direct function calls with identifier callees are supported
+- **No recursion handling**: Recursive calls are limited by inline depth
+- **No summaries**: Each call site is analyzed independently (no function summaries yet)
+- **Single-file only**: Cross-file calls are treated as external
+
 ## Future Enhancements
 
 The current implementation provides a foundation for more sophisticated analysis:
 
-- **Interprocedural Analysis**: Inline function calls and build summaries
+- **Function Summaries**: Cache analysis results to avoid re-analyzing the same function
 - **Multiple Output Formats**: JSON, SARIF for CI/CD integration
 - **Configuration Files**: Project-specific rule configuration

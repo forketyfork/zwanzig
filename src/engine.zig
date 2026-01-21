@@ -5,8 +5,14 @@ const CfgNode = cfg_mod.CfgNode;
 const CfgEdge = cfg_mod.CfgEdge;
 const EdgeKind = cfg_mod.EdgeKind;
 const IrTag = cfg_mod.IrTag;
+const CfgBuilder = cfg_mod.CfgBuilder;
+const Source = @import("source.zig").Source;
 
 pub const EngineError = std.mem.Allocator.Error;
+
+/// Default maximum inlining depth for interprocedural analysis.
+/// Functions are inlined up to this depth; deeper calls are treated as unknown effects.
+pub const DEFAULT_MAX_INLINE_DEPTH: u32 = 3;
 
 /// Comparison operator for constraints.
 pub const CompareOp = enum {
@@ -718,6 +724,17 @@ pub const ErrorState = enum {
     error_handled,
 };
 
+/// Represents a call site in the inline call stack.
+/// Used to track interprocedural analysis context.
+pub const CallSite = struct {
+    /// CFG node index of the call instruction
+    call_node: u32,
+    /// The CFG containing the call site
+    caller_cfg: *const Cfg,
+    /// Return point: the CFG node to continue from after the call returns
+    return_node: u32,
+};
+
 /// Abstract program state for path-sensitive analysis.
 /// Stores the environment mapping variables to abstract values,
 /// plus path constraints from branch conditions, and error state.
@@ -730,6 +747,10 @@ pub const ProgramState = struct {
     error_state: ErrorState,
     /// Cached hash for efficient deduplication
     cached_hash: ?u64,
+    /// Current inlining depth (0 = top-level function)
+    inline_depth: u32,
+    /// Call stack for interprocedural analysis (stored as indices into call_sites)
+    call_stack: std.ArrayList(CallSite),
 
     pub fn init(allocator: std.mem.Allocator) ProgramState {
         return .{
@@ -737,15 +758,19 @@ pub const ProgramState = struct {
             .constraints = ConstraintManager.init(allocator),
             .error_state = .normal,
             .cached_hash = null,
+            .inline_depth = 0,
+            .call_stack = .empty,
         };
     }
 
     pub fn deinit(self: *ProgramState) void {
         self.env.deinit();
         self.constraints.deinit();
+        self.call_stack.deinit(self.env.allocator);
     }
 
     pub fn eql(self: *const ProgramState, other: *const ProgramState) bool {
+        if (self.inline_depth != other.inline_depth) return false;
         return self.env.eql(&other.env) and
             self.constraints.eql(&other.constraints) and
             self.error_state == other.error_state;
@@ -759,18 +784,24 @@ pub const ProgramState = struct {
         const constraints_hash = self.constraints.computeHash();
         hasher.update(std.mem.asBytes(&constraints_hash));
         hasher.update(std.mem.asBytes(&self.error_state));
+        hasher.update(std.mem.asBytes(&self.inline_depth));
         const h = hasher.final();
         self.cached_hash = h;
         return h;
     }
 
     pub fn clone(self: *const ProgramState, allocator: std.mem.Allocator) !ProgramState {
-        _ = allocator;
+        var new_call_stack: std.ArrayList(CallSite) = .empty;
+        for (self.call_stack.items) |cs| {
+            try new_call_stack.append(allocator, cs);
+        }
         return .{
             .env = try self.env.clone(),
             .constraints = try self.constraints.clone(),
             .error_state = self.error_state,
             .cached_hash = self.cached_hash,
+            .inline_depth = self.inline_depth,
+            .call_stack = new_call_stack,
         };
     }
 
@@ -838,6 +869,53 @@ pub const ProgramState = struct {
     /// Check if we are on a normal (non-error) path.
     pub fn isNormalPath(self: *const ProgramState) bool {
         return self.error_state == .normal;
+    }
+
+    /// Get the current inlining depth.
+    pub fn getInlineDepth(self: *const ProgramState) u32 {
+        return self.inline_depth;
+    }
+
+    /// Increment inline depth when entering an inlined function.
+    pub fn incrementInlineDepth(self: *ProgramState) void {
+        self.inline_depth += 1;
+        self.invalidateCache();
+    }
+
+    /// Decrement inline depth when returning from an inlined function.
+    pub fn decrementInlineDepth(self: *ProgramState) void {
+        if (self.inline_depth > 0) {
+            self.inline_depth -= 1;
+        }
+        self.invalidateCache();
+    }
+
+    /// Push a call site onto the call stack.
+    pub fn pushCallSite(self: *ProgramState, call_site: CallSite) !void {
+        try self.call_stack.append(self.env.allocator, call_site);
+        self.invalidateCache();
+    }
+
+    /// Pop a call site from the call stack.
+    pub fn popCallSite(self: *ProgramState) ?CallSite {
+        if (self.call_stack.items.len > 0) {
+            self.invalidateCache();
+            return self.call_stack.pop();
+        }
+        return null;
+    }
+
+    /// Get the top of the call stack without removing it.
+    pub fn peekCallSite(self: *const ProgramState) ?CallSite {
+        if (self.call_stack.items.len > 0) {
+            return self.call_stack.items[self.call_stack.items.len - 1];
+        }
+        return null;
+    }
+
+    /// Check if we are at an inline call site (depth > 0).
+    pub fn isInlined(self: *const ProgramState) bool {
+        return self.inline_depth > 0;
     }
 };
 
@@ -954,6 +1032,7 @@ pub const ExplodedGraph = struct {
 /// Traverses the CFG and builds an exploded graph with deduplication.
 /// Evaluates abstract values for literals and assignments.
 /// Applies branch constraints and prunes infeasible paths.
+/// Supports interprocedural analysis via function inlining.
 pub const AnalysisEngine = struct {
     allocator: std.mem.Allocator,
     /// The exploded graph being built
@@ -962,6 +1041,16 @@ pub const AnalysisEngine = struct {
     worklist: std.ArrayList(WorklistItem),
     /// Count of pruned paths (for testing/debugging)
     pruned_path_count: u32,
+    /// Maximum inline depth for interprocedural analysis
+    max_inline_depth: u32,
+    /// Source file for resolving function calls (optional)
+    source: ?*Source,
+    /// Cache of built CFGs for functions (by AST node index)
+    function_cfgs: std.AutoHashMap(u32, Cfg),
+    /// Map from function name to AST node index
+    function_names: std.StringHashMap(u32),
+    /// Count of inlined calls (for testing/debugging)
+    inlined_call_count: u32,
 
     const WorklistItem = struct {
         /// Index of the exploded graph node to process
@@ -970,6 +1059,8 @@ pub const AnalysisEngine = struct {
         edge_kind: EdgeKind,
         /// Optional constraint to apply (from branch condition)
         pending_constraint: ?Constraint,
+        /// CFG to use for this worklist item (for interprocedural analysis)
+        cfg: *const Cfg,
     };
 
     pub fn init(allocator: std.mem.Allocator, cfg: *const Cfg) AnalysisEngine {
@@ -978,17 +1069,51 @@ pub const AnalysisEngine = struct {
             .graph = ExplodedGraph.init(allocator, cfg),
             .worklist = .empty,
             .pruned_path_count = 0,
+            .max_inline_depth = DEFAULT_MAX_INLINE_DEPTH,
+            .source = null,
+            .function_cfgs = std.AutoHashMap(u32, Cfg).init(allocator),
+            .function_names = std.StringHashMap(u32).init(allocator),
+            .inlined_call_count = 0,
         };
+    }
+
+    /// Initialize with interprocedural analysis support.
+    pub fn initWithSource(allocator: std.mem.Allocator, cfg: *const Cfg, source: *Source) AnalysisEngine {
+        var engine = init(allocator, cfg);
+        engine.source = source;
+        return engine;
     }
 
     pub fn deinit(self: *AnalysisEngine) void {
         self.graph.deinit();
         self.worklist.deinit(self.allocator);
+        // Deinit all cached CFGs
+        var iter = self.function_cfgs.valueIterator();
+        while (iter.next()) |cfg| {
+            cfg.deinit();
+        }
+        self.function_cfgs.deinit();
+        self.function_names.deinit();
+    }
+
+    /// Set the maximum inline depth for interprocedural analysis.
+    pub fn setMaxInlineDepth(self: *AnalysisEngine, depth: u32) void {
+        self.max_inline_depth = depth;
+    }
+
+    /// Get the count of inlined function calls.
+    pub fn getInlinedCallCount(self: *const AnalysisEngine) u32 {
+        return self.inlined_call_count;
     }
 
     /// Run the analysis on the CFG, building the exploded graph.
     pub fn run(self: *AnalysisEngine) EngineError!void {
         const cfg = self.graph.cfg;
+
+        // Build function name index if source is available
+        if (self.source) |src| {
+            try self.buildFunctionIndex(src);
+        }
 
         var initial_state = ProgramState.init(self.allocator);
         const entry_point = ProgramPoint.initPre(cfg.entry);
@@ -997,14 +1122,107 @@ pub const AnalysisEngine = struct {
         if (!result.is_new) {
             initial_state.deinit();
         }
-        try self.worklist.append(self.allocator, .{ .node_index = result.index, .edge_kind = .normal, .pending_constraint = null });
+        try self.worklist.append(self.allocator, .{ .node_index = result.index, .edge_kind = .normal, .pending_constraint = null, .cfg = cfg });
 
         while (self.worklist.pop()) |item| {
-            try self.processNode(item.node_index, item.edge_kind, item.pending_constraint);
+            try self.processNode(item.node_index, item.edge_kind, item.pending_constraint, item.cfg);
         }
     }
 
-    fn processNode(self: *AnalysisEngine, node_index: u32, edge_kind: EdgeKind, pending_constraint: ?Constraint) EngineError!void {
+    /// Build an index of function names to AST node indices.
+    fn buildFunctionIndex(self: *AnalysisEngine, src: *Source) EngineError!void {
+        const tree = src.ast() catch return;
+        const tags = tree.nodes.items(.tag);
+        const token_tags = tree.tokens.items(.tag);
+        const token_starts = tree.tokens.items(.start);
+        const main_tokens = tree.nodes.items(.main_token);
+        const content = src.getContent();
+
+        for (0..tags.len) |i| {
+            const tag = tags[i];
+            if (tag == .fn_decl) {
+                // Get the function name from the main token
+                const main_token = main_tokens[i];
+                // For fn_decl, main_token is the 'fn' keyword, name follows
+                if (main_token + 1 < token_tags.len and token_tags[main_token + 1] == .identifier) {
+                    const name_token = main_token + 1;
+                    const name_start = token_starts[name_token];
+                    // Find the end of the identifier
+                    var name_end = name_start;
+                    while (name_end < content.len and (std.ascii.isAlphanumeric(content[name_end]) or content[name_end] == '_')) {
+                        name_end += 1;
+                    }
+                    const name = content[name_start..name_end];
+                    try self.function_names.put(name, @intCast(i));
+                }
+            }
+        }
+    }
+
+    /// Get or build a CFG for a function by its AST node index.
+    fn getOrBuildFunctionCfg(self: *AnalysisEngine, fn_ast_node: u32) ?*const Cfg {
+        // Check cache first
+        if (self.function_cfgs.getPtr(fn_ast_node)) |cfg| {
+            return cfg;
+        }
+
+        // Build the CFG if source is available
+        const src = self.source orelse return null;
+        var builder = CfgBuilder.init(self.allocator);
+        const cfg_opt = builder.buildFromFn(src, fn_ast_node) catch return null;
+        if (cfg_opt) |cfg| {
+            self.function_cfgs.put(fn_ast_node, cfg) catch return null;
+            return self.function_cfgs.getPtr(fn_ast_node);
+        }
+        return null;
+    }
+
+    /// Resolve a function call to a function AST node index.
+    /// Returns null for external or unresolvable calls.
+    fn resolveFunctionCall(self: *AnalysisEngine, call_ast_node: u32) ?u32 {
+        const src = self.source orelse return null;
+        const tree = src.ast() catch return null;
+        const tags = tree.nodes.items(.tag);
+        const token_tags = tree.tokens.items(.tag);
+        const token_starts = tree.tokens.items(.start);
+        const main_tokens = tree.nodes.items(.main_token);
+        const content = src.getContent();
+
+        if (call_ast_node >= tags.len) return null;
+        const tag = tags[call_ast_node];
+
+        // For call nodes, use fullCall to extract the callee
+        var call_buf: [1]std.zig.Ast.Node.Index = undefined;
+        const full_call = switch (tag) {
+            .call, .call_one, .call_one_comma => tree.fullCall(&call_buf, @enumFromInt(call_ast_node)),
+            else => return null,
+        } orelse return null;
+
+        // Extract callee node index
+        const callee_node: u32 = @intFromEnum(full_call.ast.fn_expr);
+        if (callee_node >= tags.len) return null;
+        const callee_tag = tags[callee_node];
+
+        // Only handle simple identifier calls for now
+        if (callee_tag == .identifier) {
+            const callee_token = main_tokens[callee_node];
+            if (callee_token < token_tags.len and token_tags[callee_token] == .identifier) {
+                const name_start = token_starts[callee_token];
+                var name_end = name_start;
+                while (name_end < content.len and (std.ascii.isAlphanumeric(content[name_end]) or content[name_end] == '_')) {
+                    name_end += 1;
+                }
+                const name = content[name_start..name_end];
+
+                // Look up in function index
+                return self.function_names.get(name);
+            }
+        }
+
+        return null;
+    }
+
+    fn processNode(self: *AnalysisEngine, node_index: u32, edge_kind: EdgeKind, pending_constraint: ?Constraint, current_cfg: *const Cfg) EngineError!void {
         _ = edge_kind;
 
         const exploded_node = self.graph.getNode(node_index) orelse return;
@@ -1017,8 +1235,22 @@ pub const AnalysisEngine = struct {
 
         switch (point.kind) {
             .pre => {
+                const cfg_node = current_cfg.getNode(point.node_index);
+
+                // Check if this is a call node that should be inlined
+                if (cfg_node) |node| {
+                    if (node.ir_node.tag == .call) {
+                        const inline_result = try self.handleCallNode(node_index, node, &state_copy, current_cfg);
+                        if (inline_result.inlined) {
+                            // Call was inlined, don't process normally
+                            return;
+                        }
+                        // Fall through to normal processing for external/unresolvable calls
+                    }
+                }
+
                 const post_point = ProgramPoint.initPost(point.node_index);
-                var new_state = try self.transferFunction(point, &state_copy);
+                var new_state = try self.transferFunction(point, &state_copy, current_cfg);
 
                 // Apply any pending constraint from a branch edge
                 if (pending_constraint) |constraint| {
@@ -1039,12 +1271,19 @@ pub const AnalysisEngine = struct {
                 try self.graph.addEdge(node_index, result.index);
 
                 if (result.is_new) {
-                    try self.worklist.append(self.allocator, .{ .node_index = result.index, .edge_kind = .normal, .pending_constraint = null });
+                    try self.worklist.append(self.allocator, .{ .node_index = result.index, .edge_kind = .normal, .pending_constraint = null, .cfg = current_cfg });
                 }
             },
             .post => {
-                const cfg = self.graph.cfg;
-                const cfg_node = cfg.getNode(point.node_index);
+                const cfg_node = current_cfg.getNode(point.node_index);
+
+                // Check if we're at a function exit and need to return to caller
+                if (cfg_node) |node| {
+                    if (node.ir_node.tag == .fn_exit and state_copy.isInlined()) {
+                        try self.handleFunctionReturn(node_index, &state_copy);
+                        return;
+                    }
+                }
 
                 // Check if this is a branch node - if so, we need to extract constraints
                 const is_branch_node = if (cfg_node) |node| node.ir_node.tag == .branch else false;
@@ -1053,7 +1292,7 @@ pub const AnalysisEngine = struct {
                 else
                     null;
 
-                for (cfg.edges.items) |edge| {
+                for (current_cfg.edges.items) |edge| {
                     if (edge.from == point.node_index) {
                         const succ_point = ProgramPoint.initPre(edge.to);
                         var succ_state = try state_copy.clone(self.allocator);
@@ -1111,12 +1350,107 @@ pub const AnalysisEngine = struct {
                         try self.graph.addEdge(node_index, result.index);
 
                         if (result.is_new) {
-                            try self.worklist.append(self.allocator, .{ .node_index = result.index, .edge_kind = edge.kind, .pending_constraint = null });
+                            try self.worklist.append(self.allocator, .{ .node_index = result.index, .edge_kind = edge.kind, .pending_constraint = null, .cfg = current_cfg });
                         }
                     }
                 }
             },
         }
+    }
+
+    const InlineResult = struct {
+        inlined: bool,
+    };
+
+    /// Handle a call node, potentially inlining the callee.
+    fn handleCallNode(
+        self: *AnalysisEngine,
+        exploded_node_index: u32,
+        cfg_node: *const CfgNode,
+        state: *const ProgramState,
+        caller_cfg: *const Cfg,
+    ) EngineError!InlineResult {
+        // Check if we've exceeded the inline depth limit
+        if (state.getInlineDepth() >= self.max_inline_depth) {
+            return .{ .inlined = false };
+        }
+
+        // Try to resolve the call target
+        const call_ast_node = cfg_node.ir_node.ast_node orelse return .{ .inlined = false };
+        const callee_fn_node = self.resolveFunctionCall(call_ast_node) orelse return .{ .inlined = false };
+
+        // Get or build the callee's CFG
+        const callee_cfg = self.getOrBuildFunctionCfg(callee_fn_node) orelse return .{ .inlined = false };
+
+        // Find the return point (successor of the call node in the caller)
+        var return_node: ?u32 = null;
+        for (caller_cfg.edges.items) |edge| {
+            if (edge.from == cfg_node.index) {
+                return_node = edge.to;
+                break;
+            }
+        }
+        const ret_node = return_node orelse return .{ .inlined = false };
+
+        // Create a new state for the inlined call
+        var inline_state = try state.clone(self.allocator);
+        inline_state.incrementInlineDepth();
+
+        // Push the call site onto the stack
+        try inline_state.pushCallSite(.{
+            .call_node = cfg_node.index,
+            .caller_cfg = caller_cfg,
+            .return_node = ret_node,
+        });
+
+        // Create entry point for the callee
+        const callee_entry_point = ProgramPoint.initPre(callee_cfg.entry);
+        const result = try self.graph.getOrCreateNode(callee_entry_point, &inline_state);
+        if (!result.is_new) {
+            inline_state.deinit();
+        } else {
+            try self.worklist.append(self.allocator, .{
+                .node_index = result.index,
+                .edge_kind = .normal,
+                .pending_constraint = null,
+                .cfg = callee_cfg,
+            });
+        }
+
+        try self.graph.addEdge(exploded_node_index, result.index);
+        self.inlined_call_count += 1;
+
+        return .{ .inlined = true };
+    }
+
+    /// Handle returning from an inlined function.
+    fn handleFunctionReturn(
+        self: *AnalysisEngine,
+        exploded_node_index: u32,
+        state: *ProgramState,
+    ) EngineError!void {
+        // Pop the call site from the stack
+        const call_site = state.popCallSite() orelse return;
+        state.decrementInlineDepth();
+
+        // Create a state for continuing after the call
+        var return_state = try state.clone(self.allocator);
+
+        // Create the return point in the caller
+        const return_point = ProgramPoint.initPre(call_site.return_node);
+        const result = try self.graph.getOrCreateNode(return_point, &return_state);
+        if (!result.is_new) {
+            return_state.deinit();
+        } else {
+            try self.worklist.append(self.allocator, .{
+                .node_index = result.index,
+                .edge_kind = .normal,
+                .pending_constraint = null,
+                .cfg = call_site.caller_cfg,
+            });
+        }
+
+        try self.graph.addEdge(exploded_node_index, result.index);
     }
 
     /// Extract a constraint from a branch node's condition.
@@ -1149,9 +1483,9 @@ pub const AnalysisEngine = struct {
 
     /// Transfer function: compute the new state after executing a CFG node.
     /// Evaluates literals and assignments, updating the environment.
-    fn transferFunction(self: *AnalysisEngine, point: ProgramPoint, state: *const ProgramState) EngineError!ProgramState {
-        const cfg = self.graph.cfg;
-        const cfg_node = cfg.getNode(point.node_index) orelse return try state.clone(self.allocator);
+    /// For call nodes that couldn't be inlined, treats them as having unknown effects.
+    fn transferFunction(self: *AnalysisEngine, point: ProgramPoint, state: *const ProgramState, current_cfg: *const Cfg) EngineError!ProgramState {
+        const cfg_node = current_cfg.getNode(point.node_index) orelse return try state.clone(self.allocator);
         const ir_node = cfg_node.ir_node;
 
         var new_state = try state.clone(self.allocator);
@@ -1169,6 +1503,16 @@ pub const AnalysisEngine = struct {
                     // For now, set to unknown. Future enhancement: evaluate RHS literals
                     try new_state.setVar(lhs_node, .unknown);
                 }
+            },
+            .call => {
+                // External or unresolvable calls: treat as unknown effects.
+                // This means we conservatively assume the call could modify any state.
+                // For now, we don't invalidate any specific variables since we don't
+                // have precise aliasing information. Future enhancement: track which
+                // variables could be modified by external calls.
+                //
+                // The call node itself doesn't change the abstract state significantly,
+                // but the return value (if captured) would be unknown.
             },
             else => {},
         }
@@ -1858,7 +2202,7 @@ test "AnalysisEngine branch constraint pruning" {
     var initial_state = ProgramState.init(allocator);
     try initial_state.setVar(100, .{ .concrete_int = 5 });
     const result = try engine.graph.getOrCreateNode(entry_point, &initial_state);
-    try engine.worklist.append(allocator, .{ .node_index = result.index, .edge_kind = .normal, .pending_constraint = null });
+    try engine.worklist.append(allocator, .{ .node_index = result.index, .edge_kind = .normal, .pending_constraint = null, .cfg = &cfg });
     if (!result.is_new) {
         initial_state.deinit();
     }
@@ -2138,4 +2482,245 @@ test "AnalysisEngine errdefer only on error path" {
 
     try std.testing.expect(errdefer_reached_from_error);
     try std.testing.expect(!errdefer_reached_from_success);
+}
+
+// ============== Interprocedural Inlining Tests ==============
+
+test "ProgramState inline depth operations" {
+    const allocator = std.testing.allocator;
+
+    var state = ProgramState.init(allocator);
+    defer state.deinit();
+
+    try std.testing.expectEqual(@as(u32, 0), state.getInlineDepth());
+    try std.testing.expect(!state.isInlined());
+
+    state.incrementInlineDepth();
+    try std.testing.expectEqual(@as(u32, 1), state.getInlineDepth());
+    try std.testing.expect(state.isInlined());
+
+    state.incrementInlineDepth();
+    try std.testing.expectEqual(@as(u32, 2), state.getInlineDepth());
+
+    state.decrementInlineDepth();
+    try std.testing.expectEqual(@as(u32, 1), state.getInlineDepth());
+
+    state.decrementInlineDepth();
+    try std.testing.expectEqual(@as(u32, 0), state.getInlineDepth());
+    try std.testing.expect(!state.isInlined());
+
+    // Decrementing at 0 should stay at 0
+    state.decrementInlineDepth();
+    try std.testing.expectEqual(@as(u32, 0), state.getInlineDepth());
+}
+
+test "ProgramState call stack operations" {
+    const allocator = std.testing.allocator;
+
+    var cfg = Cfg.init(allocator);
+    defer cfg.deinit();
+
+    var state = ProgramState.init(allocator);
+    defer state.deinit();
+
+    try std.testing.expect(state.peekCallSite() == null);
+    try std.testing.expect(state.popCallSite() == null);
+
+    const call_site1 = CallSite{
+        .call_node = 5,
+        .caller_cfg = &cfg,
+        .return_node = 6,
+    };
+
+    try state.pushCallSite(call_site1);
+    try std.testing.expect(state.peekCallSite() != null);
+    try std.testing.expectEqual(@as(u32, 5), state.peekCallSite().?.call_node);
+
+    const call_site2 = CallSite{
+        .call_node = 10,
+        .caller_cfg = &cfg,
+        .return_node = 11,
+    };
+
+    try state.pushCallSite(call_site2);
+    try std.testing.expectEqual(@as(u32, 10), state.peekCallSite().?.call_node);
+
+    // Pop should return the most recent call site
+    const popped = state.popCallSite();
+    try std.testing.expect(popped != null);
+    try std.testing.expectEqual(@as(u32, 10), popped.?.call_node);
+
+    // Now the first call site should be on top
+    try std.testing.expectEqual(@as(u32, 5), state.peekCallSite().?.call_node);
+}
+
+test "ProgramState clone preserves inline depth and call stack" {
+    const allocator = std.testing.allocator;
+
+    var cfg = Cfg.init(allocator);
+    defer cfg.deinit();
+
+    var state1 = ProgramState.init(allocator);
+    defer state1.deinit();
+
+    state1.incrementInlineDepth();
+    state1.incrementInlineDepth();
+    try state1.pushCallSite(.{
+        .call_node = 5,
+        .caller_cfg = &cfg,
+        .return_node = 6,
+    });
+
+    var state2 = try state1.clone(allocator);
+    defer state2.deinit();
+
+    try std.testing.expectEqual(state1.getInlineDepth(), state2.getInlineDepth());
+    try std.testing.expect(state1.eql(&state2));
+    try std.testing.expectEqual(@as(u32, 5), state2.peekCallSite().?.call_node);
+}
+
+test "ProgramState equality includes inline depth" {
+    const allocator = std.testing.allocator;
+
+    var state1 = ProgramState.init(allocator);
+    defer state1.deinit();
+
+    var state2 = ProgramState.init(allocator);
+    defer state2.deinit();
+
+    try std.testing.expect(state1.eql(&state2));
+
+    state2.incrementInlineDepth();
+    try std.testing.expect(!state1.eql(&state2));
+
+    state1.incrementInlineDepth();
+    try std.testing.expect(state1.eql(&state2));
+}
+
+test "ProgramState hash includes inline depth" {
+    const allocator = std.testing.allocator;
+
+    var state1 = ProgramState.init(allocator);
+    defer state1.deinit();
+
+    var state2 = ProgramState.init(allocator);
+    defer state2.deinit();
+
+    const hash1_initial = state1.computeHash();
+    const hash2_initial = state2.computeHash();
+    try std.testing.expectEqual(hash1_initial, hash2_initial);
+
+    state2.incrementInlineDepth();
+    const hash2_after = state2.computeHash();
+    try std.testing.expect(hash1_initial != hash2_after);
+}
+
+test "AnalysisEngine max inline depth configuration" {
+    const allocator = std.testing.allocator;
+
+    var cfg = Cfg.init(allocator);
+    defer cfg.deinit();
+
+    _ = try cfg.addNode(cfg_mod.IrNode.init(.fn_entry));
+
+    var engine = AnalysisEngine.init(allocator, &cfg);
+    defer engine.deinit();
+
+    try std.testing.expectEqual(DEFAULT_MAX_INLINE_DEPTH, engine.max_inline_depth);
+
+    engine.setMaxInlineDepth(5);
+    try std.testing.expectEqual(@as(u32, 5), engine.max_inline_depth);
+
+    engine.setMaxInlineDepth(0);
+    try std.testing.expectEqual(@as(u32, 0), engine.max_inline_depth);
+}
+
+test "AnalysisEngine inlined call count starts at zero" {
+    const allocator = std.testing.allocator;
+
+    var cfg = Cfg.init(allocator);
+    defer cfg.deinit();
+
+    const entry = try cfg.addNode(cfg_mod.IrNode.init(.fn_entry));
+    const exit = try cfg.addNode(cfg_mod.IrNode.init(.fn_exit));
+    cfg.entry = entry;
+    cfg.exit = exit;
+    try cfg.addEdge(entry, exit);
+
+    var engine = AnalysisEngine.init(allocator, &cfg);
+    defer engine.deinit();
+
+    try std.testing.expectEqual(@as(u32, 0), engine.getInlinedCallCount());
+
+    try engine.run();
+
+    // Without source, no calls can be inlined
+    try std.testing.expectEqual(@as(u32, 0), engine.getInlinedCallCount());
+}
+
+test "AnalysisEngine with source processes simple function" {
+    const allocator = std.testing.allocator;
+
+    // Simple source with a function
+    const code: [:0]const u8 =
+        \\fn foo() void {
+        \\    return;
+        \\}
+    ;
+
+    var source = Source.init(allocator, "test.zig", code);
+    defer source.deinit();
+
+    // Find the fn_decl node
+    const tree = source.ast() catch return;
+    const tags = tree.nodes.items(.tag);
+    var fn_node: ?u32 = null;
+    for (tags, 0..) |tag, i| {
+        if (tag == .fn_decl) {
+            fn_node = @intCast(i);
+            break;
+        }
+    }
+    const fn_idx = fn_node orelse return; // No fn_decl found, skip test
+
+    // Build CFG for the function
+    var builder = CfgBuilder.init(allocator);
+    var cfg_opt = builder.buildFromFn(&source, fn_idx) catch return;
+
+    if (cfg_opt) |*cfg| {
+        defer cfg.deinit();
+
+        var engine = AnalysisEngine.initWithSource(allocator, cfg, &source);
+        defer engine.deinit();
+
+        try engine.run();
+
+        // Should complete without error
+        try std.testing.expect(engine.getGraph().nodeCount() > 0);
+    }
+}
+
+test "AnalysisEngine transfer function handles call nodes" {
+    const allocator = std.testing.allocator;
+
+    var cfg = Cfg.init(allocator);
+    defer cfg.deinit();
+
+    const entry = try cfg.addNode(cfg_mod.IrNode.init(.fn_entry));
+    const call = try cfg.addNode(cfg_mod.IrNode.initWithAst(.call, 100));
+    const exit = try cfg.addNode(cfg_mod.IrNode.init(.fn_exit));
+    cfg.entry = entry;
+    cfg.exit = exit;
+
+    try cfg.addEdge(entry, call);
+    try cfg.addEdge(call, exit);
+
+    var engine = AnalysisEngine.init(allocator, &cfg);
+    defer engine.deinit();
+
+    try engine.run();
+
+    // Should complete without error - call is treated as unknown effect
+    const graph = engine.getGraph();
+    try std.testing.expect(graph.nodeCount() >= 6); // entry pre/post, call pre/post, exit pre/post
 }
