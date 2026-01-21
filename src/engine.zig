@@ -113,7 +113,9 @@ pub const FunctionSummary = struct {
     }
 
     /// Apply this summary to a program state, updating it with the postconditions.
-    pub fn applyToState(self: *FunctionSummary, state: *ProgramState) !void {
+    /// Returns true if the resulting state is satisfiable, false if postconditions
+    /// contradict existing constraints (infeasible state).
+    pub fn applyToState(self: *FunctionSummary, state: *ProgramState) !bool {
         // Apply postconditions
         for (self.postconditions.items) |postcond| {
             try state.addConstraint(postcond);
@@ -125,6 +127,9 @@ pub const FunctionSummary = struct {
         }
 
         self.recordUse();
+
+        // Check if the resulting state is satisfiable
+        return state.isSatisfiable();
     }
 };
 
@@ -1693,10 +1698,12 @@ pub const AnalysisEngine = struct {
         const callee_fn_node = self.resolveFunctionCall(call_ast_node) orelse return .{ .inlined = false, .summary_applied = false };
 
         // Try to use a cached summary if summaries are enabled
+        // Only use summaries for pure functions (no side effects) to avoid losing
+        // callee effects when skipping inlining
         if (self.use_summaries) {
             if (self.getOrComputeSummary(callee_fn_node)) |summary| {
-                // Check if the summary is applicable to the current state
-                if (summary.isApplicable(state)) {
+                // Only apply summaries for pure functions to preserve side effect semantics
+                if (!summary.has_side_effects and summary.isApplicable(state)) {
                     // Find the return point (successor of the call node in the caller)
                     var return_node: ?u32 = null;
                     for (caller_cfg.edges.items) |edge| {
@@ -1709,26 +1716,33 @@ pub const AnalysisEngine = struct {
 
                     // Apply the summary to the state
                     var summary_state = try state.clone(self.allocator);
-                    try summary.applyToState(&summary_state);
-                    self.summary_use_count += 1;
+                    const is_satisfiable = try summary.applyToState(&summary_state);
 
-                    // Create the post-call point
-                    const post_call_point = ProgramPoint.initPre(ret_node, caller_cfg);
-                    const result = try self.graph.getOrCreateNode(post_call_point, &summary_state);
-                    if (!result.is_new) {
+                    // If postconditions contradict existing constraints, fall back to inlining
+                    if (!is_satisfiable) {
                         summary_state.deinit();
+                        // Fall through to inlining below
                     } else {
-                        try self.worklist.append(self.allocator, .{
-                            .node_index = result.index,
-                            .edge_kind = .normal,
-                            .pending_constraint = null,
-                            .cfg = caller_cfg,
-                        });
+                        self.summary_use_count += 1;
+
+                        // Create the post-call point
+                        const post_call_point = ProgramPoint.initPre(ret_node, caller_cfg);
+                        const result = try self.graph.getOrCreateNode(post_call_point, &summary_state);
+                        if (!result.is_new) {
+                            summary_state.deinit();
+                        } else {
+                            try self.worklist.append(self.allocator, .{
+                                .node_index = result.index,
+                                .edge_kind = .normal,
+                                .pending_constraint = null,
+                                .cfg = caller_cfg,
+                            });
+                        }
+
+                        try self.graph.addEdge(exploded_node_index, result.index);
+
+                        return .{ .inlined = true, .summary_applied = true };
                     }
-
-                    try self.graph.addEdge(exploded_node_index, result.index);
-
-                    return .{ .inlined = true, .summary_applied = true };
                 }
             }
         }
@@ -3299,7 +3313,8 @@ test "FunctionSummary apply to state" {
     defer state.deinit();
 
     // Apply summary to state
-    try summary.applyToState(&state);
+    const is_satisfiable = try summary.applyToState(&state);
+    try std.testing.expect(is_satisfiable);
 
     // Use count should be incremented
     try std.testing.expectEqual(@as(u32, 1), summary.use_count);
@@ -3322,7 +3337,8 @@ test "FunctionSummary error behavior propagation" {
     try std.testing.expect(state.isNormalPath());
 
     // Apply summary to state
-    try summary.applyToState(&state);
+    const is_satisfiable = try summary.applyToState(&state);
+    try std.testing.expect(is_satisfiable);
 
     // State should now be on error path
     try std.testing.expect(state.isErrorPath());
