@@ -1,4 +1,5 @@
 const std = @import("std");
+const builtin = @import("builtin");
 
 pub const TargetArch = enum {
     x86_64,
@@ -87,7 +88,7 @@ pub const TargetConfig = struct {
     }
 
     pub fn isHostNative(self: *const TargetConfig) bool {
-        const native = @import("builtin").target;
+        const native = builtin.target;
         const native_arch = switch (native.cpu.arch) {
             .x86_64 => TargetArch.x86_64,
             .aarch64 => TargetArch.aarch64,
@@ -147,7 +148,7 @@ pub const BuildMetadata = struct {
     }
 
     pub fn fromNative() BuildMetadata {
-        const native = @import("builtin").target;
+        const native = builtin.target;
         const arch = switch (native.cpu.arch) {
             .x86_64 => TargetArch.x86_64,
             .aarch64 => TargetArch.aarch64,

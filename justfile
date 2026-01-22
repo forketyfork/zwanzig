@@ -25,6 +25,7 @@ lint:
     fi
 
     zig fmt --check src/
+    zig build run -- src/**/*.zig
 
 validate:
     ./validate.sh
