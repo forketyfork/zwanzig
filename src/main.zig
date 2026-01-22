@@ -201,6 +201,14 @@ pub fn main() !void {
     const args = try std.process.argsAlloc(allocator);
     defer std.process.argsFree(allocator, args);
 
+    // Check for --help or -h before parsing other arguments
+    for (args[1..]) |arg| {
+        if (std.mem.eql(u8, arg, "--help") or std.mem.eql(u8, arg, "-h")) {
+            try printUsage();
+            return;
+        }
+    }
+
     const cli_args = parseArgs(allocator, args) catch |err| {
         const stderr = std.fs.File.stderr().deprecatedWriter();
         switch (err) {
@@ -342,22 +350,23 @@ pub fn main() !void {
 }
 
 fn printUsage() !void {
-    const stderr = std.fs.File.stderr().deprecatedWriter();
-    try stderr.writeAll("Usage: zwanzig [options] [path...]\n");
-    try stderr.writeAll("\nA static analyzer for Zig code.\n");
-    try stderr.writeAll("\nOptions:\n");
-    try stderr.writeAll("  --file <path>     Specify a file or directory to analyze (can be repeated)\n");
-    try stderr.writeAll("  --do <rule>       Only run the specified rule (can be repeated)\n");
-    try stderr.writeAll("  --skip <rule>     Skip the specified rule (can be repeated)\n");
-    try stderr.writeAll("  --target <triple> Specify target triple (e.g., x86_64-linux-gnu)\n");
-    try stderr.writeAll("  --config <path>   Path to config file (default: .zwanzig.json)\n");
-    try stderr.writeAll("  --format <format> Output format: 'text', 'json', or 'sarif' (default: text)\n");
-    try stderr.writeAll("  --cache           Enable incremental caching\n");
-    try stderr.writeAll("\n  Note: --do and --skip are mutually exclusive and override config file.\n");
-    try stderr.writeAll("\nArguments:\n");
-    try stderr.writeAll("  [path...]         Files or directories to analyze (default: current directory)\n");
-    try stderr.writeAll("\nIgnored directories:\n");
-    try stderr.writeAll("  zig-cache/, zig-out/, .zigmod/, .gyro/\n");
+    const stdout = std.fs.File.stdout().deprecatedWriter();
+    try stdout.writeAll("Usage: zwanzig [options] [path...]\n");
+    try stdout.writeAll("\nA static analyzer for Zig code.\n");
+    try stdout.writeAll("\nOptions:\n");
+    try stdout.writeAll("  -h, --help        Show this help message and exit\n");
+    try stdout.writeAll("  --file <path>     Specify a file or directory to analyze (can be repeated)\n");
+    try stdout.writeAll("  --do <rule>       Only run the specified rule (can be repeated)\n");
+    try stdout.writeAll("  --skip <rule>     Skip the specified rule (can be repeated)\n");
+    try stdout.writeAll("  --target <triple> Specify target triple (e.g., x86_64-linux-gnu)\n");
+    try stdout.writeAll("  --config <path>   Path to config file (default: .zwanzig.json)\n");
+    try stdout.writeAll("  --format <format> Output format: 'text', 'json', or 'sarif' (default: text)\n");
+    try stdout.writeAll("  --cache           Enable incremental caching\n");
+    try stdout.writeAll("\n  Note: --do and --skip are mutually exclusive and override config file.\n");
+    try stdout.writeAll("\nArguments:\n");
+    try stdout.writeAll("  [path...]         Files or directories to analyze (default: current directory)\n");
+    try stdout.writeAll("\nIgnored directories:\n");
+    try stdout.writeAll("  zig-cache/, zig-out/, .zigmod/, .gyro/\n");
 }
 
 fn freeCliArgs(allocator: std.mem.Allocator, cli_args: CliArgs) void {
