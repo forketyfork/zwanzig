@@ -5,9 +5,12 @@ const CheckerError = checker_mod.CheckerError;
 const Diagnostic = checker_mod.Diagnostic;
 const Severity = checker_mod.Severity;
 const Source = @import("../source.zig").Source;
+const ids = @import("../ids.zig");
 const cfg_mod = @import("../cfg.zig");
 const CfgBuilder = cfg_mod.CfgBuilder;
 const Cfg = cfg_mod.Cfg;
+const CfgNodeId = ids.CfgNodeId;
+const AstNodeId = ids.AstNodeId;
 const engine_mod = @import("../engine.zig");
 const AnalysisEngine = engine_mod.AnalysisEngine;
 
@@ -40,7 +43,7 @@ pub const SwallowedErrorChecker = struct {
         for (0..tags.len) |i| {
             const tag = tags[i];
             if (tag == .fn_decl) {
-                try analyzeFunction(src, allocator, @intCast(i), diagnostics, context);
+                try analyzeFunction(src, allocator, ids.astId(@intCast(i)), diagnostics, context);
             }
         }
     }
@@ -48,7 +51,7 @@ pub const SwallowedErrorChecker = struct {
     fn analyzeFunction(
         src: *Source,
         allocator: std.mem.Allocator,
-        fn_node: u32,
+        fn_node: AstNodeId,
         diagnostics: *std.ArrayList(Diagnostic),
         context: checker_mod.CheckerContext,
     ) CheckerError!void {
@@ -78,7 +81,7 @@ pub const SwallowedErrorChecker = struct {
             for (cfg.nodes.items) |cfg_node| {
                 if (cfg_node.ir_node.tag == .catch_expr) {
                     const catch_ast = cfg_node.ir_node.ast_node orelse continue;
-                    const handler_ast = @intFromEnum(data[catch_ast].node_and_node[1]);
+                    const handler_ast = ids.astId(@intFromEnum(data[catch_ast].node_and_node[1]));
                     const engine_ptr: ?*const AnalysisEngine = if (engine_ok) &engine else null;
                     if (try isErrorSwallowed(cfg, cfg_node.index, handler_ast, tree, engine_ptr, allocator)) {
                         // Get source range from IR node
@@ -108,15 +111,15 @@ pub const SwallowedErrorChecker = struct {
     /// 4. The handler completes normally (reaches merge point)
     fn isErrorSwallowed(
         cfg: *const Cfg,
-        catch_node_idx: u32,
-        handler_ast: u32,
+        catch_node_idx: CfgNodeId,
+        handler_ast: AstNodeId,
         tree: *const std.zig.Ast,
         engine: ?*const AnalysisEngine,
         allocator: std.mem.Allocator,
     ) CheckerError!bool {
         // Find the catch_error edge
-        var handler_entry: ?u32 = null;
-        var merge_node: ?u32 = null;
+        var handler_entry: ?CfgNodeId = null;
+        var merge_node: ?CfgNodeId = null;
 
         for (cfg.edges.items) |edge| {
             if (edge.from == catch_node_idx) {
@@ -145,9 +148,9 @@ pub const SwallowedErrorChecker = struct {
         const scan = scanHandlerTokens(tree, handler_ast);
         var has_return = scan.has_return;
         var has_call = scan.has_call;
-        var current_nodes: std.ArrayList(u32) = .empty;
+        var current_nodes: std.ArrayList(CfgNodeId) = .empty;
         defer current_nodes.deinit(allocator);
-        var visited = std.AutoHashMap(u32, void).init(allocator);
+        var visited = std.AutoHashMap(CfgNodeId, void).init(allocator);
         defer visited.deinit();
 
         try current_nodes.append(allocator, entry);
@@ -244,13 +247,14 @@ pub const SwallowedErrorChecker = struct {
         has_call: bool,
     };
 
-    fn scanHandlerTokens(tree: *const std.zig.Ast, handler_ast: u32) TokenScan {
-        if (handler_ast == 0) {
+    fn scanHandlerTokens(tree: *const std.zig.Ast, handler_ast: AstNodeId) TokenScan {
+        if (ids.astIndex(handler_ast) == 0) {
             return .{ .has_return = false, .has_call = false };
         }
         const token_tags = tree.tokens.items(.tag);
-        const first = tree.firstToken(@enumFromInt(handler_ast));
-        const last = tree.lastToken(@enumFromInt(handler_ast));
+        const ast_index = ids.astIndex(handler_ast);
+        const first = tree.firstToken(@enumFromInt(ast_index));
+        const last = tree.lastToken(@enumFromInt(ast_index));
         if (first >= token_tags.len) {
             return .{ .has_return = false, .has_call = false };
         }

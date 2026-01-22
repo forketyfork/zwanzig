@@ -1,0 +1,571 @@
+const std = @import("std");
+const ids = @import("../ids.zig");
+const BuildMetadata = @import("../build_metadata.zig").BuildMetadata;
+const Cfg = @import("../cfg.zig").Cfg;
+const AbstractValue = @import("value.zig").AbstractValue;
+const Constraint = @import("constraints.zig").Constraint;
+const ConstraintManager = @import("constraints.zig").ConstraintManager;
+const Environment = @import("env.zig").Environment;
+const VarId = ids.VarId;
+const CfgNodeId = ids.CfgNodeId;
+
+/// Represents a position in the analysis - a specific point in the CFG.
+/// ProgramPoint identifies a CFG node plus whether we are at the pre-state
+/// (before the node executes) or post-state (after the node executes).
+/// Includes the CFG pointer to distinguish nodes from different CFGs during
+/// interprocedural analysis.
+pub const ProgramPoint = struct {
+    /// Index of the CFG node
+    node_index: CfgNodeId,
+    /// Whether this is a pre-state (before node execution) or post-state (after)
+    kind: Kind,
+    /// The CFG this node belongs to (for interprocedural analysis)
+    cfg: *const Cfg,
+
+    pub const Kind = enum {
+        /// Before the CFG node is executed
+        pre,
+        /// After the CFG node has been executed
+        post,
+    };
+
+    pub fn init(node_index: CfgNodeId, kind: Kind, cfg: *const Cfg) ProgramPoint {
+        return .{
+            .node_index = node_index,
+            .kind = kind,
+            .cfg = cfg,
+        };
+    }
+
+    pub fn initPre(node_index: CfgNodeId, cfg: *const Cfg) ProgramPoint {
+        return init(node_index, .pre, cfg);
+    }
+
+    pub fn initPost(node_index: CfgNodeId, cfg: *const Cfg) ProgramPoint {
+        return init(node_index, .post, cfg);
+    }
+
+    pub fn eql(self: ProgramPoint, other: ProgramPoint) bool {
+        return self.node_index == other.node_index and
+            self.kind == other.kind and
+            self.cfg == other.cfg;
+    }
+
+    pub fn hash(self: ProgramPoint) u64 {
+        var hasher = std.hash.Wyhash.init(0);
+        const node_index = ids.cfgIndex(self.node_index);
+        hasher.update(std.mem.asBytes(&node_index));
+        hasher.update(std.mem.asBytes(&self.kind));
+        hasher.update(std.mem.asBytes(&@intFromPtr(self.cfg)));
+        return hasher.final();
+    }
+};
+
+/// Error state of the program: whether we are on an error path or success path.
+pub const ErrorState = enum {
+    /// Normal execution path (no error)
+    normal,
+    /// Error path (error has been produced but not yet handled)
+    error_active,
+    /// Error has been caught and handled
+    error_handled,
+};
+
+/// Represents a call site in the inline call stack.
+/// Used to track interprocedural analysis context.
+pub const CallSite = struct {
+    /// CFG node index of the call instruction
+    call_node: CfgNodeId,
+    /// The CFG containing the call site
+    caller_cfg: *const Cfg,
+    /// Return point: the CFG node to continue from after the call returns
+    return_node: CfgNodeId,
+};
+
+/// Abstract program state for path-sensitive analysis.
+/// Stores the environment mapping variables to abstract values,
+/// plus path constraints from branch conditions, and error state.
+pub const ProgramState = struct {
+    /// Environment mapping variables to abstract values
+    env: Environment,
+    /// Constraint manager for path conditions
+    constraints: ConstraintManager,
+    /// Error state tracking (normal, error_active, error_handled)
+    error_state: ErrorState,
+    /// Cached hash for efficient deduplication
+    cached_hash: ?u64,
+    /// Current inlining depth (0 = top-level function)
+    inline_depth: u32,
+    /// Call stack for interprocedural analysis (stored as indices into call_sites)
+    call_stack: std.ArrayList(CallSite),
+    /// Build metadata (target configuration, etc.) - shared pointer, not owned
+    build_metadata: ?*const BuildMetadata,
+
+    pub fn init(allocator: std.mem.Allocator) ProgramState {
+        return .{
+            .env = Environment.init(allocator),
+            .constraints = ConstraintManager.init(allocator),
+            .error_state = .normal,
+            .cached_hash = null,
+            .inline_depth = 0,
+            .call_stack = .empty,
+            .build_metadata = null,
+        };
+    }
+
+    pub fn deinit(self: *ProgramState) void {
+        self.env.deinit();
+        self.constraints.deinit();
+        self.call_stack.deinit(self.env.allocator);
+    }
+
+    pub fn eql(self: *const ProgramState, other: *const ProgramState) bool {
+        if (self.inline_depth != other.inline_depth) return false;
+        if (!self.env.eql(&other.env)) return false;
+        if (!self.constraints.eql(&other.constraints)) return false;
+        if (self.error_state != other.error_state) return false;
+        // Compare call stacks to distinguish different calling contexts
+        if (self.call_stack.items.len != other.call_stack.items.len) return false;
+        for (self.call_stack.items, other.call_stack.items) |cs1, cs2| {
+            if (cs1.call_node != cs2.call_node or
+                cs1.return_node != cs2.return_node or
+                cs1.caller_cfg != cs2.caller_cfg)
+            {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    pub fn computeHash(self: *ProgramState) u64 {
+        if (self.cached_hash) |h| return h;
+        var hasher = std.hash.Wyhash.init(0);
+        const env_hash = self.env.computeHash();
+        hasher.update(std.mem.asBytes(&env_hash));
+        const constraints_hash = self.constraints.computeHash();
+        hasher.update(std.mem.asBytes(&constraints_hash));
+        hasher.update(std.mem.asBytes(&self.error_state));
+        hasher.update(std.mem.asBytes(&self.inline_depth));
+        // Include call stack in hash to distinguish different calling contexts
+        for (self.call_stack.items) |cs| {
+            const call_node = ids.cfgIndex(cs.call_node);
+            const return_node = ids.cfgIndex(cs.return_node);
+            hasher.update(std.mem.asBytes(&call_node));
+            hasher.update(std.mem.asBytes(&return_node));
+            hasher.update(std.mem.asBytes(&@intFromPtr(cs.caller_cfg)));
+        }
+        const h = hasher.final();
+        self.cached_hash = h;
+        return h;
+    }
+
+    pub fn clone(self: *const ProgramState, allocator: std.mem.Allocator) !ProgramState {
+        var new_call_stack: std.ArrayList(CallSite) = .empty;
+        errdefer new_call_stack.deinit(allocator);
+        for (self.call_stack.items) |cs| {
+            try new_call_stack.append(allocator, cs);
+        }
+        var new_env = try self.env.clone();
+        errdefer new_env.deinit();
+        var new_constraints = try self.constraints.clone();
+        errdefer new_constraints.deinit();
+        return .{
+            .env = new_env,
+            .constraints = new_constraints,
+            .error_state = self.error_state,
+            .cached_hash = self.cached_hash,
+            .inline_depth = self.inline_depth,
+            .call_stack = new_call_stack,
+            .build_metadata = self.build_metadata,
+        };
+    }
+
+    pub fn invalidateCache(self: *ProgramState) void {
+        self.cached_hash = null;
+    }
+
+    pub fn getVar(self: *const ProgramState, var_id: VarId) ?AbstractValue {
+        return self.env.get(var_id);
+    }
+
+    pub fn setVar(self: *ProgramState, var_id: VarId, value: AbstractValue) !void {
+        try self.env.set(var_id, value);
+        self.invalidateCache();
+    }
+
+    pub fn envSize(self: *const ProgramState) usize {
+        return self.env.size();
+    }
+
+    /// Add a constraint to this state and refine variable values accordingly.
+    pub fn addConstraint(self: *ProgramState, constraint: Constraint) !void {
+        try self.constraints.addConstraint(constraint);
+        self.invalidateCache();
+
+        // Refine the relevant variable's value based on the constraint
+        const var_id = switch (constraint) {
+            .int_compare => |ic| ic.var_id,
+            .null_check => |nc| nc.var_id,
+            .var_compare => |vc| vc.var1_id,
+        };
+
+        if (self.env.get(var_id)) |current_val| {
+            if (ConstraintManager.refineValue(current_val, constraint)) |refined| {
+                try self.env.set(var_id, refined);
+            }
+        }
+    }
+
+    /// Check if this state's constraints are satisfiable.
+    pub fn isSatisfiable(self: *const ProgramState) bool {
+        return self.constraints.isSatisfiable(&self.env);
+    }
+
+    pub fn constraintCount(self: *const ProgramState) usize {
+        return self.constraints.size();
+    }
+
+    /// Set the error state of this program state.
+    pub fn setErrorState(self: *ProgramState, error_state: ErrorState) void {
+        self.error_state = error_state;
+        self.invalidateCache();
+    }
+
+    /// Get the current error state.
+    pub fn getErrorState(self: *const ProgramState) ErrorState {
+        return self.error_state;
+    }
+
+    /// Check if we are on an error path.
+    pub fn isErrorPath(self: *const ProgramState) bool {
+        return self.error_state == .error_active;
+    }
+
+    /// Check if we are on a normal (non-error) path.
+    pub fn isNormalPath(self: *const ProgramState) bool {
+        return self.error_state == .normal;
+    }
+
+    /// Get the current inlining depth.
+    pub fn getInlineDepth(self: *const ProgramState) u32 {
+        return self.inline_depth;
+    }
+
+    /// Increment inline depth when entering an inlined function.
+    pub fn incrementInlineDepth(self: *ProgramState) void {
+        self.inline_depth += 1;
+        self.invalidateCache();
+    }
+
+    /// Decrement inline depth when returning from an inlined function.
+    pub fn decrementInlineDepth(self: *ProgramState) void {
+        if (self.inline_depth > 0) {
+            self.inline_depth -= 1;
+        }
+        self.invalidateCache();
+    }
+
+    /// Push a call site onto the call stack.
+    pub fn pushCallSite(self: *ProgramState, call_site: CallSite) !void {
+        try self.call_stack.append(self.env.allocator, call_site);
+        self.invalidateCache();
+    }
+
+    /// Pop a call site from the call stack.
+    pub fn popCallSite(self: *ProgramState) ?CallSite {
+        if (self.call_stack.items.len > 0) {
+            self.invalidateCache();
+            return self.call_stack.pop();
+        }
+        return null;
+    }
+
+    /// Get the top of the call stack without removing it.
+    pub fn peekCallSite(self: *const ProgramState) ?CallSite {
+        if (self.call_stack.items.len > 0) {
+            return self.call_stack.items[self.call_stack.items.len - 1];
+        }
+        return null;
+    }
+
+    /// Check if we are at an inline call site (depth > 0).
+    pub fn isInlined(self: *const ProgramState) bool {
+        return self.inline_depth > 0;
+    }
+};
+
+test "ProgramPoint basic operations" {
+    const testing = std.testing;
+    const allocator = testing.allocator;
+
+    var cfg1 = Cfg.init(allocator);
+    defer cfg1.deinit();
+    var cfg2 = Cfg.init(allocator);
+    defer cfg2.deinit();
+
+    const point1 = ProgramPoint.initPre(ids.cfgId(5), &cfg1);
+    try testing.expectEqual(ids.cfgId(5), point1.node_index);
+    try testing.expectEqual(ProgramPoint.Kind.pre, point1.kind);
+
+    const point2 = ProgramPoint.initPost(ids.cfgId(5), &cfg1);
+    try testing.expectEqual(ids.cfgId(5), point2.node_index);
+    try testing.expectEqual(ProgramPoint.Kind.post, point2.kind);
+
+    try testing.expect(!point1.eql(point2));
+
+    const point3 = ProgramPoint.initPre(ids.cfgId(5), &cfg1);
+    try testing.expect(point1.eql(point3));
+
+    try testing.expect(point1.hash() != point2.hash());
+    try testing.expect(point1.hash() == point3.hash());
+
+    // Test CFG identity: same node index but different CFG should not be equal
+    const point4 = ProgramPoint.initPre(ids.cfgId(5), &cfg2);
+    try testing.expect(!point1.eql(point4));
+    try testing.expect(point1.hash() != point4.hash());
+}
+
+test "ProgramState basic operations" {
+    const testing = std.testing;
+    const allocator = testing.allocator;
+
+    var state1 = ProgramState.init(allocator);
+    defer state1.deinit();
+
+    try testing.expectEqual(@as(usize, 0), state1.envSize());
+
+    try state1.setVar(ids.varId(42), .{ .concrete_int = 10 });
+    try testing.expectEqual(@as(usize, 1), state1.envSize());
+
+    const val = state1.getVar(ids.varId(42));
+    try testing.expect(val != null);
+    try testing.expect(val.?.eql(.{ .concrete_int = 10 }));
+
+    var state2 = try state1.clone(allocator);
+    defer state2.deinit();
+
+    try testing.expect(state1.eql(&state2));
+
+    try state2.setVar(ids.varId(42), .{ .concrete_int = 20 });
+    try testing.expect(!state1.eql(&state2));
+}
+
+test "ProgramState with constraints" {
+    const testing = std.testing;
+    const allocator = testing.allocator;
+
+    var state = ProgramState.init(allocator);
+    defer state.deinit();
+
+    try state.setVar(ids.varId(1), .{ .concrete_int = 42 });
+
+    try state.addConstraint(Constraint.intCompare(ids.varId(1), .eq, 42));
+    try testing.expectEqual(@as(usize, 1), state.constraintCount());
+    try testing.expect(state.isSatisfiable());
+
+    try state.addConstraint(Constraint.intCompare(ids.varId(1), .eq, 43));
+    try testing.expectEqual(@as(usize, 2), state.constraintCount());
+    try testing.expect(!state.isSatisfiable());
+}
+
+test "ProgramState clone includes constraints" {
+    const testing = std.testing;
+    const allocator = testing.allocator;
+
+    var state = ProgramState.init(allocator);
+    defer state.deinit();
+
+    try state.addConstraint(Constraint.intCompare(ids.varId(1), .eq, 42));
+
+    var state2 = try state.clone(allocator);
+    defer state2.deinit();
+
+    try testing.expect(state.eql(&state2));
+}
+
+test "ProgramState satisfiability" {
+    const testing = std.testing;
+    const allocator = testing.allocator;
+
+    var state = ProgramState.init(allocator);
+    defer state.deinit();
+
+    try state.setVar(ids.varId(1), .{ .concrete_int = 10 });
+
+    try state.addConstraint(Constraint.intCompare(ids.varId(1), .lt, 20));
+    try testing.expect(state.isSatisfiable());
+
+    try state.addConstraint(Constraint.intCompare(ids.varId(1), .gt, 20));
+    try testing.expect(!state.isSatisfiable());
+}
+
+test "ErrorState enum values" {
+    const testing = std.testing;
+
+    try testing.expectEqual(@as(u8, 0), @intFromEnum(ErrorState.normal));
+    try testing.expectEqual(@as(u8, 1), @intFromEnum(ErrorState.error_active));
+    try testing.expectEqual(@as(u8, 2), @intFromEnum(ErrorState.error_handled));
+}
+
+test "ProgramState error state operations" {
+    const testing = std.testing;
+    const allocator = testing.allocator;
+
+    var state = ProgramState.init(allocator);
+    defer state.deinit();
+
+    try testing.expect(state.isNormalPath());
+    try testing.expect(!state.isErrorPath());
+
+    state.setErrorState(.error_active);
+    try testing.expect(state.isErrorPath());
+    try testing.expect(!state.isNormalPath());
+
+    state.setErrorState(.error_handled);
+    try testing.expect(!state.isErrorPath());
+}
+
+test "ProgramState clone preserves error state" {
+    const testing = std.testing;
+    const allocator = testing.allocator;
+
+    var state = ProgramState.init(allocator);
+    defer state.deinit();
+
+    state.setErrorState(.error_active);
+
+    var state2 = try state.clone(allocator);
+    defer state2.deinit();
+
+    try testing.expectEqual(state.getErrorState(), state2.getErrorState());
+}
+
+test "ProgramState equality includes error state" {
+    const testing = std.testing;
+    const allocator = testing.allocator;
+
+    var state1 = ProgramState.init(allocator);
+    defer state1.deinit();
+
+    var state2 = ProgramState.init(allocator);
+    defer state2.deinit();
+
+    try testing.expect(state1.eql(&state2));
+
+    state2.setErrorState(.error_active);
+    try testing.expect(!state1.eql(&state2));
+}
+
+test "ProgramState hash includes error state" {
+    const testing = std.testing;
+    const allocator = testing.allocator;
+
+    var state1 = ProgramState.init(allocator);
+    defer state1.deinit();
+
+    var state2 = ProgramState.init(allocator);
+    defer state2.deinit();
+
+    try testing.expectEqual(state1.computeHash(), state2.computeHash());
+
+    state2.setErrorState(.error_active);
+    try testing.expect(state1.computeHash() != state2.computeHash());
+}
+
+test "ProgramState inline depth operations" {
+    const testing = std.testing;
+    const allocator = testing.allocator;
+
+    var state = ProgramState.init(allocator);
+    defer state.deinit();
+
+    try testing.expectEqual(@as(u32, 0), state.getInlineDepth());
+    try testing.expect(!state.isInlined());
+
+    state.incrementInlineDepth();
+    try testing.expectEqual(@as(u32, 1), state.getInlineDepth());
+    try testing.expect(state.isInlined());
+
+    state.decrementInlineDepth();
+    try testing.expectEqual(@as(u32, 0), state.getInlineDepth());
+    try testing.expect(!state.isInlined());
+
+    // Should not go below 0
+    state.decrementInlineDepth();
+    try testing.expectEqual(@as(u32, 0), state.getInlineDepth());
+}
+
+test "ProgramState call stack operations" {
+    const testing = std.testing;
+    const allocator = testing.allocator;
+
+    var cfg = Cfg.init(allocator);
+    defer cfg.deinit();
+
+    var state = ProgramState.init(allocator);
+    defer state.deinit();
+
+    const call_site = CallSite{ .call_node = ids.cfgId(1), .caller_cfg = &cfg, .return_node = ids.cfgId(2) };
+
+    try testing.expect(state.peekCallSite() == null);
+
+    try state.pushCallSite(call_site);
+    try testing.expect(state.peekCallSite() != null);
+    try testing.expectEqual(ids.cfgId(1), state.peekCallSite().?.call_node);
+
+    const popped = state.popCallSite();
+    try testing.expect(popped != null);
+    try testing.expect(state.peekCallSite() == null);
+}
+
+test "ProgramState clone preserves inline depth and call stack" {
+    const testing = std.testing;
+    const allocator = testing.allocator;
+
+    var cfg = Cfg.init(allocator);
+    defer cfg.deinit();
+
+    var state = ProgramState.init(allocator);
+    defer state.deinit();
+
+    state.incrementInlineDepth();
+    try state.pushCallSite(CallSite{ .call_node = ids.cfgId(1), .caller_cfg = &cfg, .return_node = ids.cfgId(2) });
+
+    var state2 = try state.clone(allocator);
+    defer state2.deinit();
+
+    try testing.expectEqual(state.getInlineDepth(), state2.getInlineDepth());
+    try testing.expectEqual(state.call_stack.items.len, state2.call_stack.items.len);
+}
+
+test "ProgramState equality includes inline depth" {
+    const testing = std.testing;
+    const allocator = testing.allocator;
+
+    var state1 = ProgramState.init(allocator);
+    defer state1.deinit();
+
+    var state2 = ProgramState.init(allocator);
+    defer state2.deinit();
+
+    try testing.expect(state1.eql(&state2));
+
+    state2.incrementInlineDepth();
+    try testing.expect(!state1.eql(&state2));
+}
+
+test "ProgramState hash includes inline depth" {
+    const testing = std.testing;
+    const allocator = testing.allocator;
+
+    var state1 = ProgramState.init(allocator);
+    defer state1.deinit();
+
+    var state2 = ProgramState.init(allocator);
+    defer state2.deinit();
+
+    try testing.expectEqual(state1.computeHash(), state2.computeHash());
+
+    state2.incrementInlineDepth();
+    try testing.expect(state1.computeHash() != state2.computeHash());
+}
