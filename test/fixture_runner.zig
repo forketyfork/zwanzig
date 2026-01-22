@@ -167,11 +167,16 @@ pub fn runFixture(
         return error.DiagnosticCountMismatch;
     }
 
-    // Check that each expected diagnostic has a match
+    // Check that each expected diagnostic has a unique match (one-to-one correspondence)
+    var matched = try allocator.alloc(bool, diagnostics.items.len);
+    defer allocator.free(matched);
+    @memset(matched, false);
+
     for (expectations.diagnostics, 0..) |expected, i| {
         var found = false;
-        for (diagnostics.items) |actual| {
-            if (expected.matches(actual)) {
+        for (diagnostics.items, 0..) |actual, j| {
+            if (!matched[j] and expected.matches(actual)) {
+                matched[j] = true;
                 found = true;
                 break;
             }
@@ -222,7 +227,7 @@ pub fn runFixturesInDir(
         const file = try dir.openFile(entry.name, .{});
         defer file.close();
 
-        const content = try file.readToEndAllocOptions(allocator, 1024 * 1024, null, .@"1", 0);
+        const content = try file.readToEndAllocOptions(allocator, 1024 * 1024, null, .of(u8), 0);
         defer allocator.free(content);
 
         try runFixture(allocator, rule, fixture_path, content);

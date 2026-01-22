@@ -3,9 +3,6 @@ const Rule = @import("../rule.zig").Rule;
 const Source = @import("../source.zig").Source;
 const Diagnostic = @import("../diagnostic.zig").Diagnostic;
 const RuleError = @import("../rule.zig").RuleError;
-const cfg_mod = @import("../cfg.zig");
-const CfgBuilder = cfg_mod.CfgBuilder;
-const Cfg = cfg_mod.Cfg;
 
 pub const UnreachableCodeRule = struct {
     pub const rule: Rule = .{
