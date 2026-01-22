@@ -34,6 +34,15 @@ pub const DupeImportRule = struct {
         var seen_imports = std.StringHashMap(ImportInfo).init(allocator);
         defer seen_imports.deinit();
 
+        // Track allocated keys for cleanup
+        var allocated_keys: std.ArrayList([]const u8) = .empty;
+        defer {
+            for (allocated_keys.items) |key| {
+                allocator.free(key);
+            }
+            allocated_keys.deinit(allocator);
+        }
+
         var i: usize = 0;
         while (i < token_tags.len) : (i += 1) {
             if (token_tags[i] == .builtin) {
@@ -47,10 +56,22 @@ pub const DupeImportRule = struct {
                     const string_idx = nextNonCommentToken(token_tags, l_paren_idx + 1) orelse continue;
                     if (token_tags[string_idx] != .string_literal) continue;
 
+                    const r_paren_idx = nextNonCommentToken(token_tags, string_idx + 1) orelse continue;
+                    if (token_tags[r_paren_idx] != .r_paren) continue;
+
                     const string_start = token_starts[string_idx];
                     const import_path = getStringLiteralContent(content, string_start);
 
-                    if (seen_imports.get(import_path)) |_| {
+                    // Build full import key including field access chain
+                    const full_key = buildImportKey(allocator, tree, token_tags, r_paren_idx, import_path) catch continue;
+                    const key_is_allocated = full_key.ptr != import_path.ptr;
+
+                    if (seen_imports.get(full_key)) |_| {
+                        // It's a duplicate - free the key if allocated and report
+                        if (key_is_allocated) {
+                            allocator.free(full_key);
+                        }
+
                         const range = try src.byteRangeToSourceRange(start, start + builtin_name.len);
 
                         const diag = try Diagnostic.init(
@@ -63,7 +84,11 @@ pub const DupeImportRule = struct {
                         );
                         try diagnostics.append(allocator, diag);
                     } else {
-                        try seen_imports.put(import_path, .{
+                        // New import - store it
+                        if (key_is_allocated) {
+                            try allocated_keys.append(allocator, full_key);
+                        }
+                        try seen_imports.put(full_key, .{
                             .byte_offset = start,
                             .import_path = import_path,
                         });
@@ -73,6 +98,55 @@ pub const DupeImportRule = struct {
                 }
             }
         }
+    }
+
+    fn buildImportKey(
+        allocator: std.mem.Allocator,
+        tree: *const std.zig.Ast,
+        token_tags: []const std.zig.Token.Tag,
+        r_paren_idx: usize,
+        import_path: []const u8,
+    ) ![]const u8 {
+        // Look for field access chain after the closing paren: .field1.field2...
+        var fields: std.ArrayList([]const u8) = .empty;
+        defer fields.deinit(allocator);
+
+        var idx = nextNonCommentToken(token_tags, r_paren_idx + 1);
+        while (idx) |current_idx| {
+            if (token_tags[current_idx] != .period) break;
+
+            const ident_idx = nextNonCommentToken(token_tags, current_idx + 1) orelse break;
+            if (token_tags[ident_idx] != .identifier) break;
+
+            const field_name = tree.tokenSlice(@intCast(ident_idx));
+            try fields.append(allocator, field_name);
+
+            idx = nextNonCommentToken(token_tags, ident_idx + 1);
+        }
+
+        // If no fields, return the import path as-is (no allocation)
+        if (fields.items.len == 0) {
+            return import_path;
+        }
+
+        // Build the full key: "path.field1.field2..."
+        var total_len: usize = import_path.len;
+        for (fields.items) |field| {
+            total_len += 1 + field.len; // "." + field
+        }
+
+        const key = try allocator.alloc(u8, total_len);
+        @memcpy(key[0..import_path.len], import_path);
+
+        var pos: usize = import_path.len;
+        for (fields.items) |field| {
+            key[pos] = '.';
+            pos += 1;
+            @memcpy(key[pos..][0..field.len], field);
+            pos += field.len;
+        }
+
+        return key;
     }
 
     fn nextNonCommentToken(token_tags: []const std.zig.Token.Tag, start: usize) ?usize {
