@@ -5,9 +5,12 @@ const CheckerError = checker_mod.CheckerError;
 const Diagnostic = checker_mod.Diagnostic;
 const Severity = checker_mod.Severity;
 const Source = @import("../source.zig").Source;
+const ids = @import("../ids.zig");
 const cfg_mod = @import("../cfg.zig");
 const CfgBuilder = cfg_mod.CfgBuilder;
 const Cfg = cfg_mod.Cfg;
+const CfgNodeId = ids.CfgNodeId;
+const AstNodeId = ids.AstNodeId;
 const engine_mod = @import("../engine.zig");
 const AnalysisEngine = engine_mod.AnalysisEngine;
 
@@ -39,7 +42,7 @@ pub const EmptyCatchEngineChecker = struct {
         for (0..tags.len) |i| {
             const tag = tags[i];
             if (tag == .fn_decl) {
-                try analyzeFunction(src, allocator, @intCast(i), diagnostics, context);
+                try analyzeFunction(src, allocator, ids.astId(@intCast(i)), diagnostics, context);
             }
         }
     }
@@ -47,7 +50,7 @@ pub const EmptyCatchEngineChecker = struct {
     fn analyzeFunction(
         src: *Source,
         allocator: std.mem.Allocator,
-        fn_node: u32,
+        fn_node: AstNodeId,
         diagnostics: *std.ArrayList(Diagnostic),
         context: checker_mod.CheckerContext,
     ) CheckerError!void {
@@ -96,10 +99,10 @@ pub const EmptyCatchEngineChecker = struct {
     /// Check if a catch_expr node has an empty handler.
     /// A catch handler is considered empty if the catch_error edge goes directly
     /// to the same merge node as catch_success (no intervening handler nodes).
-    fn hasEmptyHandler(cfg: *const Cfg, catch_node_idx: u32) bool {
+    fn hasEmptyHandler(cfg: *const Cfg, catch_node_idx: CfgNodeId) bool {
         // Find both catch_error and catch_success targets
-        var catch_error_target: ?u32 = null;
-        var catch_success_target: ?u32 = null;
+        var catch_error_target: ?CfgNodeId = null;
+        var catch_success_target: ?CfgNodeId = null;
 
         for (cfg.edges.items) |edge| {
             if (edge.from == catch_node_idx) {
