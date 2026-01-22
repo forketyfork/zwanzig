@@ -19,6 +19,7 @@ fmt:
 lint:
     #!/usr/bin/env bash
     set -euo pipefail
+    shopt -s globstar
 
     if [ -f validate.sh ]; then
         shellcheck validate.sh
