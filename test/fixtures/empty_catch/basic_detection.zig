@@ -1,4 +1,4 @@
-// EXPECT: line=8 col=27 rule=empty-catch severity=warning
+// EXPECT: line=8 col=21 rule=empty-catch severity=warning
 const std = @import("std");
 
 fn tryFunc() !void {

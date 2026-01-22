@@ -48,12 +48,20 @@ pub fn build(b: *std.Build) void {
     const test_step = b.step("test", "Run unit tests");
     test_step.dependOn(&run_tests.step);
 
+    // Create source module for fixture tests to import
+    const src_module = b.createModule(.{
+        .root_source_file = b.path("src/lib.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+
     // Create fixture tests
     const fixture_test_module = b.createModule(.{
         .root_source_file = b.path("test/fixture_tests.zig"),
         .target = target,
         .optimize = optimize,
     });
+    fixture_test_module.addImport("src", src_module);
 
     const fixture_tests = b.addTest(.{
         .root_module = fixture_test_module,
@@ -94,11 +102,15 @@ fn addFixtureChecks(b: *std.Build, step: *std.Build.Step, target: std.Build.Reso
 
             const full_path = std.fmt.allocPrint(b.allocator, "{s}/{s}", .{ dir_path, entry.name }) catch continue;
 
-            const check = b.addObject(.{
-                .name = entry.name,
+            const check_module = b.createModule(.{
                 .root_source_file = b.path(full_path),
                 .target = target,
                 .optimize = optimize,
+            });
+
+            const check = b.addObject(.{
+                .name = entry.name,
+                .root_module = check_module,
             });
 
             step.dependOn(&check.step);

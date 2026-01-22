@@ -1,7 +1,8 @@
 // EXPECT: none
+const std = @import("std");
+
 fn foo() !void {
     var x: i32 = 42;
     errdefer x = 0;
-    _ = x;
-    return;
+    std.debug.print("{d}\n", .{x});
 }

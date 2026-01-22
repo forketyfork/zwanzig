@@ -1,8 +1,9 @@
 const std = @import("std");
-const Source = @import("../src/source.zig").Source;
-const Diagnostic = @import("../src/diagnostic.zig").Diagnostic;
-const Severity = @import("../src/diagnostic.zig").Severity;
-const Rule = @import("../src/rule.zig").Rule;
+const src = @import("src");
+const Source = src.Source;
+const Diagnostic = src.Diagnostic;
+const Severity = src.Severity;
+const Rule = src.Rule;
 
 /// Expected diagnostic parsed from fixture comments.
 /// All fields are optional - only specified fields will be checked.
@@ -221,7 +222,7 @@ pub fn runFixturesInDir(
         const file = try dir.openFile(entry.name, .{});
         defer file.close();
 
-        const content = try file.readToEndAllocOptions(allocator, 1024 * 1024, null, @alignOf(u8), 0);
+        const content = try file.readToEndAllocOptions(allocator, 1024 * 1024, null, .@"1", 0);
         defer allocator.free(content);
 
         try runFixture(allocator, rule, fixture_path, content);

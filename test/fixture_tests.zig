@@ -2,15 +2,16 @@ const std = @import("std");
 const fixture_runner = @import("fixture_runner.zig");
 const runFixturesInDir = fixture_runner.runFixturesInDir;
 
-// Import all rules
-const EmptyCatchRule = @import("../src/rules/empty_catch.zig").EmptyCatchRule;
-const DupeImportRule = @import("../src/rules/dupe_import.zig").DupeImportRule;
-const TodoCommentRule = @import("../src/rules/todo_comment.zig").TodoCommentRule;
-const EmptyErrdeferRule = @import("../src/rules/empty_errdefer.zig").EmptyErrdeferRule;
-const EmptyDeferRule = @import("../src/rules/empty_defer.zig").EmptyDeferRule;
-const UnreachableCodeRule = @import("../src/rules/unreachable_code.zig").UnreachableCodeRule;
-const FileAsStructRule = @import("../src/rules/file_as_struct.zig").FileAsStructRule;
-const UnusedDeclRule = @import("../src/rules/unused_decl.zig").UnusedDeclRule;
+// Import all rules from the src module
+const src = @import("src");
+const EmptyCatchRule = src.rules.empty_catch.EmptyCatchRule;
+const DupeImportRule = src.rules.dupe_import.DupeImportRule;
+const TodoCommentRule = src.rules.todo_comment.TodoCommentRule;
+const EmptyErrdeferRule = src.rules.empty_errdefer.EmptyErrdeferRule;
+const EmptyDeferRule = src.rules.empty_defer.EmptyDeferRule;
+const UnreachableCodeRule = src.rules.unreachable_code.UnreachableCodeRule;
+const FileAsStructRule = src.rules.file_as_struct.FileAsStructRule;
+const UnusedDeclRule = src.rules.unused_decl.UnusedDeclRule;
 
 test "empty_catch fixtures" {
     try runFixturesInDir(std.testing.allocator, &EmptyCatchRule.rule, "test/fixtures/empty_catch");

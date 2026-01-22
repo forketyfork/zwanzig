@@ -11,6 +11,6 @@ fn anotherFunc() !void {
 
 const x = tryFunc() catch {};
 const y = anotherFunc() catch {
-    return;
+    @panic("error");
 };
 const z = tryFunc() catch {};
