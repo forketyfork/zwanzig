@@ -118,7 +118,7 @@ pub const DupeImportRule = struct {
             const ident_idx = nextNonCommentToken(token_tags, current_idx + 1) orelse break;
             if (token_tags[ident_idx] != .identifier) break;
 
-            const field_name = tree.tokenSlice(@intCast(ident_idx));
+            const field_name = normalizeIdentifier(tree.tokenSlice(@intCast(ident_idx)));
             try fields.append(allocator, field_name);
 
             idx = nextNonCommentToken(token_tags, ident_idx + 1);
@@ -147,6 +147,15 @@ pub const DupeImportRule = struct {
         }
 
         return key;
+    }
+
+    /// Normalize an identifier by stripping the @"..." wrapper if present.
+    /// In Zig, @"foo" and foo refer to the same identifier.
+    fn normalizeIdentifier(ident: []const u8) []const u8 {
+        if (ident.len >= 3 and std.mem.startsWith(u8, ident, "@\"") and ident[ident.len - 1] == '"') {
+            return ident[2 .. ident.len - 1];
+        }
+        return ident;
     }
 
     fn nextNonCommentToken(token_tags: []const std.zig.Token.Tag, start: usize) ?usize {
