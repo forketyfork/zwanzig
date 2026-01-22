@@ -4,6 +4,7 @@ const RuleError = @import("../rule.zig").RuleError;
 const Diagnostic = @import("../rule.zig").Diagnostic;
 const Severity = @import("../rule.zig").Severity;
 const Source = @import("../source.zig").Source;
+const log = std.log.scoped(.dupe_import);
 
 /// Rule that detects duplicate @import statements in Zig code.
 /// Duplicate imports can indicate copy-paste errors or redundant code.
@@ -50,6 +51,8 @@ pub const DupeImportRule = struct {
                 const builtin_name = tree.tokenSlice(@intCast(i));
 
                 if (std.mem.eql(u8, builtin_name, "@import")) {
+                    if (isDiscardImport(token_tags, tree, i)) continue;
+
                     const l_paren_idx = nextNonCommentToken(token_tags, i + 1) orelse continue;
                     if (token_tags[l_paren_idx] != .l_paren) continue;
 
@@ -63,7 +66,10 @@ pub const DupeImportRule = struct {
                     const import_path = getStringLiteralContent(content, string_start);
 
                     // Build full import key including field access chain
-                    const full_key = buildImportKey(allocator, tree, token_tags, r_paren_idx, import_path) catch continue;
+                    const full_key = buildImportKey(allocator, tree, token_tags, r_paren_idx, import_path) catch |err| {
+                        log.debug("failed to build import key for '{s}': {}", .{ import_path, err });
+                        continue;
+                    };
                     const key_is_allocated = full_key.ptr != import_path.ptr;
 
                     if (seen_imports.get(full_key)) |_| {
@@ -168,6 +174,30 @@ pub const DupeImportRule = struct {
             idx += 1;
         }
         return null;
+    }
+
+    fn prevNonCommentToken(token_tags: []const std.zig.Token.Tag, start: usize) ?usize {
+        if (start == 0) return null;
+        var idx = start - 1;
+        while (true) {
+            const tag = token_tags[idx];
+            if (tag != .container_doc_comment and tag != .doc_comment) {
+                return idx;
+            }
+            if (idx == 0) return null;
+            idx -= 1;
+        }
+    }
+
+    fn isDiscardImport(token_tags: []const std.zig.Token.Tag, tree: *const std.zig.Ast, import_idx: usize) bool {
+        const equal_idx = prevNonCommentToken(token_tags, import_idx) orelse return false;
+        if (token_tags[equal_idx] != .equal) return false;
+
+        const ident_idx = prevNonCommentToken(token_tags, equal_idx) orelse return false;
+        if (token_tags[ident_idx] != .identifier) return false;
+
+        const ident = tree.tokenSlice(@intCast(ident_idx));
+        return std.mem.eql(u8, ident, "_");
     }
 
     fn getStringLiteralContent(content: []const u8, start: usize) []const u8 {

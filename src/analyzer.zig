@@ -12,6 +12,7 @@ const cache_mod = @import("cache.zig");
 const Cache = cache_mod.Cache;
 const CacheKey = cache_mod.CacheKey;
 const log = std.log.scoped(.analyzer);
+const diagnostic_mod = @import("diagnostic.zig");
 
 pub const Analyzer = struct {
     allocator: std.mem.Allocator,
@@ -355,6 +356,9 @@ pub const Analyzer = struct {
 test "Analyzer JSON output format" {
     const testing = std.testing;
     const allocator = testing.allocator;
+    const diagnostic = diagnostic_mod;
+    const Location = diagnostic.Location;
+    const SourceRange = diagnostic.SourceRange;
 
     var analyzer = Analyzer.init(allocator);
     defer analyzer.deinit();
@@ -365,10 +369,7 @@ test "Analyzer JSON output format" {
         "test-rule",
         .err,
         "Test error",
-        @import("diagnostic.zig").SourceRange.init(
-            @import("diagnostic.zig").Location.init(1, 1),
-            @import("diagnostic.zig").Location.init(1, 5),
-        ),
+        SourceRange.init(Location.init(1, 1), Location.init(1, 5)),
     );
 
     const diag2 = try Diagnostic.init(
@@ -377,10 +378,7 @@ test "Analyzer JSON output format" {
         "other-rule",
         .warning,
         "Test warning",
-        @import("diagnostic.zig").SourceRange.init(
-            @import("diagnostic.zig").Location.init(2, 3),
-            @import("diagnostic.zig").Location.init(2, 8),
-        ),
+        SourceRange.init(Location.init(2, 3), Location.init(2, 8)),
     );
 
     try analyzer.diagnostics.append(allocator, diag1);
@@ -402,6 +400,9 @@ test "Analyzer JSON output format" {
 test "Analyzer text output format" {
     const testing = std.testing;
     const allocator = testing.allocator;
+    const diagnostic = diagnostic_mod;
+    const Location = diagnostic.Location;
+    const SourceRange = diagnostic.SourceRange;
 
     var analyzer = Analyzer.init(allocator);
     defer analyzer.deinit();
@@ -412,10 +413,7 @@ test "Analyzer text output format" {
         "test-rule",
         .err,
         "Test error",
-        @import("diagnostic.zig").SourceRange.init(
-            @import("diagnostic.zig").Location.init(1, 1),
-            @import("diagnostic.zig").Location.init(1, 5),
-        ),
+        SourceRange.init(Location.init(1, 1), Location.init(1, 5)),
     );
 
     try analyzer.diagnostics.append(allocator, diag);
@@ -432,6 +430,9 @@ test "Analyzer text output format" {
 test "Analyzer SARIF output format" {
     const testing = std.testing;
     const allocator = testing.allocator;
+    const diagnostic = diagnostic_mod;
+    const Location = diagnostic.Location;
+    const SourceRange = diagnostic.SourceRange;
 
     var analyzer = Analyzer.init(allocator);
     defer analyzer.deinit();
@@ -442,10 +443,7 @@ test "Analyzer SARIF output format" {
         "test-rule",
         .err,
         "Test error",
-        @import("diagnostic.zig").SourceRange.init(
-            @import("diagnostic.zig").Location.init(1, 1),
-            @import("diagnostic.zig").Location.init(1, 5),
-        ),
+        SourceRange.init(Location.init(1, 1), Location.init(1, 5)),
     );
 
     const diag2 = try Diagnostic.init(
@@ -454,10 +452,7 @@ test "Analyzer SARIF output format" {
         "other-rule",
         .warning,
         "Test warning",
-        @import("diagnostic.zig").SourceRange.init(
-            @import("diagnostic.zig").Location.init(2, 3),
-            @import("diagnostic.zig").Location.init(2, 8),
-        ),
+        SourceRange.init(Location.init(2, 3), Location.init(2, 8)),
     );
 
     try analyzer.diagnostics.append(allocator, diag1);
