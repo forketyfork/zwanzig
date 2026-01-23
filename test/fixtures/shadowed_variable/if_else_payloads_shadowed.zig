@@ -1,5 +1,5 @@
 // Test: if-else error and optional payloads shadowed
-// EXPECT: line=7 col=15 rule=shadowed-variable message=shadows
+// EXPECT: line=9 col=15 rule=shadowed-variable message=shadows
 fn mayFail() !?i32 {
     return 42;
 }

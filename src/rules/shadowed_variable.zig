@@ -598,7 +598,17 @@ pub const ShadowedVariableRule = struct {
                 else => return,
             };
 
-            // Containers have their own isolated scope
+            // Containers have their own isolated scope - save and replace the scope stack
+            const saved_stack = self.scope_stack;
+            self.scope_stack = .empty;
+            defer {
+                for (self.scope_stack.items) |*scope| {
+                    scope.deinit(self.allocator);
+                }
+                self.scope_stack.deinit(self.allocator);
+                self.scope_stack = saved_stack;
+            }
+
             try self.pushScope();
             defer self.popScope();
 

@@ -1,5 +1,5 @@
 // Test: switch capture payload shadowed by inner declaration
-// EXPECT: line=8 col=19 rule=shadowed-variable message=shadows
+// EXPECT: line=9 col=19 rule=shadowed-variable message=shadows
 const Tag = enum { a, b };
 const Data = union(Tag) { a: i32, b: void };
 

@@ -1,5 +1,5 @@
 // Test: var shadowing var
-// EXPECT: line=5 col=13 rule=shadowed-variable message=shadows
+// EXPECT: line=6 col=13 rule=shadowed-variable message=shadows
 fn foo() void {
     var x: i32 = 1;
     {
