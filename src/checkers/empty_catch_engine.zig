@@ -3,7 +3,6 @@ const checker_mod = @import("../checker.zig");
 const Checker = checker_mod.Checker;
 const CheckerError = checker_mod.CheckerError;
 const Diagnostic = checker_mod.Diagnostic;
-const Severity = checker_mod.Severity;
 const Source = @import("../source.zig").Source;
 const ids = @import("../ids.zig");
 const cfg_mod = @import("../cfg.zig");

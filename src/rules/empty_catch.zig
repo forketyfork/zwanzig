@@ -2,8 +2,6 @@ const std = @import("std");
 const Rule = @import("../rule.zig").Rule;
 const RuleError = @import("../rule.zig").RuleError;
 const Diagnostic = @import("../rule.zig").Diagnostic;
-const Severity = @import("../rule.zig").Severity;
-const SourceRange = @import("../rule.zig").SourceRange;
 const Source = @import("../source.zig").Source;
 
 /// Rule that detects empty catch blocks in Zig code using AST traversal.

@@ -24,6 +24,14 @@ just lint     # Format check + shellcheck
 just ci       # Full CI: build + test + lint
 ```
 
+## Requirements
+
+For any code changes, run both tests and linting:
+- `just test`
+- `just lint`
+
+`just lint` also runs zwanzig on its own code. All issues should be fixed before submitting changes. If this is complicated or not possible, ask the user.
+
 ## Development Environment
 
 Uses Nix flakes for reproducible dev environment (Zig 0.15.2). Enter with:
@@ -34,22 +42,26 @@ nix develop
 ## Architecture
 
 ### Data Flow
-1. `main.zig` parses CLI args and registers rules with `Analyzer`
-2. `Analyzer` reads files, creates `Source` objects, runs enabled rules
-3. Rules receive `Source` and append `Violation`s to a shared list
-4. Analyzer reports results and exits with code 1 if violations found
+1. `main.zig` parses CLI args and registers rules/checkers with `Analyzer`
+2. `Analyzer` reads files, creates `Source` objects, runs enabled rules and checkers
+3. Rules/checkers receive `Source` and append `Diagnostic`s to a shared list
+4. Analyzer reports results and exits with code 1 if diagnostics found
 
 ### Key Types
 - **`Source`** (`src/source.zig`): Lazy-parsed source with cached AST. Call `ast()` or `tokens()` to parse on demand; subsequent calls return cached result.
-- **`Rule`** (`src/rule.zig`): Interface with `name` and `checkFn`. Rules implement `check(source, allocator, violations)`.
-- **`Analyzer`** (`src/analyzer.zig`): Orchestrates file reading, rule execution, result collection.
-- **`Violation`**: Diagnostic with file path, line/column, rule name, message.
+- **`Rule`** (`src/rule.zig`): Interface with `name` and `checkFn`. Rules implement `check(source, allocator, diagnostics)`.
+- **`Checker`** (`src/checker.zig`): Engine-based interface with `checkAstFn`. Checkers use CFG and analysis engine for sophisticated analysis.
+- **`Analyzer`** (`src/analyzer.zig`): Orchestrates file reading, rule/checker execution, result collection.
+- **`Diagnostic`**: Issue report with file path, line/column, rule name, severity, and message.
 
 ### Adding a New Rule
 
 1. Create `src/rules/my_rule.zig`:
 ```zig
+const std = @import("std");
 const Rule = @import("../rule.zig").Rule;
+const RuleError = @import("../rule.zig").RuleError;
+const Diagnostic = @import("../rule.zig").Diagnostic;
 const Source = @import("../source.zig").Source;
 
 pub const MyRule = struct {
@@ -58,9 +70,11 @@ pub const MyRule = struct {
         .checkFn = check,
     };
 
-    fn check(src: *Source, allocator: std.mem.Allocator, violations: *std.ArrayList(Violation)) RuleError!void {
+    fn check(src: *Source, allocator: std.mem.Allocator, diagnostics: *std.ArrayList(Diagnostic)) RuleError!void {
         const ast = try src.ast();  // Lazy parse, cached
         // Analysis logic...
+        _ = allocator;
+        _ = ast;
     }
 };
 ```
@@ -69,6 +83,8 @@ pub const MyRule = struct {
 ```zig
 try analyzer.registerRule(&MyRule.rule);
 ```
+
+For engine-based checkers (CFG analysis), see `src/checkers/` directory.
 
 ### CLI Flags
 - `--do <rule>`: Run only specified rules (allowlist, repeatable)

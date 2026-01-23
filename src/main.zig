@@ -2,7 +2,6 @@ const std = @import("std");
 const analyzer_mod = @import("analyzer.zig");
 const Analyzer = analyzer_mod.Analyzer;
 const OutputFormat = analyzer_mod.Analyzer.OutputFormat;
-const Rule = @import("rule.zig").Rule;
 const DupeImportRule = @import("rules/dupe_import.zig").DupeImportRule;
 const TodoCommentRule = @import("rules/todo_comment.zig").TodoCommentRule;
 const FileAsStructRule = @import("rules/file_as_struct.zig").FileAsStructRule;
@@ -18,7 +17,6 @@ const build_metadata = @import("build_metadata.zig");
 const BuildMetadata = build_metadata.BuildMetadata;
 const TargetConfig = build_metadata.TargetConfig;
 const config = @import("config.zig");
-const Config = config.Config;
 const build_options = @import("build_options");
 
 pub const std_options = std.Options{
