@@ -23,7 +23,6 @@ check_file "build.zig"
 check_file "src/main.zig"
 check_file "src/analyzer.zig"
 check_file "src/rule.zig"
-check_file "src/rules/empty_catch.zig"
 check_file "examples/bad_example.zig"
 check_file "examples/good_example.zig"
 check_file "README.md"
@@ -34,8 +33,7 @@ echo "Checking code structure..."
 
 # Check if main.zig imports required modules
 if grep -q "const Analyzer = @import" src/main.zig && \
-   grep -q "const Rule = @import" src/main.zig && \
-   grep -q "const EmptyCatchRule = @import" src/main.zig; then
+   grep -q "const Rule = @import" src/main.zig; then
     echo "✓ main.zig has required imports"
 else
     echo "✗ main.zig missing required imports"
@@ -47,22 +45,6 @@ if grep -q "registerRule" src/analyzer.zig; then
     echo "✓ analyzer.zig has rule registration"
 else
     echo "✗ analyzer.zig missing rule registration"
-    ERRORS=$((ERRORS + 1))
-fi
-
-# Check if empty_catch rule implements check function
-if grep -q 'fn check(source: \[\]const u8' src/rules/empty_catch.zig; then
-    echo "✓ empty_catch.zig implements check function"
-else
-    echo "✗ empty_catch.zig missing check function"
-    ERRORS=$((ERRORS + 1))
-fi
-
-# Check if empty_catch has tests
-if grep -q "test \"empty catch block detection\"" src/rules/empty_catch.zig; then
-    echo "✓ empty_catch.zig has unit tests"
-else
-    echo "✗ empty_catch.zig missing unit tests"
     ERRORS=$((ERRORS + 1))
 fi
 

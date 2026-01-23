@@ -1,59 +1,43 @@
 # Contributing to Zwanzig
 
-Thank you for your interest in contributing to Zwanzig, a static analyzer for Zig code!
+## Getting started
 
-## Getting Started
-
-### Prerequisites
-
-- Zig 0.11.0 or later
-- Git
-
-### Building
+You'll need Zig 0.11.0 or later and Git.
 
 ```bash
 git clone https://github.com/forketyfork/zwanzig.git
 cd zwanzig
 zig build
-```
-
-### Running Tests
-
-```bash
 zig build test
 ```
 
-### Project Structure
+## Project layout
 
 ```
 zwanzig/
 ├── src/
 │   ├── main.zig           # CLI entry point
-│   ├── analyzer.zig       # Core analyzer engine
+│   ├── analyzer.zig       # Analysis engine
 │   ├── rule.zig           # Rule interface
-│   └── rules/
-│       └── empty_catch.zig # Empty catch block rule
+│   └── rules/             # Rule implementations
 ├── examples/
-│   ├── bad_example.zig    # Code with violations
-│   └── good_example.zig   # Proper error handling
-├── build.zig              # Build configuration
+│   ├── bad_example.zig
+│   └── good_example.zig
+├── build.zig
 └── README.md
 ```
 
-## Adding a New Rule
+## Adding a new rule
 
-Follow these steps to add a new linting rule:
+### 1. Create the rule file
 
-### 1. Create the Rule File
-
-Create a new file in `src/rules/` (e.g., `src/rules/my_rule.zig`):
+Create `src/rules/my_rule.zig`:
 
 ```zig
 const std = @import("std");
 const Rule = @import("../rule.zig").Rule;
 const Violation = @import("../rule.zig").Violation;
 
-/// Description of what your rule checks
 pub const MyRule = struct {
     pub const rule: Rule = Rule{
         .name = "my-rule-name",
@@ -65,10 +49,8 @@ pub const MyRule = struct {
         file_path: []const u8,
         violations: *std.ArrayList(Violation)
     ) !void {
-        // Your rule implementation here
-        // Parse the source code and detect violations
-        
-        // Example: Report a violation
+        // Parse source and detect problems
+
         try violations.append(Violation{
             .file_path = file_path,
             .line = 10,
@@ -79,7 +61,6 @@ pub const MyRule = struct {
     }
 };
 
-// Add unit tests
 test "my rule detects violations" {
     const testing = std.testing;
     const allocator = testing.allocator;
@@ -89,82 +70,67 @@ test "my rule detects violations" {
 
     const code = "// test code here";
     try MyRule.rule.check(code, "test.zig", &violations);
-    
+
     try testing.expectEqual(@as(usize, 1), violations.items.len);
 }
 ```
 
-### 2. Register the Rule
+### 2. Register the rule
 
-Update `src/main.zig` to import and register your rule:
+In `src/main.zig`:
 
 ```zig
 const MyRule = @import("rules/my_rule.zig").MyRule;
 
-// In main() function, after analyzer initialization:
+// In main(), after analyzer init:
 try analyzer.registerRule(&MyRule.rule);
 ```
 
-### 3. Add Tests
+### 3. Add tests
 
-Make sure your rule includes comprehensive unit tests covering:
-- Cases that should trigger violations
-- Cases that should NOT trigger violations
-- Edge cases
+Cover these cases:
+- Code that should trigger violations
+- Code that should pass
+- Edge cases (empty files, malformed code)
 
-### 4. Add Examples
+### 4. Add examples
 
-Create example files in the `examples/` directory showing:
-- Bad patterns your rule detects
-- Good patterns that avoid violations
+Create files in `examples/` showing bad patterns your rule catches and the corrected versions.
 
-### 5. Update Documentation
+### 5. Update the README
 
-Update the README.md to document your new rule:
-- What it checks for
-- Why it matters
-- Bad example
-- Good example
+Document what your rule checks, why it matters, and show before/after examples.
 
-## Code Style
+## Code style
 
-- Follow standard Zig formatting (`zig fmt`)
-- Write clear, descriptive comments
-- Include doc comments for public functions
-- Keep functions focused and single-purpose
+- Run `zig fmt` before committing
+- Write self-documenting code; use comments sparingly
+- Keep functions small and focused
 
-## Testing Guidelines
+## Testing
 
-- All rules must have unit tests
-- Test both positive and negative cases
-- Use descriptive test names
-- Clean up resources properly
+All rules need tests. Put them in the same file as the rule implementation using Zig's `test` blocks.
 
-## Pull Request Process
+## Pull requests
 
-1. Fork the repository
-2. Create a feature branch (`git checkout -b feature/my-rule`)
-3. Make your changes
-4. Run tests (`zig build test`)
-5. Format code (`zig fmt src/`)
-6. Commit with clear messages
-7. Push to your fork
-8. Open a Pull Request
+1. Fork the repo
+2. Create a branch (`git checkout -b feature/my-rule`)
+3. Make changes
+4. Run `zig build test` and `zig fmt src/`
+5. Commit with a clear message
+6. Open a PR
 
-## Rule Design Principles
+## What makes a good rule
 
-Good rules should be:
+- Low false positive rate
+- Clear, actionable error messages
+- Detects real problems, not style preferences
+- Fast enough to run on every file
 
-1. **Actionable**: Clearly explain what's wrong and how to fix it
-2. **Accurate**: Minimize false positives
-3. **Performant**: Analyze efficiently
-4. **Well-documented**: Include examples and rationale
-5. **Testable**: Have comprehensive test coverage
+## Questions
 
-## Questions?
-
-Open an issue on GitHub or start a discussion.
+Open an issue on GitHub.
 
 ## License
 
-By contributing, you agree that your contributions will be licensed under the MIT License.
+Contributions are MIT-licensed.

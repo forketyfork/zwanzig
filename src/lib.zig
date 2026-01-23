@@ -8,7 +8,6 @@ pub const Severity = diagnostic.Severity;
 pub const Rule = rule.Rule;
 
 pub const rules = struct {
-    pub const empty_catch = @import("rules/empty_catch.zig");
     pub const dupe_import = @import("rules/dupe_import.zig");
     pub const todo_comment = @import("rules/todo_comment.zig");
     pub const empty_errdefer = @import("rules/empty_errdefer.zig");

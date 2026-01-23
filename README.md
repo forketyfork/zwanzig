@@ -4,15 +4,15 @@ A static analyzer and linter for Zig code.
 
 ## Features
 
-- **Extensible Architecture**: Easy to add new rules and checks
-- **Fast Analysis**: Efficient source code scanning
-- **Structured Diagnostics**: Rich diagnostic output with severity levels, source ranges, and rule identifiers
+- Adding new rules takes one file and one line of registration code
+- Lazy parsing and caching keep analysis fast
+- Diagnostics include severity, precise locations, and rule IDs
 
 ## Implemented Rules
 
 ### dupe-import
 
-Detects duplicate `@import` statements in Zig code. Duplicate imports can indicate copy-paste errors or redundant code. The rule scans tokens to find `@import("...")` patterns and reports when the same module is imported multiple times.
+Flags duplicate `@import` statements. These often signal copy-paste mistakes or forgotten refactoring.
 
 **Bad:**
 ```zig
@@ -28,7 +28,7 @@ const mem = std.mem;  // Use the already imported std
 
 ### todo
 
-Detects `// TODO` comments in Zig code. TODO comments indicate unfinished work that should be tracked. This rule helps identify and track incomplete tasks in the codebase.
+Finds `// TODO` comments so you can track unfinished work.
 
 **Example:**
 ```zig
@@ -38,11 +38,11 @@ fn processData(data: []const u8) void {
 }
 ```
 
-This will produce a hint-level diagnostic pointing to the TODO comment with its message.
+This produces a hint pointing to the TODO with its message.
 
 ### file-as-struct
 
-Enforces file naming conventions based on whether the file contains top-level fields (i.e., acts as a struct). In Zig, a file can act as an implicit struct by having top-level fields. This rule enforces the convention that:
+Enforces naming conventions based on whether a file acts as a struct (has top-level fields):
 
 - Files with top-level fields should have a capitalized file name (e.g., `MyType.zig`)
 - Files without top-level fields should have a lowercase file name (e.g., `utils.zig`)
@@ -91,9 +91,9 @@ pub fn helper() void {
 
 ### unused-decl
 
-Detects unused container-level `const`, `var`, and `fn` declarations that are not exported (`pub`). Declarations that are never referenced elsewhere in the file are reported as warnings.
+Detects unused container-level `const`, `var`, and `fn` declarations that aren't exported.
 
-The rule uses a conservative approach:
+The check is conservative:
 - Exported (`pub`) declarations are ignored (they may be used externally)
 - Underscore-prefixed names (e.g., `_unused`) are ignored (explicit opt-out)
 - Special names like `main` and `panic` are ignored (entry points)
@@ -123,7 +123,7 @@ pub fn main() void {
 
 ### unreachable-code
 
-Detects unreachable code using control-flow graph (CFG) analysis. Code is unreachable when no feasible execution path leads to it. This uses the symbolic execution engine to detect code that can never execute.
+Detects code that can never execute using control-flow graph analysis.
 
 **Bad:**
 ```zig
@@ -159,7 +159,7 @@ fn bar(x: i32) void {
 
 ### empty-defer
 
-Detects empty `defer {}` blocks using AST analysis. Empty defer blocks serve no purpose and clutter the code.
+Flags empty `defer {}` blocks that serve no purpose.
 
 **Bad:**
 ```zig
@@ -178,7 +178,7 @@ fn foo() !void {
 
 ### empty-errdefer
 
-Detects empty `errdefer {}` blocks using AST analysis. Empty errdefer blocks serve no purpose and should be removed.
+Flags empty `errdefer {}` blocks that don't clean up anything.
 
 **Bad:**
 ```zig
@@ -199,11 +199,11 @@ fn foo() !void {
 
 ## Engine-based Checkers
 
-Engine-based checkers use CFG (control-flow graph) analysis for more sophisticated detection patterns.
+These checkers use control-flow graph analysis for deeper inspection.
 
 ### empty-catch-engine
 
-Detects empty `catch {}` blocks using control-flow analysis. Empty catch blocks silently ignore errors, which is often a code smell that can hide bugs.
+Detects empty `catch {}` blocks that silently swallow errors.
 
 **Bad:**
 ```zig
@@ -220,12 +220,12 @@ const file = std.fs.cwd().openFile("test.txt", .{}) catch |err| {
 
 ### swallowed-error
 
-Engine-based checker that detects catch blocks that swallow errors without proper handling. An error is considered "swallowed" when the catch handler:
+Detects catch blocks that ignore errors without rethrowing or logging. An error is "swallowed" when the handler:
 
 - Has a non-empty body (not just `catch {}`)
-- Does NOT rethrow the error
-- Does NOT log the error (no function calls)
-- Simply ignores the error and continues execution
+- Doesn't rethrow the error
+- Doesn't call any functions (potential logging)
+- Simply continues execution
 
 **Bad:**
 ```zig
@@ -265,14 +265,13 @@ zig build
 
 ## Usage
 
-Analyze the current directory (recursively discovers all `.zig` files):
+Run on the current directory (discovers `.zig` files recursively):
 
 ```bash
-zig build run
 zwanzig
 ```
 
-Analyze specific files or directories:
+Or specify files and directories:
 
 ```bash
 # Single file
@@ -293,7 +292,7 @@ zwanzig --file src --file tests
 
 ### File Discovery
 
-When no paths are specified, zwanzig walks the current directory and discovers all `.zig` files. The following directories are automatically ignored:
+Without arguments, zwanzig scans the current directory for `.zig` files. These directories are skipped:
 
 - `zig-cache/`
 - `zig-out/`
@@ -302,7 +301,7 @@ When no paths are specified, zwanzig walks the current directory and discovers a
 
 ### Rule Selection
 
-By default, all rules are run. You can control which rules run using the `--do` and `--skip` flags or a configuration file.
+All rules run by default. Control which rules run with `--do` / `--skip` flags or a config file.
 
 **Run only specific rules (allowlist):**
 
@@ -328,7 +327,7 @@ Note: `--do` and `--skip` are mutually exclusive and cannot be used together.
 
 ### Configuration File
 
-Zwanzig supports a `.zwanzig.json` configuration file for persistent rule configuration. The config file is automatically loaded from the current directory if it exists, or you can specify a custom path with `--config`.
+Create `.zwanzig.json` for persistent settings. It's loaded automatically from the current directory, or specify a path with `--config`.
 
 **Example `.zwanzig.json`:**
 
@@ -366,7 +365,7 @@ zwanzig --config path/to/custom.json src/
 
 ### Target Configuration
 
-Specify the target platform for analysis using the `--target` flag:
+Specify a target platform with `--target`:
 
 ```bash
 # Analyze for Linux x86_64
@@ -382,31 +381,25 @@ zwanzig --target wasm32-wasi src/
 zwanzig --target aarch64-freestanding src/
 ```
 
-When no target is specified, the analyzer uses the native host target configuration. Target configuration enables platform-specific analysis and rules.
+Without `--target`, the native host configuration is used.
 
 ### Incremental Caching
 
-Enable incremental caching to improve performance on repeated runs:
+Speed up repeated runs with `--cache`:
 
 ```bash
 zwanzig --cache src/
 ```
 
-The cache is stored in `.zwanzig-cache/` in the current directory. The cache is keyed by both file content hash and target configuration, ensuring correctness across different build configurations.
+Cache lives in `.zwanzig-cache/`. It's keyed by file content hash and target, so it invalidates automatically when either changes.
 
-**Cache behavior:**
-- Files that haven't changed since the last run are skipped
-- Cache invalidates automatically when file content changes
-- Cache invalidates automatically when target configuration changes
-- Cache is stored per (file, target) pair
-
-**Note:** Add `.zwanzig-cache/` to your `.gitignore` to avoid committing cache files.
+**Tip:** Add `.zwanzig-cache/` to `.gitignore`.
 
 ### Output Formats
 
-Zwanzig supports multiple output formats for diagnostics. Use the `--format` flag to specify the desired format.
+Use `--format` to choose the output style.
 
-**Text format (default):**
+**Text (default):**
 
 ```bash
 zwanzig --format text src/
@@ -421,13 +414,13 @@ src/main.zig:10:5: error: [empty-catch] Empty catch block detected
 src/utils.zig:23:1: warning: [unused-decl] Unused declaration: helper
 ```
 
-**JSON format:**
+**JSON:**
 
 ```bash
 zwanzig --format json src/
 ```
 
-Output example:
+Example:
 ```json
 {
   "diagnostics": [
@@ -456,27 +449,15 @@ Output example:
 }
 ```
 
-JSON output is useful for integration with other tools, CI/CD pipelines, and automated analysis workflows.
+JSON works well with CI pipelines and editor integrations.
 
-**SARIF format:**
+**SARIF:**
 
 ```bash
 zwanzig --format sarif src/
 ```
 
-Output follows the [SARIF 2.1.0 specification](https://docs.oasis-open.org/sarif/sarif/v2.1.0/sarif-v2.1.0.html), which is an industry-standard format for static analysis results. SARIF output is ideal for integration with code review tools, security scanners, and IDEs that support SARIF.
-
-SARIF output includes:
-- Tool information and version
-- Rule metadata
-- Detailed location information with artifact URIs
-- Standardized severity levels (note, warning, error)
-
-SARIF format is particularly useful for:
-- GitHub Advanced Security and code scanning workflows
-- Visual Studio Code with SARIF extension
-- SonarQube and other code quality platforms
-- Integration with security scanning pipelines
+[SARIF 2.1.0](https://docs.oasis-open.org/sarif/sarif/v2.1.0/sarif-v2.1.0.html) format, supported by GitHub code scanning, VS Code's SARIF extension, and SonarQube.
 
 ## Testing
 
@@ -492,51 +473,37 @@ See the `examples/` directory for sample code demonstrating both violations and 
 
 ## Architecture
 
-The analyzer is built with extensibility and performance in mind:
+The main components:
 
-- **`source.zig`**: Source parsing cache that provides lazy, cached access to AST, tokens, and location mapping
-- **`diagnostic.zig`**: Structured diagnostic model with severity levels and source ranges
-- **`analyzer.zig`**: Core analysis engine that coordinates file reading, rule, and checker execution
-- **`rule.zig`**: Base rule interface for AST-based checks
-- **`checker.zig`**: Engine-based checker interface for CFG/dataflow analysis
-- **`rules/`**: Directory containing individual rule implementations
-- **`checkers/`**: Directory containing engine-based checker implementations
-- **`cfg.zig`**: Control-flow graph builder for checkers
-- **`engine.zig`**: Analysis engine for symbolic execution
-- **`file_discovery.zig`**: Recursive file discovery with ignore filters
-- **`main.zig`**: CLI interface and rule/checker registration
+- `source.zig` - Lazy AST/token parsing with caching
+- `diagnostic.zig` - Diagnostic model with severity and locations
+- `analyzer.zig` - File reading and rule/checker execution
+- `rule.zig` - Rule interface for AST-based checks
+- `checker.zig` - Checker interface for CFG/dataflow analysis
+- `rules/` - Individual rule implementations
+- `checkers/` - Engine-based checker implementations
+- `cfg.zig` - Control-flow graph builder
+- `engine.zig` - Symbolic execution engine
+- `file_discovery.zig` - Recursive file discovery
+- `main.zig` - CLI and rule registration
 
 ### Parsing Cache
 
-Zwanzig uses a smart caching strategy to avoid redundant parsing. When analyzing a file:
-
-1. The analyzer creates a `Source` object that holds the file content
-2. Rules access parsed representations (AST, tokens) through the `Source` interface
-3. Parsing happens lazily on first access and results are cached
-4. Subsequent accesses by other rules reuse the cached parse results
-
-This ensures efficient analysis even with many rules, as each file is parsed at most once.
+Parsing is lazy and cached. Each file is parsed at most once, regardless of how many rules inspect it.
 
 ### Diagnostics
 
-Zwanzig uses a structured diagnostic model for reporting issues:
+Each diagnostic includes severity (`hint`, `warning`, `err`), precise location, and the rule that found it:
 
-- **Severity**: Each diagnostic has a severity level (`hint`, `warning`, or `err`)
-- **Source Range**: Diagnostics include precise source locations with line and column information
-- **Rule ID**: Each diagnostic identifies the rule that detected the issue
-
-Output format:
 ```
-file.zig:5:10: warning: [empty-catch] Empty catch block detected.
+file.zig:5:10: warning: [empty-catch-engine] Empty catch block
 ```
 
 ## Adding New Rules
 
-To add a new rule:
-
-1. Create a new file in `src/rules/` (e.g., `my_rule.zig`)
-2. Implement the `Rule` interface with a `check` function
-3. Register the rule in `src/main.zig`
+1. Create `src/rules/my_rule.zig`
+2. Implement the `Rule` interface
+3. Register in `src/main.zig`
 
 Example:
 
@@ -548,7 +515,7 @@ const Diagnostic = @import("../rule.zig").Diagnostic;
 const Source = @import("../source.zig").Source;
 
 pub const MyRule = struct {
-    pub const rule: Rule = Rule{
+    pub const rule: Rule = .{
         .name = "my-rule",
         .checkFn = check,
     };
@@ -558,21 +525,15 @@ pub const MyRule = struct {
         allocator: std.mem.Allocator,
         diagnostics: *std.ArrayList(Diagnostic),
     ) RuleError!void {
-        // Access parsed AST for sophisticated analysis
         const ast = try src.ast();
-
-        // Or access raw source for simple text-based checks
-        const source = src.getContent();
-
-        // Your analysis logic here
+        // Analyze the AST and append to diagnostics...
         _ = allocator;
         _ = ast;
-        _ = source;
     }
 };
 ```
 
-For engine-based checkers that use CFG analysis, see `src/checkers/` for examples.
+For CFG-based checkers, see `src/checkers/` for examples.
 
 For detailed implementation guidance, see [IMPLEMENTATION.md](docs/IMPLEMENTATION.md).
 
