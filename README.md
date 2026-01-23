@@ -10,23 +10,6 @@ A static analyzer and linter for Zig code.
 
 ## Implemented Rules
 
-### empty-catch
-
-Detects empty `catch {}` blocks which silently ignore errors using AST-based analysis. This is often a code smell that can hide bugs. The rule uses the Zig parser's AST to accurately identify catch expressions and determine if their bodies are empty blocks.
-
-**Bad:**
-```zig
-const file = std.fs.cwd().openFile("test.txt", .{}) catch {};
-```
-
-**Good:**
-```zig
-const file = std.fs.cwd().openFile("test.txt", .{}) catch |err| {
-    std.debug.print("Failed to open file: {}\n", .{err});
-    return err;
-};
-```
-
 ### dupe-import
 
 Detects duplicate `@import` statements in Zig code. Duplicate imports can indicate copy-paste errors or redundant code. The rule scans tokens to find `@import("...")` patterns and reports when the same module is imported multiple times.
@@ -214,33 +197,25 @@ fn foo() !void {
 }
 ```
 
+## Engine-based Checkers
+
+Engine-based checkers use CFG (control-flow graph) analysis for more sophisticated detection patterns.
+
 ### empty-catch-engine
 
-Engine-based checker that detects empty catch blocks using CFG and symbolic execution. This checker uses control-flow analysis to identify catch expressions where the error handler body is empty (no statements).
-
-Unlike the AST-based `empty-catch` rule, this checker leverages the analysis engine's error state tracking for more accurate detection.
+Detects empty `catch {}` blocks using control-flow analysis. Empty catch blocks silently ignore errors, which is often a code smell that can hide bugs.
 
 **Bad:**
 ```zig
-fn foo() !i32 {
-    return 42;
-}
-
-fn bar() void {
-    const x = foo() catch {};  // Empty catch - error ignored
-    _ = x;
-}
+const file = std.fs.cwd().openFile("test.txt", .{}) catch {};
 ```
 
 **Good:**
 ```zig
-fn bar() i32 {
-    const x = foo() catch |err| {
-        std.debug.print("Error: {}\n", .{err});
-        return 0;
-    };
-    return x;
-}
+const file = std.fs.cwd().openFile("test.txt", .{}) catch |err| {
+    std.debug.print("Failed to open file: {}\n", .{err});
+    return err;
+};
 ```
 
 ### swallowed-error
@@ -332,21 +307,21 @@ By default, all rules are run. You can control which rules run using the `--do` 
 **Run only specific rules (allowlist):**
 
 ```bash
-# Run only the empty-catch rule
-zwanzig --do empty-catch file.zig
+# Run only the empty-catch-engine checker
+zwanzig --do empty-catch-engine file.zig
 
 # Run multiple specific rules
-zwanzig --do empty-catch --do unused-var file.zig
+zwanzig --do dupe-import --do unused-decl file.zig
 ```
 
 **Skip specific rules (blocklist):**
 
 ```bash
-# Run all rules except empty-catch
-zwanzig --skip empty-catch file.zig
+# Run all rules except todo
+zwanzig --skip todo file.zig
 
 # Skip multiple rules
-zwanzig --skip empty-catch --skip unused-var file.zig
+zwanzig --skip todo --skip unused-decl file.zig
 ```
 
 Note: `--do` and `--skip` are mutually exclusive and cannot be used together.
@@ -359,7 +334,7 @@ Zwanzig supports a `.zwanzig.json` configuration file for persistent rule config
 
 ```json
 {
-  "enabled_rules": ["empty-catch", "dupe-import", "todo"]
+  "enabled_rules": ["empty-catch-engine", "dupe-import", "todo"]
 }
 ```
 
@@ -521,11 +496,15 @@ The analyzer is built with extensibility and performance in mind:
 
 - **`source.zig`**: Source parsing cache that provides lazy, cached access to AST, tokens, and location mapping
 - **`diagnostic.zig`**: Structured diagnostic model with severity levels and source ranges
-- **`analyzer.zig`**: Core analysis engine that coordinates file reading and rule execution
-- **`rule.zig`**: Base rule interface that all checks implement
+- **`analyzer.zig`**: Core analysis engine that coordinates file reading, rule, and checker execution
+- **`rule.zig`**: Base rule interface for AST-based checks
+- **`checker.zig`**: Engine-based checker interface for CFG/dataflow analysis
 - **`rules/`**: Directory containing individual rule implementations
+- **`checkers/`**: Directory containing engine-based checker implementations
+- **`cfg.zig`**: Control-flow graph builder for checkers
+- **`engine.zig`**: Analysis engine for symbolic execution
 - **`file_discovery.zig`**: Recursive file discovery with ignore filters
-- **`main.zig`**: CLI interface and rule registration
+- **`main.zig`**: CLI interface and rule/checker registration
 
 ### Parsing Cache
 
@@ -562,6 +541,10 @@ To add a new rule:
 Example:
 
 ```zig
+const std = @import("std");
+const Rule = @import("../rule.zig").Rule;
+const RuleError = @import("../rule.zig").RuleError;
+const Diagnostic = @import("../rule.zig").Diagnostic;
 const Source = @import("../source.zig").Source;
 
 pub const MyRule = struct {
@@ -573,7 +556,7 @@ pub const MyRule = struct {
     fn check(
         src: *Source,
         allocator: std.mem.Allocator,
-        violations: *std.ArrayList(Violation),
+        diagnostics: *std.ArrayList(Diagnostic),
     ) RuleError!void {
         // Access parsed AST for sophisticated analysis
         const ast = try src.ast();
@@ -582,12 +565,18 @@ pub const MyRule = struct {
         const source = src.getContent();
 
         // Your analysis logic here
+        _ = allocator;
+        _ = ast;
+        _ = source;
     }
 };
 ```
+
+For engine-based checkers that use CFG analysis, see `src/checkers/` for examples.
 
 For detailed implementation guidance, see [IMPLEMENTATION.md](docs/IMPLEMENTATION.md).
 
 ## License
 
 MIT
+

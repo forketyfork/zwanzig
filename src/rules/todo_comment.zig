@@ -2,7 +2,6 @@ const std = @import("std");
 const Rule = @import("../rule.zig").Rule;
 const RuleError = @import("../rule.zig").RuleError;
 const Diagnostic = @import("../rule.zig").Diagnostic;
-const Severity = @import("../rule.zig").Severity;
 const Source = @import("../source.zig").Source;
 
 /// Rule that detects TODO comments in Zig code.

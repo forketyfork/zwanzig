@@ -4,7 +4,6 @@ const Source = @import("../source.zig").Source;
 const ids = @import("../ids.zig");
 
 const Cfg = graph.Cfg;
-const CfgNode = graph.CfgNode;
 const EdgeKind = graph.EdgeKind;
 const IrNode = graph.IrNode;
 const IrTag = graph.IrTag;
