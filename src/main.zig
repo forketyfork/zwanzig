@@ -18,6 +18,7 @@ const BuildMetadata = build_metadata.BuildMetadata;
 const TargetConfig = build_metadata.TargetConfig;
 const config = @import("config.zig");
 const build_options = @import("build_options");
+const log = std.log.scoped(.zwanzig);
 
 pub const std_options = std.Options{
     .log_level = @enumFromInt(@intFromEnum(build_options.log_level)),
@@ -304,6 +305,7 @@ pub fn main() !void {
         std.process.exit(1);
     };
     defer file_discovery.freeDiscoveredFiles(allocator, files);
+    log.info("discovered {d} file(s)", .{files.len});
 
     if (files.len == 0) {
         const stderr = std.fs.File.stderr().deprecatedWriter();
@@ -336,9 +338,11 @@ pub fn main() !void {
         try analyzer.enableCache();
     }
 
+    log.info("analyzing with {d} rule(s)", .{analyzer.totalCheckerCount()});
     for (files) |file_path| {
         try analyzer.analyzeFile(file_path);
     }
+    log.info("analysis complete", .{});
 
     try analyzer.printResults(cli_args.output_format);
 

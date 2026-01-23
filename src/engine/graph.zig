@@ -7,6 +7,10 @@ const EngineError = @import("base.zig").EngineError;
 const ProgramPoint = @import("state.zig").ProgramPoint;
 const ProgramState = @import("state.zig").ProgramState;
 
+/// Maximum number of unique states per program point.
+/// Beyond this, new states at the same point are dropped (widening approximation).
+const MAX_STATES_PER_POINT: u32 = 10;
+
 /// A node in the exploded graph, keyed by (ProgramPoint, ProgramState).
 pub const ExplodedNode = struct {
     /// The program point (CFG location)
@@ -58,6 +62,8 @@ pub const ExplodedGraph = struct {
     node_map: std.AutoHashMap(u64, u32),
     /// Reference to the CFG being analyzed
     cfg: *const Cfg,
+    /// Count of states per program point (for widening)
+    point_state_counts: std.AutoHashMap(u64, u32),
 
     pub fn init(allocator: std.mem.Allocator, cfg: *const Cfg) ExplodedGraph {
         return .{
@@ -65,6 +71,7 @@ pub const ExplodedGraph = struct {
             .nodes = .empty,
             .node_map = std.AutoHashMap(u64, u32).init(allocator),
             .cfg = cfg,
+            .point_state_counts = std.AutoHashMap(u64, u32).init(allocator),
         };
     }
 
@@ -74,6 +81,7 @@ pub const ExplodedGraph = struct {
         }
         self.nodes.deinit(self.allocator);
         self.node_map.deinit();
+        self.point_state_counts.deinit();
     }
 
     /// Get or create a node for the given point and state.
@@ -86,11 +94,21 @@ pub const ExplodedGraph = struct {
             return .{ .index = existing_index, .is_new = false };
         }
 
+        // Check per-point state limit (widening approximation)
+        const point_key = point.hash();
+        const current_count = self.point_state_counts.get(point_key) orelse 0;
+        if (current_count >= MAX_STATES_PER_POINT) {
+            // Too many states at this point - approximate by not exploring further.
+            // Use maxInt as sentinel; addEdge will reject it via bounds check.
+            return .{ .index = std.math.maxInt(u32), .is_new = false };
+        }
+
         const index: u32 = @intCast(self.nodes.items.len);
         const node = ExplodedNode.init(point, state.*, index);
 
         try self.nodes.append(self.allocator, node);
         try self.node_map.put(key, index);
+        try self.point_state_counts.put(point_key, current_count + 1);
 
         return .{ .index = index, .is_new = true };
     }
