@@ -275,6 +275,12 @@ Run on the current directory (discovers `.zig` files recursively):
 zwanzig
 ```
 
+Show the version:
+
+```bash
+zwanzig --version
+```
+
 Or specify files and directories:
 
 ```bash
@@ -292,6 +298,33 @@ zwanzig src/ tests/ main.zig
 
 # Using --file flag (can be repeated)
 zwanzig --file src --file tests
+```
+
+## Using as a dependency
+
+Add zwanzig to your project:
+
+```bash
+zig fetch --save https://github.com/forketyfork/zwanzig/archive/refs/tags/v0.1.0.tar.gz
+```
+
+Then wire a lint step in your `build.zig`:
+
+```zig
+const target = b.standardTargetOptions(.{});
+const optimize = b.standardOptimizeOption(.{});
+
+const zw = b.dependency("zwanzig", .{
+    .target = target,
+    .optimize = optimize,
+});
+const zw_exe = zw.artifact("zwanzig");
+
+const run = b.addRunArtifact(zw_exe);
+run.addArgs(&.{ "--format", "sarif", "src" });
+
+const lint_step = b.step("lint", "Run zwanzig");
+lint_step.dependOn(&run.step);
 ```
 
 ### File Discovery
@@ -544,4 +577,3 @@ For detailed implementation guidance, see [IMPLEMENTATION.md](docs/IMPLEMENTATIO
 ## License
 
 MIT
-

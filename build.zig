@@ -4,9 +4,17 @@ pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
     const log_level = b.option(std.log.Level, "log-level", "Set log level") orelse .info;
+    const version = "0.1.0";
 
     const options = b.addOptions();
     options.addOption(std.log.Level, "log_level", log_level);
+    options.addOption([]const u8, "version", version);
+
+    const public_module = b.addModule("zwanzig", .{
+        .root_source_file = b.path("src/lib.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
 
     const exe_module = b.createModule(.{
         .root_source_file = b.path("src/main.zig"),
@@ -48,20 +56,13 @@ pub fn build(b: *std.Build) void {
     const test_step = b.step("test", "Run unit tests");
     test_step.dependOn(&run_tests.step);
 
-    // Create source module for fixture tests to import
-    const src_module = b.createModule(.{
-        .root_source_file = b.path("src/lib.zig"),
-        .target = target,
-        .optimize = optimize,
-    });
-
     // Create fixture tests
     const fixture_test_module = b.createModule(.{
         .root_source_file = b.path("test/fixture_tests.zig"),
         .target = target,
         .optimize = optimize,
     });
-    fixture_test_module.addImport("src", src_module);
+    fixture_test_module.addImport("src", public_module);
 
     const fixture_tests = b.addTest(.{
         .root_module = fixture_test_module,
