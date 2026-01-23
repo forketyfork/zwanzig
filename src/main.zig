@@ -9,6 +9,7 @@ const UnusedDeclRule = @import("rules/unused_decl.zig").UnusedDeclRule;
 const UnreachableCodeRule = @import("rules/unreachable_code.zig").UnreachableCodeRule;
 const EmptyDeferRule = @import("rules/empty_defer.zig").EmptyDeferRule;
 const EmptyErrdeferRule = @import("rules/empty_errdefer.zig").EmptyErrdeferRule;
+const ShadowedVariableRule = @import("rules/shadowed_variable.zig").ShadowedVariableRule;
 const RuleFilter = @import("rule_filter.zig").RuleFilter;
 const file_discovery = @import("file_discovery.zig");
 const EmptyCatchEngineChecker = @import("checkers/empty_catch_engine.zig").EmptyCatchEngineChecker;
@@ -323,6 +324,7 @@ pub fn main() !void {
     try analyzer.registerRule(&UnreachableCodeRule.rule);
     try analyzer.registerRule(&EmptyDeferRule.rule);
     try analyzer.registerRule(&EmptyErrdeferRule.rule);
+    try analyzer.registerRule(&ShadowedVariableRule.rule);
 
     // Engine-based error handling checkers
     try analyzer.registerChecker(&EmptyCatchEngineChecker.checker);
