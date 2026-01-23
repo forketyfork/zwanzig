@@ -56,7 +56,9 @@ pub const AnalysisEngine = struct {
     summary_use_count: u32,
     /// Build metadata (target configuration, etc.) - shared pointer
     build_metadata: ?*const BuildMetadata,
-    /// Name of the checker using this engine (for logging)
+    /// Name of the checker using this engine (for logging).
+    /// This is an unowned slice; callers must ensure the underlying data
+    /// remains valid for at least as long as this AnalysisEngine instance.
     checker_name: ?[]const u8,
 
     const WorklistItem = struct {

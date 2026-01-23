@@ -98,8 +98,9 @@ pub const ExplodedGraph = struct {
         const point_key = point.hash();
         const current_count = self.point_state_counts.get(point_key) orelse 0;
         if (current_count >= MAX_STATES_PER_POINT) {
-            // Too many states at this point - approximate by not exploring further
-            return .{ .index = 0, .is_new = false };
+            // Too many states at this point - approximate by not exploring further.
+            // Use maxInt as sentinel; addEdge will reject it via bounds check.
+            return .{ .index = std.math.maxInt(u32), .is_new = false };
         }
 
         const index: u32 = @intCast(self.nodes.items.len);
