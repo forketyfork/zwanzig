@@ -361,11 +361,11 @@ pub const ShadowedVariableRule = struct {
                 else => return,
             };
 
-            if (create_scope) {
-                try self.pushScope();
-            }
+            // Only process parameters for actual function declarations, not function type expressions
+            if (!create_scope) return;
 
-            // Add parameters to the scope
+            try self.pushScope();
+
             const token_starts = self.tree.tokens.items(.start);
             var it = proto.iterate(self.tree);
             while (it.next()) |param| {
