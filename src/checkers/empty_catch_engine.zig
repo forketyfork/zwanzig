@@ -1,4 +1,5 @@
 const std = @import("std");
+const log = std.log.scoped(.empty_catch_engine);
 const checker_mod = @import("../checker.zig");
 const Checker = checker_mod.Checker;
 const CheckerError = checker_mod.CheckerError;
@@ -44,6 +45,110 @@ pub const EmptyCatchEngineChecker = struct {
                 try analyzeFunction(src, allocator, ids.astId(@intCast(i)), diagnostics, context);
             }
         }
+
+        // Also check for empty catch blocks at file scope (top-level declarations)
+        try checkTopLevelCatches(src, allocator, diagnostics);
+    }
+
+    fn checkTopLevelCatches(
+        src: *Source,
+        allocator: std.mem.Allocator,
+        diagnostics: *std.ArrayList(Diagnostic),
+    ) CheckerError!void {
+        const tree = src.ast() catch return;
+        const tags = tree.nodes.items(.tag);
+        const datas = tree.nodes.items(.data);
+        const main_tokens = tree.nodes.items(.main_token);
+        const token_tags = tree.tokens.items(.tag);
+        const token_starts = tree.tokens.items(.start);
+
+        // Build a list of function body token ranges (start, end)
+        const Range = struct { start: u32, end: u32 };
+        var fn_body_ranges: std.ArrayList(Range) = .empty;
+        defer fn_body_ranges.deinit(allocator);
+
+        for (tags, 0..) |tag, i| {
+            if (tag == .fn_decl) {
+                const fn_data = datas[i];
+                const body_node: u32 = @intFromEnum(fn_data.node_and_node[1]);
+                if (body_node != 0) {
+                    // Get token range of the function body
+                    const body_start = main_tokens[body_node];
+                    const body_end = tree.lastToken(@enumFromInt(body_node));
+                    fn_body_ranges.append(allocator, .{ .start = body_start, .end = body_end }) catch return;
+                }
+            }
+        }
+
+        // Find catch nodes that are not inside any function body (by token position)
+        for (tags, 0..) |tag, node_idx| {
+            if (tag == .@"catch") {
+                const catch_token = main_tokens[node_idx];
+
+                // Check if this catch token is inside any function body
+                var inside_fn = false;
+                for (fn_body_ranges.items) |range| {
+                    if (catch_token >= range.start and catch_token <= range.end) {
+                        inside_fn = true;
+                        break;
+                    }
+                }
+
+                if (!inside_fn) {
+                    // Check if the catch has an empty body
+                    if (hasEmptyCatchBody(token_tags, catch_token)) {
+                        const catch_start = token_starts[catch_token];
+                        const range = src.byteRangeToSourceRange(catch_start, catch_start + 5) catch |err| {
+                            log.warn("failed to get source range: {}", .{err});
+                            continue;
+                        };
+
+                        const diag = Diagnostic.init(
+                            allocator,
+                            src.getFilePath(),
+                            "empty-catch-engine",
+                            .warning,
+                            "Empty catch block detected. Consider handling the error or using '_' to explicitly ignore it.",
+                            range,
+                        ) catch return;
+
+                        diagnostics.append(allocator, diag) catch return;
+                    }
+                }
+            }
+        }
+    }
+
+    fn hasEmptyCatchBody(token_tags: []const std.zig.Token.Tag, catch_token: u32) bool {
+        // Scan forward from catch token to find the block
+        var token_idx = catch_token + 1;
+        const num_tokens = token_tags.len;
+
+        // Skip whitespace, comments, and potential |err| capture
+        while (token_idx < num_tokens) {
+            const tok_tag = token_tags[token_idx];
+
+            if (tok_tag == .l_brace) {
+                // Found the opening brace of the catch block
+                // Check if the next token is the closing brace
+                const next_token_idx = token_idx + 1;
+                if (next_token_idx < num_tokens and token_tags[next_token_idx] == .r_brace) {
+                    return true;
+                }
+                return false;
+            } else if (tok_tag == .pipe) {
+                // Skip past the |err| capture: | identifier |
+                token_idx += 1;
+                while (token_idx < num_tokens and token_tags[token_idx] != .pipe) {
+                    token_idx += 1;
+                }
+            } else if (tok_tag == .semicolon or tok_tag == .r_paren or tok_tag == .r_brace) {
+                // Hit a boundary without finding a block - not an empty block pattern
+                return false;
+            }
+            token_idx += 1;
+        }
+        return false;
     }
 
     fn analyzeFunction(
@@ -203,4 +308,55 @@ test "empty_catch_engine - detects catch with capture but empty body" {
     try EmptyCatchEngineChecker.checker.checkAst(&source, allocator, &diagnostics, context);
 
     try testing.expectEqual(@as(usize, 1), diagnostics.items.len);
+}
+
+test "empty_catch_engine - detects empty catch at file scope" {
+    const testing = std.testing;
+    const allocator = testing.allocator;
+
+    // Test case: empty catch block at top-level (file scope)
+    const code: [:0]const u8 =
+        \\fn tryFunc() !i32 {
+        \\    return 42;
+        \\}
+        \\const x = tryFunc() catch {};
+    ;
+    var source = Source.init(allocator, "test.zig", code);
+    defer source.deinit();
+
+    var diagnostics: std.ArrayList(Diagnostic) = .empty;
+    defer diagnostics.deinit(allocator);
+    defer for (diagnostics.items) |diag| allocator.free(@constCast(diag.message));
+
+    const context = checker_mod.CheckerContext{ .build_metadata = null };
+    try EmptyCatchEngineChecker.checker.checkAst(&source, allocator, &diagnostics, context);
+
+    try testing.expectEqual(@as(usize, 1), diagnostics.items.len);
+    try testing.expectEqualStrings("empty-catch-engine", diagnostics.items[0].rule_id);
+}
+
+test "empty_catch_engine - no diagnostic for non-empty catch at file scope" {
+    const testing = std.testing;
+    const allocator = testing.allocator;
+
+    // Test case: non-empty catch block at top-level
+    const code: [:0]const u8 =
+        \\fn tryFunc() !i32 {
+        \\    return error.Failed;
+        \\}
+        \\const x = tryFunc() catch {
+        \\    @compileError("initialization failed");
+        \\};
+    ;
+    var source = Source.init(allocator, "test.zig", code);
+    defer source.deinit();
+
+    var diagnostics: std.ArrayList(Diagnostic) = .empty;
+    defer diagnostics.deinit(allocator);
+    defer for (diagnostics.items) |diag| allocator.free(@constCast(diag.message));
+
+    const context = checker_mod.CheckerContext{ .build_metadata = null };
+    try EmptyCatchEngineChecker.checker.checkAst(&source, allocator, &diagnostics, context);
+
+    try testing.expectEqual(@as(usize, 0), diagnostics.items.len);
 }
