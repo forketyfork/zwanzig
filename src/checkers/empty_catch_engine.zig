@@ -166,9 +166,10 @@ pub const EmptyCatchEngineChecker = struct {
             defer cfg.deinit();
 
             // Run the analysis engine with a worklist limit to avoid pathological cases
-            var engine = AnalysisEngine.init(allocator, cfg);
+            var engine = AnalysisEngine.initWithSource(allocator, cfg, src);
             defer engine.deinit();
-            engine.setMaxWorklistSteps(20_000);
+            engine.setMaxWorklistSteps(100_000);
+            engine.setCheckerName("empty-catch-engine");
             if (context.build_metadata) |metadata| {
                 engine.setBuildMetadata(metadata);
             }

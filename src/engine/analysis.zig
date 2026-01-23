@@ -1,4 +1,5 @@
 const std = @import("std");
+const log = std.log.scoped(.analysis_engine);
 const cfg_mod = @import("../cfg.zig");
 const ids = @import("../ids.zig");
 const Cfg = cfg_mod.Cfg;
@@ -55,6 +56,8 @@ pub const AnalysisEngine = struct {
     summary_use_count: u32,
     /// Build metadata (target configuration, etc.) - shared pointer
     build_metadata: ?*const BuildMetadata,
+    /// Name of the checker using this engine (for logging)
+    checker_name: ?[]const u8,
 
     const WorklistItem = struct {
         /// Index of the exploded graph node to process
@@ -83,6 +86,7 @@ pub const AnalysisEngine = struct {
             .use_summaries = true,
             .summary_use_count = 0,
             .build_metadata = null,
+            .checker_name = null,
         };
     }
 
@@ -115,6 +119,11 @@ pub const AnalysisEngine = struct {
     /// Set the maximum number of worklist steps before aborting analysis.
     pub fn setMaxWorklistSteps(self: *AnalysisEngine, steps: usize) void {
         self.max_worklist_steps = steps;
+    }
+
+    /// Set the checker name for logging purposes.
+    pub fn setCheckerName(self: *AnalysisEngine, name: []const u8) void {
+        self.checker_name = name;
     }
 
     /// Enable or disable the use of function summaries.
@@ -251,6 +260,19 @@ pub const AnalysisEngine = struct {
         while (self.worklist.pop()) |item| {
             worklist_steps += 1;
             if (worklist_steps > self.max_worklist_steps) {
+                const file_path = if (self.source) |src| src.getFilePath() else "unknown";
+                const checker = self.checker_name orelse "unknown";
+                const cfg_size = item.cfg.nodeCount();
+                const inlined_cfgs = self.function_cfgs.count();
+                log.warn("[{s}] analysis limit exceeded: {d} steps, {d} unique states, worklist {d}, cfg nodes {d}, inlined fns {d} in {s}", .{
+                    checker,
+                    worklist_steps,
+                    self.graph.nodes.items.len,
+                    self.worklist.items.len,
+                    cfg_size,
+                    inlined_cfgs,
+                    file_path,
+                });
                 return error.AnalysisLimitExceeded;
             }
             try self.processNode(item.node_index, item.edge_kind, item.pending_constraint, item.cfg);

@@ -4,6 +4,10 @@ const AbstractValue = @import("value.zig").AbstractValue;
 const Environment = @import("env.zig").Environment;
 const VarId = ids.VarId;
 
+/// Maximum number of constraints per state to prevent state explosion in loops.
+/// When this limit is reached, new constraints are silently dropped (over-approximation).
+const MAX_CONSTRAINTS: usize = 50;
+
 /// Comparison operator for constraints.
 pub const CompareOp = enum {
     eq, // ==
@@ -158,7 +162,13 @@ pub const ConstraintManager = struct {
     }
 
     /// Add a constraint to the manager.
+    /// If the maximum constraint limit is reached, the constraint is silently dropped
+    /// to prevent state explosion in loops (safe over-approximation).
     pub fn addConstraint(self: *ConstraintManager, constraint: Constraint) !void {
+        // Limit constraints to prevent state explosion
+        if (self.constraints.items.len >= MAX_CONSTRAINTS) {
+            return;
+        }
         // Check for duplicate before adding
         for (self.constraints.items) |c| {
             if (c.eql(constraint)) return;
