@@ -11,6 +11,7 @@ const EmptyDeferRule = src.rules.empty_defer.EmptyDeferRule;
 const UnreachableCodeRule = src.rules.unreachable_code.UnreachableCodeRule;
 const FileAsStructRule = src.rules.file_as_struct.FileAsStructRule;
 const UnusedDeclRule = src.rules.unused_decl.UnusedDeclRule;
+const ShadowedVariableRule = src.rules.shadowed_variable.ShadowedVariableRule;
 
 test "dupe_import fixtures" {
     try runFixturesInDir(std.testing.allocator, &DupeImportRule.rule, "test/fixtures/dupe_import");
@@ -38,4 +39,8 @@ test "file_as_struct fixtures" {
 
 test "unused_decl fixtures" {
     try runFixturesInDir(std.testing.allocator, &UnusedDeclRule.rule, "test/fixtures/unused_decl");
+}
+
+test "shadowed_variable fixtures" {
+    try runFixturesInDir(std.testing.allocator, &ShadowedVariableRule.rule, "test/fixtures/shadowed_variable");
 }

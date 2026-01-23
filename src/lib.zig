@@ -15,4 +15,5 @@ pub const rules = struct {
     pub const unreachable_code = @import("rules/unreachable_code.zig");
     pub const file_as_struct = @import("rules/file_as_struct.zig");
     pub const unused_decl = @import("rules/unused_decl.zig");
+    pub const shadowed_variable = @import("rules/shadowed_variable.zig");
 };
