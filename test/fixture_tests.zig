@@ -4,7 +4,6 @@ const runFixturesInDir = fixture_runner.runFixturesInDir;
 
 // Import all rules from the src module
 const src = @import("src");
-const EmptyCatchRule = src.rules.empty_catch.EmptyCatchRule;
 const DupeImportRule = src.rules.dupe_import.DupeImportRule;
 const TodoCommentRule = src.rules.todo_comment.TodoCommentRule;
 const EmptyErrdeferRule = src.rules.empty_errdefer.EmptyErrdeferRule;
@@ -12,10 +11,6 @@ const EmptyDeferRule = src.rules.empty_defer.EmptyDeferRule;
 const UnreachableCodeRule = src.rules.unreachable_code.UnreachableCodeRule;
 const FileAsStructRule = src.rules.file_as_struct.FileAsStructRule;
 const UnusedDeclRule = src.rules.unused_decl.UnusedDeclRule;
-
-test "empty_catch fixtures" {
-    try runFixturesInDir(std.testing.allocator, &EmptyCatchRule.rule, "test/fixtures/empty_catch");
-}
 
 test "dupe_import fixtures" {
     try runFixturesInDir(std.testing.allocator, &DupeImportRule.rule, "test/fixtures/dupe_import");

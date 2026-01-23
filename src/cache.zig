@@ -1,4 +1,5 @@
 const std = @import("std");
+const log = std.log.scoped(.cache);
 const BuildMetadata = @import("build_metadata.zig").BuildMetadata;
 
 pub const CacheError = error{
@@ -301,7 +302,9 @@ test "Cache: put and get" {
 
     const cache_dir = try std.fs.cwd().makeOpenPath("test-cache-tmp", .{ .iterate = true });
     defer {
-        std.fs.cwd().deleteTree("test-cache-tmp") catch {};
+        std.fs.cwd().deleteTree("test-cache-tmp") catch |err| {
+            log.warn("failed to clean up test directory: {}", .{err});
+        };
     }
 
     var cache = Cache{
@@ -344,7 +347,9 @@ test "Cache: invalidate removes entry" {
 
     const cache_dir = try std.fs.cwd().makeOpenPath("test-cache-tmp2", .{ .iterate = true });
     defer {
-        std.fs.cwd().deleteTree("test-cache-tmp2") catch {};
+        std.fs.cwd().deleteTree("test-cache-tmp2") catch |err| {
+            log.warn("failed to clean up test directory: {}", .{err});
+        };
     }
 
     var cache = Cache{
@@ -367,7 +372,9 @@ test "Cache: clear removes all entries" {
 
     const cache_dir = try std.fs.cwd().makeOpenPath("test-cache-tmp3", .{ .iterate = true });
     defer {
-        std.fs.cwd().deleteTree("test-cache-tmp3") catch {};
+        std.fs.cwd().deleteTree("test-cache-tmp3") catch |err| {
+            log.warn("failed to clean up test directory: {}", .{err});
+        };
     }
 
     var cache = Cache{

@@ -1582,11 +1582,9 @@ engine.setUseSummaries(false);
 engine.setMaxInlineDepth(5);
 ```
 
-## Step 25: Build Metadata Integration
+## Build Metadata Integration
 
-### Overview
-
-The analyzer now integrates build metadata and target configuration into the analysis pipeline, allowing rules and checkers to access platform-specific information.
+The analyzer integrates build metadata and target configuration into the analysis pipeline, allowing rules and checkers to access platform-specific information.
 
 ### Build Metadata Types
 
@@ -1704,9 +1702,11 @@ pub fn fromNative() BuildMetadata {
 }
 ```
 
-## Future Enhancements
+## Future Directions
 
-The current implementation provides a foundation for more sophisticated analysis:
+The current implementation provides a solid foundation. Potential future enhancements include:
 
-- **Multiple Output Formats**: JSON, SARIF for CI/CD integration
-- **Configuration Files**: Project-specific rule configuration
+- **Richer Abstract Domains** - Symbolic values, arithmetic propagation, slice length tracking
+- **Cross-File Analysis** - Module discovery and interprocedural analysis across compilation units
+- **Constraint Solver Upgrade** - Modular solver backend for more precise path pruning
+- **Expanded Checker Suite** - Resource leaks, double-free detection, out-of-bounds access

@@ -1,10 +1,10 @@
 # CLAUDE.md
 
-This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+Guidance for Claude Code when working in this repository.
 
-## Project Overview
+## Overview
 
-Zwanzig is a static analyzer and linter for Zig code. It uses a modular rule-based architecture with lazy AST parsing and caching for performance.
+Zwanzig is a static analyzer and linter for Zig. It uses a modular rule-based architecture with lazy AST parsing and caching.
 
 ## Build Commands
 
@@ -56,35 +56,10 @@ nix develop
 
 ### Adding a New Rule
 
-1. Create `src/rules/my_rule.zig`:
-```zig
-const std = @import("std");
-const Rule = @import("../rule.zig").Rule;
-const RuleError = @import("../rule.zig").RuleError;
-const Diagnostic = @import("../rule.zig").Diagnostic;
-const Source = @import("../source.zig").Source;
+1. Create `src/rules/my_rule.zig` implementing the `Rule` interface
+2. Register in `src/main.zig`: `try analyzer.registerRule(&MyRule.rule);`
 
-pub const MyRule = struct {
-    pub const rule: Rule = .{
-        .name = "my-rule",
-        .checkFn = check,
-    };
-
-    fn check(src: *Source, allocator: std.mem.Allocator, diagnostics: *std.ArrayList(Diagnostic)) RuleError!void {
-        const ast = try src.ast();  // Lazy parse, cached
-        // Analysis logic...
-        _ = allocator;
-        _ = ast;
-    }
-};
-```
-
-2. Register in `src/main.zig`:
-```zig
-try analyzer.registerRule(&MyRule.rule);
-```
-
-For engine-based checkers (CFG analysis), see `src/checkers/` directory.
+See existing rules in `src/rules/` for patterns. For CFG-based checkers, see `src/checkers/`.
 
 ### CLI Flags
 - `--do <rule>`: Run only specified rules (allowlist, repeatable)

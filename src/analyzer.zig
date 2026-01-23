@@ -484,7 +484,9 @@ test "Analyzer cache enabled" {
     var cache_dir = try std.fs.cwd().makeOpenPath("test-analyzer-cache", .{});
     defer {
         cache_dir.close();
-        std.fs.cwd().deleteTree("test-analyzer-cache") catch {};
+        std.fs.cwd().deleteTree("test-analyzer-cache") catch |err| {
+            log.warn("failed to clean up test directory: {}", .{err});
+        };
     }
 
     var analyzer = Analyzer.init(allocator);
