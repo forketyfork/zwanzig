@@ -379,8 +379,9 @@ fn printUsage() !void {
 }
 
 fn printVersion() !void {
-    const stdout = std.fs.File.stdout().deprecatedWriter();
-    try stdout.print("zwanzig {s}\n", .{build_options.version});
+    var buffer: [64]u8 = undefined;
+    const message = try std.fmt.bufPrint(&buffer, "zwanzig {s}\n", .{build_options.version});
+    try std.fs.File.stdout().writeAll(message);
 }
 
 fn freeCliArgs(allocator: std.mem.Allocator, cli_args: CliArgs) void {
