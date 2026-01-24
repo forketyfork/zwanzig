@@ -16,4 +16,5 @@ pub const rules = struct {
     pub const file_as_struct = @import("rules/file_as_struct.zig");
     pub const unused_decl = @import("rules/unused_decl.zig");
     pub const shadowed_variable = @import("rules/shadowed_variable.zig");
+    pub const identifier_style = @import("rules/identifier_style.zig");
 };
