@@ -326,6 +326,12 @@ Run on the current directory (discovers `.zig` files recursively):
 zwanzig
 ```
 
+Show the version:
+
+```bash
+zwanzig --version
+```
+
 Or specify files and directories:
 
 ```bash
@@ -343,6 +349,33 @@ zwanzig src/ tests/ main.zig
 
 # Using --file flag (can be repeated)
 zwanzig --file src --file tests
+```
+
+## Using as a dependency
+
+Add zwanzig to your project:
+
+```bash
+zig fetch --save https://github.com/forketyfork/zwanzig/archive/refs/tags/v0.1.0.tar.gz
+```
+
+Then wire a lint step in your `build.zig`:
+
+```zig
+const target = b.standardTargetOptions(.{});
+const optimize = b.standardOptimizeOption(.{});
+
+const zw = b.dependency("zwanzig", .{
+    .target = target,
+    .optimize = optimize,
+});
+const zw_exe = zw.artifact("zwanzig");
+
+const run = b.addRunArtifact(zw_exe);
+run.addArgs(&.{ "--format", "sarif", "src" });
+
+const lint_step = b.step("lint", "Run zwanzig");
+lint_step.dependOn(&run.step);
 ```
 
 ### File Discovery
@@ -513,6 +546,53 @@ zwanzig --format sarif src/
 ```
 
 [SARIF 2.1.0](https://docs.oasis-open.org/sarif/sarif/v2.1.0/sarif-v2.1.0.html) format, supported by GitHub code scanning, VS Code's SARIF extension, and SonarQube.
+
+### GitHub Actions Integration
+
+Publish zwanzig results to GitHub's code scanning to see issues directly in pull requests.
+
+**1. Add the required permission to your workflow:**
+
+```yaml
+permissions:
+  contents: read
+  security-events: write  # Required for uploading SARIF
+```
+
+**2. Add steps to run zwanzig and upload results:**
+
+```yaml
+- name: Run zwanzig analysis
+  run: |
+    zwanzig --format sarif src/ > results.sarif || true
+
+- name: Upload SARIF results
+  uses: github/codeql-action/upload-sarif@v3
+  with:
+    sarif_file: results.sarif
+```
+
+The `|| true` ensures the workflow continues even if zwanzig finds issues, so results are always uploaded.
+
+**3. (Optional) Run on every push, even if other steps fail:**
+
+```yaml
+- name: Run zwanzig analysis
+  if: always()
+  run: |
+    zwanzig --format sarif src/ > results.sarif || true
+
+- name: Upload SARIF results
+  if: always()
+  uses: github/codeql-action/upload-sarif@v3
+  with:
+    sarif_file: results.sarif
+```
+
+After setup, you'll find results in:
+- **Security** tab > **Code scanning alerts**
+- **Pull requests** > **Checks** > **Code scanning results**
+- Inline annotations on changed files
 
 ## Testing
 

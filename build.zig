@@ -4,9 +4,17 @@ pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
     const log_level = b.option(std.log.Level, "log-level", "Set log level") orelse .info;
+    const version = readPackageVersion(b);
 
     const options = b.addOptions();
     options.addOption(std.log.Level, "log_level", log_level);
+    options.addOption([]const u8, "version", version);
+
+    const public_module = b.addModule("zwanzig", .{
+        .root_source_file = b.path("src/lib.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
 
     const exe_module = b.createModule(.{
         .root_source_file = b.path("src/main.zig"),
@@ -48,20 +56,13 @@ pub fn build(b: *std.Build) void {
     const test_step = b.step("test", "Run unit tests");
     test_step.dependOn(&run_tests.step);
 
-    // Create source module for fixture tests to import
-    const src_module = b.createModule(.{
-        .root_source_file = b.path("src/lib.zig"),
-        .target = target,
-        .optimize = optimize,
-    });
-
     // Create fixture tests
     const fixture_test_module = b.createModule(.{
         .root_source_file = b.path("test/fixture_tests.zig"),
         .target = target,
         .optimize = optimize,
     });
-    fixture_test_module.addImport("src", src_module);
+    fixture_test_module.addImport("src", public_module);
 
     const fixture_tests = b.addTest(.{
         .root_module = fixture_test_module,
@@ -77,6 +78,40 @@ pub fn build(b: *std.Build) void {
     // Check fixtures compile (validates that all fixtures are valid Zig code)
     const check_fixtures_step = b.step("check-fixtures", "Verify all test fixtures compile");
     addFixtureChecks(b, check_fixtures_step, target, optimize);
+}
+
+fn readPackageVersion(b: *std.Build) []const u8 {
+    const zon_path = "build.zig.zon";
+    const zon_contents = std.fs.cwd().readFileAllocOptions(
+        b.allocator,
+        zon_path,
+        1024 * 1024,
+        null,
+        .of(u8),
+        0,
+    ) catch |err| {
+        std.debug.panic("failed to read {s}: {s}", .{ zon_path, @errorName(err) });
+    };
+    defer b.allocator.free(zon_contents);
+
+    const PackageMetadata = struct {
+        version: []const u8,
+    };
+
+    const parsed = std.zon.parse.fromSlice(
+        PackageMetadata,
+        b.allocator,
+        zon_contents,
+        null,
+        .{ .ignore_unknown_fields = true },
+    ) catch |err| {
+        std.debug.panic("failed to parse {s}: {s}", .{ zon_path, @errorName(err) });
+    };
+    defer std.zon.parse.free(b.allocator, parsed);
+
+    return b.allocator.dupe(u8, parsed.version) catch {
+        std.debug.panic("failed to allocate package version", .{});
+    };
 }
 
 fn addFixtureChecks(b: *std.Build, step: *std.Build.Step, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode) void {

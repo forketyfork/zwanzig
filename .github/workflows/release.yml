@@ -1,0 +1,59 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            asset_suffix: linux-x86_64
+            archive_ext: tar.gz
+          - os: macos-latest
+            asset_suffix: macos-aarch64
+            archive_ext: tar.gz
+          - os: windows-latest
+            asset_suffix: windows-x86_64
+            archive_ext: zip
+
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install Zig
+        uses: mlugg/setup-zig@v1
+        with:
+          version: 0.15.2
+
+      - name: Build release binary
+        run: zig build -Doptimize=ReleaseFast
+
+      - name: Package artifact (Unix)
+        if: runner.os != 'Windows'
+        run: |
+          mkdir -p dist
+          cp zig-out/bin/zwanzig dist/
+          cp LICENSE README.md dist/
+          tar -czf "zwanzig-${{ github.ref_name }}-${{ matrix.asset_suffix }}.${{ matrix.archive_ext }}" -C dist .
+
+      - name: Package artifact (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path dist | Out-Null
+          Copy-Item zig-out/bin/zwanzig.exe dist/
+          Copy-Item LICENSE, README.md dist/
+          Compress-Archive -Path dist/* -DestinationPath "zwanzig-${{ github.ref_name }}-${{ matrix.asset_suffix }}.${{ matrix.archive_ext }}"
+
+      - name: Upload release assets
+        uses: softprops/action-gh-release@v2
+        with:
+          files: zwanzig-${{ github.ref_name }}-${{ matrix.asset_suffix }}.${{ matrix.archive_ext }}
