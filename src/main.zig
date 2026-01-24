@@ -207,6 +207,10 @@ pub fn main() !void {
             try printUsage();
             return;
         }
+        if (std.mem.eql(u8, arg, "--version")) {
+            try printVersion();
+            return;
+        }
     }
 
     const cli_args = parseArgs(allocator, args) catch |err| {
@@ -359,6 +363,7 @@ fn printUsage() !void {
     try stdout.writeAll("\nA static analyzer for Zig code.\n");
     try stdout.writeAll("\nOptions:\n");
     try stdout.writeAll("  -h, --help        Show this help message and exit\n");
+    try stdout.writeAll("  --version         Show version and exit\n");
     try stdout.writeAll("  --file <path>     Specify a file or directory to analyze (can be repeated)\n");
     try stdout.writeAll("  --do <rule>       Only run the specified rule (can be repeated)\n");
     try stdout.writeAll("  --skip <rule>     Skip the specified rule (can be repeated)\n");
@@ -371,6 +376,12 @@ fn printUsage() !void {
     try stdout.writeAll("  [path...]         Files or directories to analyze (default: current directory)\n");
     try stdout.writeAll("\nIgnored directories:\n");
     try stdout.writeAll("  zig-cache/, zig-out/, .zigmod/, .gyro/\n");
+}
+
+fn printVersion() !void {
+    var buffer: [64]u8 = undefined;
+    const message = try std.fmt.bufPrint(&buffer, "zwanzig {s}\n", .{build_options.version});
+    try std.fs.File.stdout().writeAll(message);
 }
 
 fn freeCliArgs(allocator: std.mem.Allocator, cli_args: CliArgs) void {
