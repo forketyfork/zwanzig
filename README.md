@@ -496,6 +496,53 @@ zwanzig --format sarif src/
 
 [SARIF 2.1.0](https://docs.oasis-open.org/sarif/sarif/v2.1.0/sarif-v2.1.0.html) format, supported by GitHub code scanning, VS Code's SARIF extension, and SonarQube.
 
+### GitHub Actions Integration
+
+Publish zwanzig results to GitHub's code scanning to see issues directly in pull requests.
+
+**1. Add the required permission to your workflow:**
+
+```yaml
+permissions:
+  contents: read
+  security-events: write  # Required for uploading SARIF
+```
+
+**2. Add steps to run zwanzig and upload results:**
+
+```yaml
+- name: Run zwanzig analysis
+  run: |
+    zwanzig --format sarif src/ > results.sarif || true
+
+- name: Upload SARIF results
+  uses: github/codeql-action/upload-sarif@v3
+  with:
+    sarif_file: results.sarif
+```
+
+The `|| true` ensures the workflow continues even if zwanzig finds issues, so results are always uploaded.
+
+**3. (Optional) Run on every push, even if other steps fail:**
+
+```yaml
+- name: Run zwanzig analysis
+  if: always()
+  run: |
+    zwanzig --format sarif src/ > results.sarif || true
+
+- name: Upload SARIF results
+  if: always()
+  uses: github/codeql-action/upload-sarif@v3
+  with:
+    sarif_file: results.sarif
+```
+
+After setup, you'll find results in:
+- **Security** tab > **Code scanning alerts**
+- **Pull requests** > **Checks** > **Code scanning results**
+- Inline annotations on changed files
+
 ## Testing
 
 Run the test suite:
