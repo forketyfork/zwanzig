@@ -32,6 +32,12 @@ For any code changes, run both tests and linting:
 
 `just lint` also runs zwanzig on its own code. All issues should be fixed before submitting changes. If this is complicated or not possible, ask the user.
 
+All new rules/checkers must have test fixtures.
+
+All code must be formatted with `zig fmt`.
+
+Any changes or additions to the existing rules/checkers must be documented.
+
 ## Development Environment
 
 Uses Nix flakes for reproducible dev environment (Zig 0.15.2). Enter with:
