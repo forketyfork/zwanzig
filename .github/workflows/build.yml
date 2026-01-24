@@ -75,7 +75,7 @@ jobs:
       - name: Run Zwanzig analysis (SARIF)
         if: always()
         run: |
-          nix develop --accept-flake-config --command bash -c 'zig build run -- --format sarif src/**/*.zig > ../results.sarif || true'
+          nix develop --accept-flake-config --command bash -c 'zig build run -- --format sarif src > ../results.sarif || true'
         working-directory: zwanzig
 
       - name: Upload SARIF results
