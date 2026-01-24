@@ -201,6 +201,57 @@ fn foo() !void {
 }
 ```
 
+### shadowed-variable
+
+Detects variable shadowing across scopes (including payloads) to avoid accidental name reuse.
+
+**Bad:**
+```zig
+fn foo(x: i32) void {
+    const x = 5; // Shadows parameter
+    _ = x;
+}
+```
+
+**Good:**
+```zig
+fn foo(x: i32) void {
+    const value = 5;
+    _ = x;
+    _ = value;
+}
+```
+
+### identifier-style
+
+Enforces Zig naming conventions:
+
+- Types: PascalCase
+- Functions: camelCase
+- Variables/constants/parameters/payloads: snake_case
+
+**Bad:**
+```zig
+const MaxValue = 10;
+
+fn DoThing(BadParameter: ?i32) void {
+    if (BadParameter) |Value| {
+        _ = Value;
+    }
+}
+```
+
+**Good:**
+```zig
+const max_value = 10;
+
+fn doThing(good_param: ?i32) void {
+    if (good_param) |value| {
+        _ = value;
+    }
+}
+```
+
 ## Engine-based Checkers
 
 These checkers use control-flow graph analysis for deeper inspection.

@@ -12,6 +12,7 @@ const UnreachableCodeRule = src.rules.unreachable_code.UnreachableCodeRule;
 const FileAsStructRule = src.rules.file_as_struct.FileAsStructRule;
 const UnusedDeclRule = src.rules.unused_decl.UnusedDeclRule;
 const ShadowedVariableRule = src.rules.shadowed_variable.ShadowedVariableRule;
+const IdentifierStyleRule = src.rules.identifier_style.IdentifierStyleRule;
 
 test "dupe_import fixtures" {
     try runFixturesInDir(std.testing.allocator, &DupeImportRule.rule, "test/fixtures/dupe_import");
@@ -43,4 +44,8 @@ test "unused_decl fixtures" {
 
 test "shadowed_variable fixtures" {
     try runFixturesInDir(std.testing.allocator, &ShadowedVariableRule.rule, "test/fixtures/shadowed_variable");
+}
+
+test "identifier_style fixtures" {
+    try runFixturesInDir(std.testing.allocator, &IdentifierStyleRule.rule, "test/fixtures/identifier_style");
 }
