@@ -4,7 +4,7 @@ pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
     const log_level = b.option(std.log.Level, "log-level", "Set log level") orelse .info;
-    const version = "0.1.0";
+    const version = readPackageVersion(b);
 
     const options = b.addOptions();
     options.addOption(std.log.Level, "log_level", log_level);
@@ -78,6 +78,40 @@ pub fn build(b: *std.Build) void {
     // Check fixtures compile (validates that all fixtures are valid Zig code)
     const check_fixtures_step = b.step("check-fixtures", "Verify all test fixtures compile");
     addFixtureChecks(b, check_fixtures_step, target, optimize);
+}
+
+fn readPackageVersion(b: *std.Build) []const u8 {
+    const zon_path = "build.zig.zon";
+    const zon_contents = std.fs.cwd().readFileAllocOptions(
+        b.allocator,
+        zon_path,
+        1024 * 1024,
+        null,
+        .of(u8),
+        0,
+    ) catch |err| {
+        std.debug.panic("failed to read {s}: {s}", .{ zon_path, @errorName(err) });
+    };
+    defer b.allocator.free(zon_contents);
+
+    const PackageMetadata = struct {
+        version: []const u8,
+    };
+
+    const parsed = std.zon.parse.fromSlice(
+        PackageMetadata,
+        b.allocator,
+        zon_contents,
+        null,
+        .{ .ignore_unknown_fields = true },
+    ) catch |err| {
+        std.debug.panic("failed to parse {s}: {s}", .{ zon_path, @errorName(err) });
+    };
+    defer std.zon.parse.free(b.allocator, parsed);
+
+    return b.allocator.dupe(u8, parsed.version) catch {
+        std.debug.panic("failed to allocate package version", .{});
+    };
 }
 
 fn addFixtureChecks(b: *std.Build, step: *std.Build.Step, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode) void {
