@@ -234,8 +234,8 @@ Enforces Zig naming conventions:
 ```zig
 const MaxValue = 10;
 
-fn DoThing(BadParam: ?i32) void {
-    if (BadParam) |Value| {
+fn DoThing(BadParameter: ?i32) void {
+    if (BadParameter) |Value| {
         _ = Value;
     }
 }
@@ -245,8 +245,8 @@ fn DoThing(BadParam: ?i32) void {
 ```zig
 const max_value = 10;
 
-fn doThing(bad_param: ?i32) void {
-    if (bad_param) |value| {
+fn doThing(good_param: ?i32) void {
+    if (good_param) |value| {
         _ = value;
     }
 }

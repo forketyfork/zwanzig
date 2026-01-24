@@ -239,11 +239,32 @@ pub const IdentifierStyleRule = struct {
                 const call_info = tree.fullCall(&buf, @enumFromInt(init_idx)) orelse break :blk false;
                 break :blk isTypeAliasCallee(tree, tags, datas, token_tags, @intFromEnum(call_info.ast.fn_expr));
             },
+            .builtin_call, .builtin_call_comma, .builtin_call_two, .builtin_call_two_comma =>
+            blk: {
+                var buf: [2]std.zig.Ast.Node.Index = undefined;
+                const builtin_node = tree.fullBuiltinCall(&buf, @enumFromInt(init_idx)) orelse break :blk false;
+                if (builtin_node.builtin_token >= token_tags.len) break :blk false;
+                if (token_tags[builtin_node.builtin_token] != .builtin_identifier) break :blk false;
+                const builtin_name = tree.tokenSlice(builtin_node.builtin_token);
+                break :blk isTypeFactoryBuiltin(builtin_name);
+            },
             .merge_error_sets,
             .error_union,
             => true,
             else => false,
         };
+    }
+
+    fn isTypeFactoryBuiltin(name: []const u8) bool {
+        return std.mem.eql(u8, name, "@TypeOf") or
+            std.mem.eql(u8, name, "@Type") or
+            std.mem.eql(u8, name, "@This") or
+            std.mem.eql(u8, name, "@OpaqueType") or
+            std.mem.eql(u8, name, "@TypeInfo") or
+            std.mem.eql(u8, name, "@Vector") or
+            std.mem.eql(u8, name, "@Struct") or
+            std.mem.eql(u8, name, "@Enum") or
+            std.mem.eql(u8, name, "@Union");
     }
 
     fn isTypeAliasCallee(
