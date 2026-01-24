@@ -226,7 +226,6 @@ pub const IdentifierStyleRule = struct {
         token_tags: []const std.zig.Token.Tag,
         init_idx: usize,
     ) bool {
-        _ = main_tokens;
         const init_tag = tags[init_idx];
 
         return switch (init_tag) {
@@ -240,17 +239,86 @@ pub const IdentifierStyleRule = struct {
                 break :blk isTypeAliasCallee(tree, tags, datas, token_tags, @intFromEnum(call_info.ast.fn_expr));
             },
             .builtin_call, .builtin_call_comma, .builtin_call_two, .builtin_call_two_comma => blk: {
-                const builtin_token = tree.nodes.items(.main_token)[init_idx];
-                if (builtin_token >= token_tags.len) break :blk false;
-                if (token_tags[builtin_token] != .builtin) break :blk false;
-                const builtin_name = tree.tokenSlice(builtin_token);
+                const builtin_name = builtinCallName(tree, tags, token_tags, init_idx) orelse break :blk false;
                 break :blk isTypeFactoryBuiltin(builtin_name);
             },
             .merge_error_sets,
             .error_union,
+            .optional_type,
+            .anyframe_type,
+            .ptr_type,
+            .ptr_type_sentinel,
+            .ptr_type_bit_range,
+            .ptr_type_aligned,
+            .array_type,
+            .array_type_sentinel,
             => true,
+            .@"switch", .switch_comma => isTypeSwitchAlias(tree, tags, datas, main_tokens, token_tags, init_idx),
+            .unwrap_optional,
+            .grouped_expression,
+            => blk: {
+                const data = datas[init_idx].node_and_token;
+                break :blk isLikelyTypeAlias(tree, tags, datas, main_tokens, token_tags, @intFromEnum(data[0]));
+            },
             else => false,
         };
+    }
+
+    fn isTypeSwitchAlias(
+        tree: *const std.zig.Ast,
+        tags: []const std.zig.Ast.Node.Tag,
+        datas: []const std.zig.Ast.Node.Data,
+        main_tokens: []const std.zig.Ast.TokenIndex,
+        token_tags: []const std.zig.Token.Tag,
+        init_idx: usize,
+    ) bool {
+        const full_switch = tree.switchFull(@enumFromInt(init_idx));
+        for (full_switch.ast.cases) |case_node| {
+            const full_case = tree.fullSwitchCase(case_node) orelse return false;
+            const target_idx = @intFromEnum(full_case.ast.target_expr);
+            if (isCompileErrorExpr(tree, tags, datas, token_tags, target_idx)) continue;
+            if (!isLikelyTypeAlias(tree, tags, datas, main_tokens, token_tags, target_idx)) return false;
+        }
+        return true;
+    }
+
+    fn isCompileErrorExpr(
+        tree: *const std.zig.Ast,
+        tags: []const std.zig.Ast.Node.Tag,
+        datas: []const std.zig.Ast.Node.Data,
+        token_tags: []const std.zig.Token.Tag,
+        node_idx: usize,
+    ) bool {
+        return switch (tags[node_idx]) {
+            .builtin_call, .builtin_call_comma, .builtin_call_two, .builtin_call_two_comma => blk: {
+                const builtin_name = builtinCallName(tree, tags, token_tags, node_idx) orelse break :blk false;
+                break :blk std.mem.eql(u8, builtin_name, "@compileError");
+            },
+            .unwrap_optional,
+            .grouped_expression,
+            => blk: {
+                const data = datas[node_idx].node_and_token;
+                break :blk isCompileErrorExpr(tree, tags, datas, token_tags, @intFromEnum(data[0]));
+            },
+            else => false,
+        };
+    }
+
+    fn builtinCallName(
+        tree: *const std.zig.Ast,
+        tags: []const std.zig.Ast.Node.Tag,
+        token_tags: []const std.zig.Token.Tag,
+        node_idx: usize,
+    ) ?[]const u8 {
+        switch (tags[node_idx]) {
+            .builtin_call, .builtin_call_comma, .builtin_call_two, .builtin_call_two_comma => {},
+            else => return null,
+        }
+
+        const builtin_token = tree.nodes.items(.main_token)[node_idx];
+        if (builtin_token >= token_tags.len) return null;
+        if (token_tags[builtin_token] != .builtin) return null;
+        return tree.tokenSlice(builtin_token);
     }
 
     fn isTypeFactoryBuiltin(name: []const u8) bool {
@@ -263,6 +331,44 @@ pub const IdentifierStyleRule = struct {
             std.mem.eql(u8, name, "@Struct") or
             std.mem.eql(u8, name, "@Enum") or
             std.mem.eql(u8, name, "@Union");
+    }
+
+    fn isTypeInfoBuiltin(name: []const u8) bool {
+        return std.mem.eql(u8, name, "@typeInfo") or std.mem.eql(u8, name, "@TypeInfo");
+    }
+
+    fn isTypeInfoDerivedExpr(
+        tree: *const std.zig.Ast,
+        tags: []const std.zig.Ast.Node.Tag,
+        datas: []const std.zig.Ast.Node.Data,
+        token_tags: []const std.zig.Token.Tag,
+        node_idx: usize,
+    ) bool {
+        return switch (tags[node_idx]) {
+            .field_access => blk: {
+                const data = datas[node_idx].node_and_token;
+                const base_idx = @intFromEnum(data[0]);
+                if (isTypeInfoBuiltinCall(tree, tags, token_tags, base_idx)) break :blk true;
+                break :blk isTypeInfoDerivedExpr(tree, tags, datas, token_tags, base_idx);
+            },
+            .unwrap_optional,
+            .grouped_expression,
+            => blk: {
+                const data = datas[node_idx].node_and_token;
+                break :blk isTypeInfoDerivedExpr(tree, tags, datas, token_tags, @intFromEnum(data[0]));
+            },
+            else => false,
+        };
+    }
+
+    fn isTypeInfoBuiltinCall(
+        tree: *const std.zig.Ast,
+        tags: []const std.zig.Ast.Node.Tag,
+        token_tags: []const std.zig.Token.Tag,
+        node_idx: usize,
+    ) bool {
+        const builtin_name = builtinCallName(tree, tags, token_tags, node_idx) orelse return false;
+        return isTypeInfoBuiltin(builtin_name);
     }
 
     fn isTypeAliasCallee(
@@ -281,11 +387,12 @@ pub const IdentifierStyleRule = struct {
                 return isPascalCase(ident_name);
             },
             .field_access => {
+                if (isTypeInfoDerivedExpr(tree, tags, datas, token_tags, node_idx)) return true;
                 const data = datas[node_idx];
                 const field_token = data.node_and_token[1];
                 if (field_token < token_tags.len and token_tags[field_token] == .identifier) {
                     const field_name = tree.tokenSlice(field_token);
-                    return isPascalCase(field_name);
+                    return isPascalCase(field_name) or isCTypeFieldName(field_name);
                 }
                 return false;
             },
@@ -297,6 +404,11 @@ pub const IdentifierStyleRule = struct {
             },
             else => false,
         };
+    }
+
+    fn isCTypeFieldName(name: []const u8) bool {
+        if (!isLowerSnakeCase(name)) return false;
+        return std.mem.endsWith(u8, name, "_t");
     }
 
     fn isFunctionAlias(
