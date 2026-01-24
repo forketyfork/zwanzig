@@ -210,7 +210,9 @@ fn applyDirectiveAllRules(
             try map.all_rules_suppressed_lines.put(target_line, {});
         },
         .file_scope => {
-            active.all_rules_start = directive_line;
+            if (active.all_rules_start == null) {
+                active.all_rules_start = directive_line;
+            }
         },
         .enable => {
             if (active.all_rules_start) |start| {
@@ -253,7 +255,9 @@ fn applyDirectiveWithRules(
                 try entry.value_ptr.put(target_line, {});
             },
             .file_scope => {
-                try active.rule_starts.put(rule_id, directive_line);
+                if (!active.rule_starts.contains(rule_id)) {
+                    try active.rule_starts.put(rule_id, directive_line);
+                }
             },
             .enable => {
                 if (active.rule_starts.fetchRemove(rule_id)) |kv| {
@@ -412,4 +416,48 @@ test "parseSuppressions: all rules re-enable" {
     try std.testing.expect(map.isSuppressed(2, "any-rule"));
     try std.testing.expect(!map.isSuppressed(3, "any-rule"));
     try std.testing.expect(!map.isSuppressed(4, "any-rule"));
+}
+
+test "parseSuppressions: repeated disable preserves first start" {
+    const allocator = std.testing.allocator;
+    const content =
+        \\// zwanzig-disable
+        \\const x = 1;
+        \\// zwanzig-disable
+        \\const y = 2;
+        \\// zwanzig-enable
+        \\const z = 3;
+    ;
+
+    var map = try parseSuppressions(allocator, content);
+    defer map.deinit();
+
+    try std.testing.expect(map.isSuppressed(1, "any-rule"));
+    try std.testing.expect(map.isSuppressed(2, "any-rule"));
+    try std.testing.expect(map.isSuppressed(3, "any-rule"));
+    try std.testing.expect(map.isSuppressed(4, "any-rule"));
+    try std.testing.expect(!map.isSuppressed(5, "any-rule"));
+    try std.testing.expect(!map.isSuppressed(6, "any-rule"));
+}
+
+test "parseSuppressions: repeated rule-specific disable preserves first start" {
+    const allocator = std.testing.allocator;
+    const content =
+        \\// zwanzig-disable: todo
+        \\const x = 1;
+        \\// zwanzig-disable: todo
+        \\const y = 2;
+        \\// zwanzig-enable: todo
+        \\const z = 3;
+    ;
+
+    var map = try parseSuppressions(allocator, content);
+    defer map.deinit();
+
+    try std.testing.expect(map.isSuppressed(1, "todo"));
+    try std.testing.expect(map.isSuppressed(2, "todo"));
+    try std.testing.expect(map.isSuppressed(3, "todo"));
+    try std.testing.expect(map.isSuppressed(4, "todo"));
+    try std.testing.expect(!map.isSuppressed(5, "todo"));
+    try std.testing.expect(!map.isSuppressed(6, "todo"));
 }
