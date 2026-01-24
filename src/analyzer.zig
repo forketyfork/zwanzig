@@ -13,6 +13,7 @@ const Cache = cache_mod.Cache;
 const CacheKey = cache_mod.CacheKey;
 const log = std.log.scoped(.analyzer);
 const diagnostic_mod = @import("diagnostic.zig");
+const suppression = @import("suppression.zig");
 
 pub const Analyzer = struct {
     allocator: std.mem.Allocator,
@@ -162,7 +163,11 @@ pub const Analyzer = struct {
             try self.loadTypedIr(&source);
         }
 
+        const diag_start_index = self.diagnostics.items.len;
+
         try self.runChecksOnSource(&source);
+
+        try self.filterSuppressedDiagnostics(content, diag_start_index);
 
         if (self.use_cache and self.cache != null) {
             const cache_key = CacheKey.init(content, self.getBuildMetadata());
@@ -209,6 +214,26 @@ pub const Analyzer = struct {
                 log.debug("rule: done {s} ({s})", .{ source.getFilePath(), rule.name });
             }
         }
+    }
+
+    fn filterSuppressedDiagnostics(
+        self: *Analyzer,
+        content: [:0]const u8,
+        start_index: usize,
+    ) !void {
+        var sup_map = try suppression.parseSuppressions(self.allocator, content);
+        defer sup_map.deinit();
+
+        var write_index = start_index;
+        for (self.diagnostics.items[start_index..]) |*diag| {
+            if (!sup_map.isSuppressed(diag.range.start.line, diag.rule_id)) {
+                self.diagnostics.items[write_index] = diag.*;
+                write_index += 1;
+            } else {
+                diag.deinit(self.allocator);
+            }
+        }
+        self.diagnostics.shrinkRetainingCapacity(write_index);
     }
 
     pub const OutputFormat = enum {
