@@ -5,7 +5,7 @@
 3. Run the scripted checklist:
 
    ```bash
-   just release-check TAG=v0.2.1
+   just release-check v0.2.1
    ```
 
    If `just` is not available:
