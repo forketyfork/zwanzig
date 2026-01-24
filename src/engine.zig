@@ -8,8 +8,8 @@ const graph = @import("engine/graph.zig");
 const analysis = @import("engine/analysis.zig");
 
 pub const EngineError = base.EngineError;
-pub const DEFAULT_MAX_INLINE_DEPTH = base.DEFAULT_MAX_INLINE_DEPTH;
-pub const DEFAULT_MAX_WORKLIST_STEPS = base.DEFAULT_MAX_WORKLIST_STEPS;
+pub const default_max_inline_depth = base.default_max_inline_depth;
+pub const default_max_worklist_steps = base.default_max_worklist_steps;
 
 pub const AbstractValue = value.AbstractValue;
 

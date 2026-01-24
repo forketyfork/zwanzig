@@ -9,7 +9,7 @@ const ProgramState = @import("state.zig").ProgramState;
 
 /// Maximum number of unique states per program point.
 /// Beyond this, new states at the same point are dropped (widening approximation).
-const MAX_STATES_PER_POINT: u32 = 10;
+const max_states_per_point: u32 = 10;
 
 /// A node in the exploded graph, keyed by (ProgramPoint, ProgramState).
 pub const ExplodedNode = struct {
@@ -97,7 +97,7 @@ pub const ExplodedGraph = struct {
         // Check per-point state limit (widening approximation)
         const point_key = point.hash();
         const current_count = self.point_state_counts.get(point_key) orelse 0;
-        if (current_count >= MAX_STATES_PER_POINT) {
+        if (current_count >= max_states_per_point) {
             // Too many states at this point - approximate by not exploring further.
             // Use maxInt as sentinel; addEdge will reject it via bounds check.
             return .{ .index = std.math.maxInt(u32), .is_new = false };

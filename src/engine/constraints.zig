@@ -6,7 +6,7 @@ const VarId = ids.VarId;
 
 /// Maximum number of constraints per state to prevent state explosion in loops.
 /// When this limit is reached, new constraints are silently dropped (over-approximation).
-const MAX_CONSTRAINTS: usize = 50;
+const max_constraints: usize = 50;
 
 /// Comparison operator for constraints.
 pub const CompareOp = enum {
@@ -166,7 +166,7 @@ pub const ConstraintManager = struct {
     /// to prevent state explosion in loops (safe over-approximation).
     pub fn addConstraint(self: *ConstraintManager, constraint: Constraint) !void {
         // Limit constraints to prevent state explosion
-        if (self.constraints.items.len >= MAX_CONSTRAINTS) {
+        if (self.constraints.items.len >= max_constraints) {
             return;
         }
         // Check for duplicate before adding
