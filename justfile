@@ -32,3 +32,6 @@ validate:
     ./validate.sh
 
 ci: build test lint
+
+release-check TAG:
+    ./scripts/release-check.sh {{TAG}}

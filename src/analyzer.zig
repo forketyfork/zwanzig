@@ -20,6 +20,7 @@ pub const Analyzer = struct {
     checker_manager: CheckerManagerWithRules,
     diagnostics: std.ArrayList(Diagnostic),
     rule_filter: RuleFilter,
+    tool_version: []const u8 = "unknown",
     zir_bridge: ?ZirBridge = null,
     use_typed_ir: bool = false,
     build_metadata: ?BuildMetadata = null,
@@ -90,6 +91,10 @@ pub const Analyzer = struct {
 
     pub fn setRuleFilter(self: *Analyzer, filter: RuleFilter) void {
         self.rule_filter = filter;
+    }
+
+    pub fn setToolVersion(self: *Analyzer, version: []const u8) void {
+        self.tool_version = version;
     }
 
     pub fn setBuildMetadata(self: *Analyzer, metadata: BuildMetadata) !void {
@@ -308,7 +313,9 @@ pub const Analyzer = struct {
         try writer.writeAll("        \"driver\": {\n");
         try writer.writeAll("          \"name\": \"Zwanzig\",\n");
         try writer.writeAll("          \"informationUri\": \"https://github.com/forketyfork/zwanzig\",\n");
-        try writer.writeAll("          \"version\": \"0.1.0\",\n");
+        try writer.writeAll("          \"version\": ");
+        try writeJsonString(writer, self.tool_version);
+        try writer.writeAll(",\n");
         try writer.writeAll("          \"rules\": [\n");
 
         var first = true;

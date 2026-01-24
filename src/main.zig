@@ -321,6 +321,7 @@ pub fn main() !void {
 
     var analyzer = Analyzer.init(allocator);
     defer analyzer.deinit();
+    analyzer.setToolVersion(build_options.version);
 
     try analyzer.registerRule(&DupeImportRule.rule);
     try analyzer.registerRule(&TodoCommentRule.rule);
