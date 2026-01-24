@@ -326,7 +326,6 @@ pub const IdentifierStyleRule = struct {
             std.mem.eql(u8, name, "@Type") or
             std.mem.eql(u8, name, "@This") or
             std.mem.eql(u8, name, "@OpaqueType") or
-            std.mem.eql(u8, name, "@TypeInfo") or
             std.mem.eql(u8, name, "@Vector") or
             std.mem.eql(u8, name, "@Struct") or
             std.mem.eql(u8, name, "@Enum") or
@@ -334,7 +333,7 @@ pub const IdentifierStyleRule = struct {
     }
 
     fn isTypeInfoBuiltin(name: []const u8) bool {
-        return std.mem.eql(u8, name, "@typeInfo") or std.mem.eql(u8, name, "@TypeInfo");
+        return std.mem.eql(u8, name, "@typeInfo");
     }
 
     fn isTypeInfoDerivedExpr(
@@ -348,14 +347,44 @@ pub const IdentifierStyleRule = struct {
             .field_access => blk: {
                 const data = datas[node_idx].node_and_token;
                 const base_idx = @intFromEnum(data[0]);
-                if (isTypeInfoBuiltinCall(tree, tags, token_tags, base_idx)) break :blk true;
-                break :blk isTypeInfoDerivedExpr(tree, tags, datas, token_tags, base_idx);
+                const field_token = data[1];
+                if (field_token >= token_tags.len or token_tags[field_token] != .identifier) break :blk false;
+                const field_name = tree.tokenSlice(field_token);
+                if (!isTypeInfoTypeField(field_name)) break :blk false;
+                break :blk isTypeInfoBaseExpr(tree, tags, datas, token_tags, base_idx);
             },
             .unwrap_optional,
             .grouped_expression,
             => blk: {
                 const data = datas[node_idx].node_and_token;
                 break :blk isTypeInfoDerivedExpr(tree, tags, datas, token_tags, @intFromEnum(data[0]));
+            },
+            else => false,
+        };
+    }
+
+    fn isTypeInfoTypeField(name: []const u8) bool {
+        return std.mem.eql(u8, name, "return_type");
+    }
+
+    fn isTypeInfoBaseExpr(
+        tree: *const std.zig.Ast,
+        tags: []const std.zig.Ast.Node.Tag,
+        datas: []const std.zig.Ast.Node.Data,
+        token_tags: []const std.zig.Token.Tag,
+        node_idx: usize,
+    ) bool {
+        return switch (tags[node_idx]) {
+            .builtin_call, .builtin_call_comma, .builtin_call_two, .builtin_call_two_comma => isTypeInfoBuiltinCall(tree, tags, token_tags, node_idx),
+            .field_access => blk: {
+                const data = datas[node_idx].node_and_token;
+                break :blk isTypeInfoBaseExpr(tree, tags, datas, token_tags, @intFromEnum(data[0]));
+            },
+            .unwrap_optional,
+            .grouped_expression,
+            => blk: {
+                const data = datas[node_idx].node_and_token;
+                break :blk isTypeInfoBaseExpr(tree, tags, datas, token_tags, @intFromEnum(data[0]));
             },
             else => false,
         };
