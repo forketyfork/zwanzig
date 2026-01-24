@@ -1,4 +1,3 @@
-// TODO: remove this comment after testing SARIF upload
 pub const source = @import("source.zig");
 pub const diagnostic = @import("diagnostic.zig");
 pub const rule = @import("rule.zig");
