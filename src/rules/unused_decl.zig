@@ -31,6 +31,48 @@ pub const UnusedDeclRule = struct {
         is_function: bool,
     };
 
+    /// Kind of declaration for more descriptive diagnostic messages.
+    const DeclKind = enum {
+        function,
+        type_decl, // struct, enum, union
+        constant,
+        variable,
+        declaration, // fallback when kind cannot be determined
+    };
+
+    /// Classify a declaration using ZIR-based type information for better diagnostics.
+    fn classifyDecl(src: *Source, decl: DeclInfo) DeclKind {
+        if (decl.is_function) return .function;
+        if (decl.owner_container != null) return .declaration;
+
+        // Try to get type info from ZIR
+        const zir_decl = src.findDecl(decl.name) orelse {
+            // No ZIR info available, use basic classification
+            return .declaration;
+        };
+
+        // Check if it's a type
+        switch (zir_decl.type_info.kind) {
+            .@"struct", .@"enum", .@"union", .type_type, .function => return .type_decl,
+            else => {},
+        }
+
+        // It's a value
+        if (zir_decl.is_const) return .constant;
+        return .variable;
+    }
+
+    /// Get a human-readable description for a declaration kind.
+    fn declKindDescription(kind: DeclKind) []const u8 {
+        return switch (kind) {
+            .function => "Function",
+            .type_decl => "Type",
+            .constant => "Constant",
+            .variable => "Variable",
+            .declaration => "Declaration",
+        };
+    }
+
     fn check(
         src: *Source,
         allocator: std.mem.Allocator,
@@ -54,10 +96,14 @@ pub const UnusedDeclRule = struct {
             if (!try isDeclUsed(tree, allocator, decl)) {
                 const range = try src.byteRangeToSourceRange(decl.byte_offset, decl.byte_offset + decl.name.len);
 
+                // Use ZIR-based type info for more descriptive messages
+                const decl_kind = classifyDecl(src, decl);
+                const kind_desc = declKindDescription(decl_kind);
+
                 const message = try std.fmt.allocPrint(
                     allocator,
-                    "Declaration '{s}' is never used",
-                    .{decl.name},
+                    "{s} '{s}' is never used",
+                    .{ kind_desc, decl.name },
                 );
                 defer allocator.free(message);
 

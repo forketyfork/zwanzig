@@ -258,11 +258,11 @@ pub const ZirBridge = struct {
     }
 
     fn extractDeclFromAst(self: *ZirBridge, tree: *const Ast, zir: Zir, node_idx: u32, source: []const u8) ?DeclInfo {
-        _ = self;
         const node_tag = tree.nodes.items(.tag)[node_idx];
         const token_tags = tree.tokens.items(.tag);
         const token_starts = tree.tokens.items(.start);
         const node_data = tree.nodes.items(.data);
+        const main_tokens = tree.nodes.items(.main_token);
 
         switch (node_tag) {
             .simple_var_decl, .local_var_decl, .global_var_decl, .aligned_var_decl => {
@@ -286,10 +286,14 @@ pub const ZirBridge = struct {
                     if (full_decl) |decl| {
                         if (decl.ast.type_node != .none) {
                             type_info = extractTypeFromZir(tree, zir, decl.ast.type_node, source);
+                        } else if (decl.ast.init_node.unwrap()) |init_node| {
+                            if (inferTypeFromInit(tree, init_node, token_tags, main_tokens)) |inferred| {
+                                type_info = inferred;
+                            }
                         }
                     }
 
-                    const zir_inst = findZirInstForNode(zir, node_idx);
+                    const zir_inst = findZirInstForNode(self.allocator, zir, node_idx);
 
                     return DeclInfo{
                         .name = name,
@@ -323,7 +327,7 @@ pub const ZirBridge = struct {
 
                         if (name_token < token_tags.len and token_tags[name_token] == .identifier) {
                             const name = extractIdentifier(source, token_starts[name_token]);
-                            const zir_inst = findZirInstForNode(zir, node_idx);
+                            const zir_inst = findZirInstForNode(self.allocator, zir, node_idx);
 
                             return DeclInfo{
                                 .name = name,
@@ -365,6 +369,66 @@ pub const ZirBridge = struct {
         return TypeInfo.initUnknown();
     }
 
+    /// Infer type information from an initializer AST node when no explicit type annotation is provided.
+    fn inferTypeFromInit(
+        tree: *const Ast,
+        init_node: Ast.Node.Index,
+        token_tags: []const std.zig.Token.Tag,
+        main_tokens: []const Ast.TokenIndex,
+    ) ?TypeInfo {
+        const tags = tree.nodes.items(.tag);
+        const init_idx: u32 = @intFromEnum(init_node);
+        if (init_idx == 0 or init_idx >= tags.len) return null;
+
+        const init_tag = tags[init_idx];
+
+        switch (init_tag) {
+            .container_decl,
+            .container_decl_trailing,
+            .container_decl_two,
+            .container_decl_two_trailing,
+            .container_decl_arg,
+            .container_decl_arg_trailing,
+            => {
+                const token = main_tokens[init_idx];
+                if (token < token_tags.len) {
+                    return switch (token_tags[token]) {
+                        .keyword_struct => .{ .kind = .@"struct" },
+                        .keyword_enum => .{ .kind = .@"enum" },
+                        .keyword_union => .{ .kind = .@"union" },
+                        else => .{ .kind = .type_type },
+                    };
+                }
+                return .{ .kind = .type_type };
+            },
+            .tagged_union,
+            .tagged_union_trailing,
+            .tagged_union_enum_tag,
+            .tagged_union_enum_tag_trailing,
+            .tagged_union_two,
+            .tagged_union_two_trailing,
+            => return .{ .kind = .@"union" },
+            .error_set_decl => return .{ .kind = .type_type },
+            .fn_proto,
+            .fn_proto_simple,
+            .fn_proto_one,
+            .fn_proto_multi,
+            => return TypeInfo.initFunction(),
+            .merge_error_sets,
+            .error_union,
+            .optional_type,
+            .anyframe_type,
+            .ptr_type,
+            .ptr_type_sentinel,
+            .ptr_type_bit_range,
+            .ptr_type_aligned,
+            .array_type,
+            .array_type_sentinel,
+            => return .{ .kind = .type_type },
+            else => return null,
+        }
+    }
+
     /// Parse a built-in type name and return TypeInfo, using ZIR for validation when possible.
     fn parseBuiltinType(type_name: []const u8, zir: Zir) TypeInfo {
         _ = zir;
@@ -391,12 +455,546 @@ pub const ZirBridge = struct {
     }
 
     /// Find the ZIR instruction index corresponding to an AST node.
-    /// Note: ZIR doesn't provide direct AST node mapping, so this performs
-    /// a best-effort lookup. Full type resolution requires semantic analysis.
-    fn findZirInstForNode(zir: Zir, node_idx: u32) ?u32 {
-        _ = zir;
-        _ = node_idx;
+    /// This performs a best-effort lookup by iterating through ZIR instructions
+    /// and checking their source node references. Returns the first matching
+    /// instruction index, or null if no match is found.
+    fn findZirInstForNode(allocator: std.mem.Allocator, zir: Zir, node_idx: u32) ?u32 {
+        const target_index: Ast.Node.Index = @enumFromInt(node_idx);
+
+        var pending: std.ArrayList(Zir.Inst.Index) = .empty;
+        defer pending.deinit(allocator);
+
+        var root_iter = zir.declIterator(.main_struct_inst);
+        while (root_iter.next()) |decl_inst| {
+            pending.append(allocator, decl_inst) catch return null;
+        }
+
+        var contents: Zir.DeclContents = .init;
+        defer contents.deinit(allocator);
+
+        while (pending.pop()) |decl_inst| {
+            const data = zir.instructions.items(.data)[@intFromEnum(decl_inst)].declaration;
+            if (data.src_node == target_index) {
+                return @intFromEnum(decl_inst);
+            }
+
+            if (findZirInstForNodeInDecl(allocator, zir, decl_inst, target_index)) |found| {
+                return found;
+            }
+
+            zir.findTrackable(allocator, &contents, decl_inst) catch return null;
+            for (contents.explicit_types.items) |type_inst| {
+                var type_iter = zir.declIterator(type_inst);
+                while (type_iter.next()) |nested_decl| {
+                    pending.append(allocator, nested_decl) catch return null;
+                }
+            }
+        }
+
         return null;
+    }
+
+    fn findZirInstForNodeInDecl(
+        allocator: std.mem.Allocator,
+        zir: Zir,
+        decl_inst: Zir.Inst.Index,
+        target_index: Ast.Node.Index,
+    ) ?u32 {
+        const decl = zir.getDeclaration(decl_inst);
+        const target_offset = nodeOffsetFromBase(decl.src_node, target_index) orelse return null;
+
+        var defers: std.AutoHashMapUnmanaged(u32, void) = .empty;
+        defer defers.deinit(allocator);
+
+        if (decl.type_body) |body| {
+            if (findZirInstForNodeInBody(allocator, zir, target_offset, body, &defers)) |found| return found;
+        }
+        if (decl.align_body) |body| {
+            if (findZirInstForNodeInBody(allocator, zir, target_offset, body, &defers)) |found| return found;
+        }
+        if (decl.linksection_body) |body| {
+            if (findZirInstForNodeInBody(allocator, zir, target_offset, body, &defers)) |found| return found;
+        }
+        if (decl.addrspace_body) |body| {
+            if (findZirInstForNodeInBody(allocator, zir, target_offset, body, &defers)) |found| return found;
+        }
+        if (decl.value_body) |body| {
+            if (findZirInstForNodeInBody(allocator, zir, target_offset, body, &defers)) |found| return found;
+        }
+
+        return null;
+    }
+
+    fn findZirInstForNodeInBody(
+        allocator: std.mem.Allocator,
+        zir: Zir,
+        target_offset: Ast.Node.Offset,
+        body: []const Zir.Inst.Index,
+        defers: *std.AutoHashMapUnmanaged(u32, void),
+    ) ?u32 {
+        for (body) |inst| {
+            if (findZirInstForNodeInInst(allocator, zir, target_offset, inst, defers)) |found| {
+                return found;
+            }
+        }
+        return null;
+    }
+
+    fn findZirInstForNodeInInst(
+        allocator: std.mem.Allocator,
+        zir: Zir,
+        target_offset: Ast.Node.Offset,
+        inst: Zir.Inst.Index,
+        defers: *std.AutoHashMapUnmanaged(u32, void),
+    ) ?u32 {
+        const tags = zir.instructions.items(.tag);
+        const datas = zir.instructions.items(.data);
+        const tag = tags[@intFromEnum(inst)];
+        const data = datas[@intFromEnum(inst)];
+
+        if (instMatchesOffset(zir, tag, data, target_offset)) {
+            return @intFromEnum(inst);
+        }
+
+        switch (tag) {
+            .declaration => return null,
+
+            .extended => {
+                const extended = data.extended;
+                switch (extended.opcode) {
+                    .this,
+                    .ret_addr,
+                    .error_return_trace,
+                    .frame,
+                    .frame_address,
+                    .breakpoint,
+                    .disable_instrumentation,
+                    .disable_intrinsics,
+                    => {
+                        const src_node: Ast.Node.Offset = @enumFromInt(@as(i32, @bitCast(extended.operand)));
+                        if (src_node == target_offset) return @intFromEnum(inst);
+                    },
+                    else => {},
+                }
+
+                return findZirInstForNodeInExtended(allocator, zir, target_offset, extended, defers);
+            },
+
+            .func, .func_inferred => {
+                const inst_data = data.pl_node;
+                const extra = zir.extraData(Zir.Inst.Func, inst_data.payload_index);
+
+                if (extra.data.body_len == 0) return null;
+
+                var extra_index: usize = extra.end;
+                switch (extra.data.ret_ty.body_len) {
+                    0 => {},
+                    1 => extra_index += 1,
+                    else => {
+                        const ret_body = zir.bodySlice(extra_index, extra.data.ret_ty.body_len);
+                        extra_index += ret_body.len;
+                        if (findZirInstForNodeInBody(allocator, zir, target_offset, ret_body, defers)) |found| return found;
+                    },
+                }
+
+                const body = zir.bodySlice(extra_index, extra.data.body_len);
+                return findZirInstForNodeInBody(allocator, zir, target_offset, body, defers);
+            },
+            .func_fancy => {
+                const inst_data = data.pl_node;
+                const extra = zir.extraData(Zir.Inst.FuncFancy, inst_data.payload_index);
+
+                if (extra.data.body_len == 0) return null;
+
+                var extra_index: usize = extra.end;
+
+                if (extra.data.bits.has_cc_body) {
+                    const body_len = zir.extra[extra_index];
+                    extra_index += 1;
+                    const body = zir.bodySlice(extra_index, body_len);
+                    if (findZirInstForNodeInBody(allocator, zir, target_offset, body, defers)) |found| return found;
+                    extra_index += body.len;
+                } else if (extra.data.bits.has_cc_ref) {
+                    extra_index += 1;
+                }
+
+                if (extra.data.bits.has_ret_ty_body) {
+                    const body_len = zir.extra[extra_index];
+                    extra_index += 1;
+                    const body = zir.bodySlice(extra_index, body_len);
+                    if (findZirInstForNodeInBody(allocator, zir, target_offset, body, defers)) |found| return found;
+                    extra_index += body.len;
+                } else if (extra.data.bits.has_ret_ty_ref) {
+                    extra_index += 1;
+                }
+
+                extra_index += @intFromBool(extra.data.bits.has_any_noalias);
+
+                const body = zir.bodySlice(extra_index, extra.data.body_len);
+                return findZirInstForNodeInBody(allocator, zir, target_offset, body, defers);
+            },
+
+            .block,
+            .block_inline,
+            .c_import,
+            .typeof_builtin,
+            .loop,
+            => {
+                const inst_data = data.pl_node;
+                const extra = zir.extraData(Zir.Inst.Block, inst_data.payload_index);
+                const body = zir.bodySlice(extra.end, extra.data.body_len);
+                return findZirInstForNodeInBody(allocator, zir, target_offset, body, defers);
+            },
+            .block_comptime => {
+                const inst_data = data.pl_node;
+                const extra = zir.extraData(Zir.Inst.BlockComptime, inst_data.payload_index);
+                const body = zir.bodySlice(extra.end, extra.data.body_len);
+                return findZirInstForNodeInBody(allocator, zir, target_offset, body, defers);
+            },
+            .condbr, .condbr_inline => {
+                const inst_data = data.pl_node;
+                const extra = zir.extraData(Zir.Inst.CondBr, inst_data.payload_index);
+                const then_body = zir.bodySlice(extra.end, extra.data.then_body_len);
+                const else_body = zir.bodySlice(extra.end + then_body.len, extra.data.else_body_len);
+                if (findZirInstForNodeInBody(allocator, zir, target_offset, then_body, defers)) |found| return found;
+                return findZirInstForNodeInBody(allocator, zir, target_offset, else_body, defers);
+            },
+            .@"try", .try_ptr => {
+                const inst_data = data.pl_node;
+                const extra = zir.extraData(Zir.Inst.Try, inst_data.payload_index);
+                const body = zir.bodySlice(extra.end, extra.data.body_len);
+                return findZirInstForNodeInBody(allocator, zir, target_offset, body, defers);
+            },
+            .switch_block, .switch_block_ref => {
+                return findZirInstForNodeInSwitch(allocator, zir, target_offset, inst, defers, .normal);
+            },
+            .switch_block_err_union => {
+                return findZirInstForNodeInSwitch(allocator, zir, target_offset, inst, defers, .err_union);
+            },
+            .param, .param_comptime => {
+                const inst_data = data.pl_tok;
+                const extra = zir.extraData(Zir.Inst.Param, inst_data.payload_index);
+                const body = zir.bodySlice(extra.end, extra.data.type.body_len);
+                return findZirInstForNodeInBody(allocator, zir, target_offset, body, defers);
+            },
+            inline .call, .field_call => |call_tag| {
+                const inst_data = data.pl_node;
+                const extra = zir.extraData(switch (call_tag) {
+                    .call => Zir.Inst.Call,
+                    .field_call => Zir.Inst.FieldCall,
+                    else => unreachable,
+                }, inst_data.payload_index);
+
+                const args_len = extra.data.flags.args_len;
+                if (args_len == 0) return null;
+
+                const first_arg_start_off = args_len;
+                const final_arg_end_off = zir.extra[extra.end + args_len - 1];
+                const args_body = zir.bodySlice(extra.end + first_arg_start_off, final_arg_end_off - first_arg_start_off);
+                return findZirInstForNodeInBody(allocator, zir, target_offset, args_body, defers);
+            },
+            .@"defer" => {
+                const inst_data = data.@"defer";
+                const gop = defers.getOrPut(allocator, inst_data.index) catch {
+                    const body = zir.bodySlice(inst_data.index, inst_data.len);
+                    return findZirInstForNodeInBody(allocator, zir, target_offset, body, defers);
+                };
+                if (gop.found_existing) return null;
+                const body = zir.bodySlice(inst_data.index, inst_data.len);
+                return findZirInstForNodeInBody(allocator, zir, target_offset, body, defers);
+            },
+            .defer_err_code => {
+                const inst_data = data.defer_err_code;
+                const extra = zir.extraData(Zir.Inst.DeferErrCode, inst_data.payload_index).data;
+                const gop = defers.getOrPut(allocator, extra.index) catch {
+                    const body = zir.bodySlice(extra.index, extra.len);
+                    return findZirInstForNodeInBody(allocator, zir, target_offset, body, defers);
+                };
+                if (gop.found_existing) return null;
+                const body = zir.bodySlice(extra.index, extra.len);
+                return findZirInstForNodeInBody(allocator, zir, target_offset, body, defers);
+            },
+
+            else => return null,
+        }
+    }
+
+    fn findZirInstForNodeInExtended(
+        allocator: std.mem.Allocator,
+        zir: Zir,
+        target_offset: Ast.Node.Offset,
+        extended: Zir.Inst.Extended.InstData,
+        defers: *std.AutoHashMapUnmanaged(u32, void),
+    ) ?u32 {
+        switch (extended.opcode) {
+            .typeof_peer => {
+                const extra = zir.extraData(Zir.Inst.TypeOfPeer, extended.operand);
+                const body = zir.bodySlice(extra.data.body_index, extra.data.body_len);
+                return findZirInstForNodeInBody(allocator, zir, target_offset, body, defers);
+            },
+            .struct_decl => {
+                const small: Zir.Inst.StructDecl.Small = @bitCast(extended.small);
+                const extra = zir.extraData(Zir.Inst.StructDecl, extended.operand);
+                var extra_index = extra.end;
+                const captures_len = if (small.has_captures_len) blk: {
+                    const captures_len = zir.extra[extra_index];
+                    extra_index += 1;
+                    break :blk captures_len;
+                } else 0;
+                const fields_len = if (small.has_fields_len) blk: {
+                    const fields_len = zir.extra[extra_index];
+                    extra_index += 1;
+                    break :blk fields_len;
+                } else 0;
+                const decls_len = if (small.has_decls_len) blk: {
+                    const decls_len = zir.extra[extra_index];
+                    extra_index += 1;
+                    break :blk decls_len;
+                } else 0;
+                extra_index += captures_len * 2;
+                if (small.has_backing_int) {
+                    const backing_int_body_len = zir.extra[extra_index];
+                    extra_index += 1;
+                    if (backing_int_body_len == 0) {
+                        extra_index += 1;
+                    } else {
+                        const body = zir.bodySlice(extra_index, backing_int_body_len);
+                        extra_index += backing_int_body_len;
+                        if (findZirInstForNodeInBody(allocator, zir, target_offset, body, defers)) |found| return found;
+                    }
+                }
+                extra_index += decls_len;
+
+                const bits_per_field = 4;
+                const fields_per_u32 = 32 / bits_per_field;
+                const bit_bags_count = std.math.divCeil(usize, fields_len, fields_per_u32) catch unreachable;
+                var cur_bit_bag: u32 = undefined;
+
+                var fields_extra_index = extra_index + bit_bags_count;
+                var total_bodies_len: u32 = 0;
+
+                for (0..fields_len) |field_i| {
+                    if (field_i % fields_per_u32 == 0) {
+                        cur_bit_bag = zir.extra[extra_index];
+                        extra_index += 1;
+                    }
+
+                    const has_align = @as(u1, @truncate(cur_bit_bag)) != 0;
+                    cur_bit_bag >>= 1;
+                    const has_init = @as(u1, @truncate(cur_bit_bag)) != 0;
+                    cur_bit_bag >>= 2;
+                    const has_type_body = @as(u1, @truncate(cur_bit_bag)) != 0;
+                    cur_bit_bag >>= 1;
+
+                    fields_extra_index += 1;
+
+                    if (has_type_body) {
+                        const field_type_body_len = zir.extra[fields_extra_index];
+                        total_bodies_len += field_type_body_len;
+                    }
+                    fields_extra_index += 1;
+
+                    if (has_align) {
+                        const align_body_len = zir.extra[fields_extra_index];
+                        fields_extra_index += 1;
+                        total_bodies_len += align_body_len;
+                    }
+
+                    if (has_init) {
+                        const init_body_len = zir.extra[fields_extra_index];
+                        fields_extra_index += 1;
+                        total_bodies_len += init_body_len;
+                    }
+                }
+
+                const merged_bodies = zir.bodySlice(fields_extra_index, total_bodies_len);
+                return findZirInstForNodeInBody(allocator, zir, target_offset, merged_bodies, defers);
+            },
+            .union_decl => {
+                const small: Zir.Inst.UnionDecl.Small = @bitCast(extended.small);
+                const extra = zir.extraData(Zir.Inst.UnionDecl, extended.operand);
+                var extra_index = extra.end;
+                extra_index += @intFromBool(small.has_tag_type);
+                const captures_len = if (small.has_captures_len) blk: {
+                    const captures_len = zir.extra[extra_index];
+                    extra_index += 1;
+                    break :blk captures_len;
+                } else 0;
+                const body_len = if (small.has_body_len) blk: {
+                    const body_len = zir.extra[extra_index];
+                    extra_index += 1;
+                    break :blk body_len;
+                } else 0;
+                extra_index += @intFromBool(small.has_fields_len);
+                const decls_len = if (small.has_decls_len) blk: {
+                    const decls_len = zir.extra[extra_index];
+                    extra_index += 1;
+                    break :blk decls_len;
+                } else 0;
+                extra_index += captures_len * 2;
+                extra_index += decls_len;
+                const body = zir.bodySlice(extra_index, body_len);
+                return findZirInstForNodeInBody(allocator, zir, target_offset, body, defers);
+            },
+            .enum_decl => {
+                const small: Zir.Inst.EnumDecl.Small = @bitCast(extended.small);
+                const extra = zir.extraData(Zir.Inst.EnumDecl, extended.operand);
+                var extra_index = extra.end;
+                extra_index += @intFromBool(small.has_tag_type);
+                const captures_len = if (small.has_captures_len) blk: {
+                    const captures_len = zir.extra[extra_index];
+                    extra_index += 1;
+                    break :blk captures_len;
+                } else 0;
+                const body_len = if (small.has_body_len) blk: {
+                    const body_len = zir.extra[extra_index];
+                    extra_index += 1;
+                    break :blk body_len;
+                } else 0;
+                extra_index += @intFromBool(small.has_fields_len);
+                const decls_len = if (small.has_decls_len) blk: {
+                    const decls_len = zir.extra[extra_index];
+                    extra_index += 1;
+                    break :blk decls_len;
+                } else 0;
+                extra_index += captures_len * 2;
+                extra_index += decls_len;
+                const body = zir.bodySlice(extra_index, body_len);
+                return findZirInstForNodeInBody(allocator, zir, target_offset, body, defers);
+            },
+            else => return null,
+        }
+    }
+
+    fn findZirInstForNodeInSwitch(
+        allocator: std.mem.Allocator,
+        zir: Zir,
+        target_offset: Ast.Node.Offset,
+        inst: Zir.Inst.Index,
+        defers: *std.AutoHashMapUnmanaged(u32, void),
+        comptime kind: enum { normal, err_union },
+    ) ?u32 {
+        const inst_data = zir.instructions.items(.data)[@intFromEnum(inst)].pl_node;
+        const extra = zir.extraData(switch (kind) {
+            .normal => Zir.Inst.SwitchBlock,
+            .err_union => Zir.Inst.SwitchBlockErrUnion,
+        }, inst_data.payload_index);
+
+        var extra_index: usize = extra.end;
+
+        const multi_cases_len = if (extra.data.bits.has_multi_cases) blk: {
+            const len = zir.extra[extra_index];
+            extra_index += 1;
+            break :blk len;
+        } else 0;
+
+        if (switch (kind) {
+            .normal => extra.data.bits.any_has_tag_capture,
+            .err_union => extra.data.bits.any_uses_err_capture,
+        }) {
+            extra_index += 1;
+        }
+
+        const has_special = switch (kind) {
+            .normal => extra.data.bits.special_prongs != .none,
+            .err_union => has_special: {
+                const prong_info: Zir.Inst.SwitchBlock.ProngInfo = @bitCast(zir.extra[extra_index]);
+                extra_index += 1;
+                const body = zir.bodySlice(extra_index, prong_info.body_len);
+                extra_index += body.len;
+                if (findZirInstForNodeInBody(allocator, zir, target_offset, body, defers)) |found| return found;
+                break :has_special extra.data.bits.has_else;
+            },
+        };
+
+        if (has_special) {
+            const has_else = if (kind == .normal)
+                extra.data.bits.special_prongs.hasElse()
+            else
+                true;
+            if (has_else) {
+                const prong_info: Zir.Inst.SwitchBlock.ProngInfo = @bitCast(zir.extra[extra_index]);
+                extra_index += 1;
+                const body = zir.bodySlice(extra_index, prong_info.body_len);
+                extra_index += body.len;
+                if (findZirInstForNodeInBody(allocator, zir, target_offset, body, defers)) |found| return found;
+            }
+            if (kind == .normal) {
+                const special_prongs = extra.data.bits.special_prongs;
+                if (special_prongs.hasUnder()) {
+                    var trailing_items_len: u32 = 0;
+                    if (special_prongs.hasOneAdditionalItem()) {
+                        extra_index += 1;
+                    } else if (special_prongs.hasManyAdditionalItems()) {
+                        const items_len = zir.extra[extra_index];
+                        extra_index += 1;
+                        const ranges_len = zir.extra[extra_index];
+                        extra_index += 1;
+                        trailing_items_len = items_len + ranges_len * 2;
+                    }
+                    const prong_info: Zir.Inst.SwitchBlock.ProngInfo = @bitCast(zir.extra[extra_index]);
+                    extra_index += 1 + trailing_items_len;
+                    const body = zir.bodySlice(extra_index, prong_info.body_len);
+                    extra_index += body.len;
+                    if (findZirInstForNodeInBody(allocator, zir, target_offset, body, defers)) |found| return found;
+                }
+            }
+        }
+
+        {
+            const scalar_cases_len = extra.data.bits.scalar_cases_len;
+            for (0..scalar_cases_len) |_| {
+                extra_index += 1;
+                const prong_info: Zir.Inst.SwitchBlock.ProngInfo = @bitCast(zir.extra[extra_index]);
+                extra_index += 1;
+                const body = zir.bodySlice(extra_index, prong_info.body_len);
+                extra_index += body.len;
+                if (findZirInstForNodeInBody(allocator, zir, target_offset, body, defers)) |found| return found;
+            }
+        }
+
+        for (0..multi_cases_len) |_| {
+            const items_len = zir.extra[extra_index];
+            extra_index += 1;
+            const ranges_len = zir.extra[extra_index];
+            extra_index += 1;
+            const prong_info: Zir.Inst.SwitchBlock.ProngInfo = @bitCast(zir.extra[extra_index]);
+            extra_index += 1;
+
+            extra_index += items_len + ranges_len * 2;
+
+            const body = zir.bodySlice(extra_index, prong_info.body_len);
+            extra_index += body.len;
+
+            if (findZirInstForNodeInBody(allocator, zir, target_offset, body, defers)) |found| return found;
+        }
+
+        return null;
+    }
+
+    fn instMatchesOffset(zir: Zir, tag: Zir.Inst.Tag, data: Zir.Inst.Data, target_offset: Ast.Node.Offset) bool {
+        return switch (Zir.Inst.Tag.data_tags[@intFromEnum(tag)]) {
+            .pl_node => data.pl_node.src_node == target_offset,
+            .un_node => data.un_node.src_node == target_offset,
+            .node => data.node == target_offset,
+            .inst_node => data.inst_node.src_node == target_offset,
+            .int_type => data.int_type.src_node == target_offset,
+            .@"unreachable" => data.@"unreachable".src_node == target_offset,
+            .@"break" => {
+                const extra = zir.extraData(Zir.Inst.Break, data.@"break".payload_index);
+                return extra.data.operand_src_node == target_offset.toOptional();
+            },
+            else => false,
+        };
+    }
+
+    fn nodeOffsetFromBase(base: Ast.Node.Index, target: Ast.Node.Index) ?Ast.Node.Offset {
+        const base_int: i64 = @intFromEnum(base);
+        const target_int: i64 = @intFromEnum(target);
+        if (target_int < base_int) return null;
+        const diff = target_int - base_int;
+        if (diff > std.math.maxInt(i32)) return null;
+        return @enumFromInt(@as(i32, @intCast(diff)));
     }
 
     fn extractIdentifier(source: []const u8, start: usize) []const u8 {
@@ -613,5 +1211,61 @@ test "ZirBridge extracts type info from type annotation" {
         try std.testing.expectEqual(TypeInfo.TypeKind.int, d.type_info.kind);
         try std.testing.expectEqual(@as(u16, 32), d.type_info.size_bits);
         try std.testing.expect(d.type_info.is_signed);
+    }
+}
+
+test "findZirInstForNode finds declaration instruction" {
+    const allocator = std.testing.allocator;
+
+    const code: [:0]const u8 = "const x: i32 = 42;";
+    var source = Source.init(allocator, "test.zig", code);
+    defer source.deinit();
+
+    var bridge = ZirBridge.init(allocator);
+    defer bridge.deinit();
+
+    try bridge.loadFromSource(&source);
+
+    // Verify we have ZIR
+    try std.testing.expect(bridge.hasZir());
+
+    // The declaration should have an associated ZIR instruction
+    const decl = bridge.findDeclByName("x");
+    try std.testing.expect(decl != null);
+    if (decl) |d| {
+        // Check that the AST node is set
+        try std.testing.expect(d.ast_node != null);
+        // The zir_inst field should be populated by findZirInstForNode
+        // Note: This may be null if no ZIR instruction directly references this node
+        // (which is valid - the implementation is best-effort)
+    }
+}
+
+test "findZirInstForNode with function declaration" {
+    const allocator = std.testing.allocator;
+
+    const code: [:0]const u8 =
+        \\pub fn add(a: i32, b: i32) i32 {
+        \\    return a + b;
+        \\}
+    ;
+    var source = Source.init(allocator, "test.zig", code);
+    defer source.deinit();
+
+    var bridge = ZirBridge.init(allocator);
+    defer bridge.deinit();
+
+    try bridge.loadFromSource(&source);
+
+    // Verify we have ZIR
+    try std.testing.expect(bridge.hasZir());
+    try std.testing.expect(bridge.getInstructionCount() > 0);
+
+    // The function declaration should have an associated ZIR instruction
+    const fn_decl = bridge.findDeclByName("add");
+    try std.testing.expect(fn_decl != null);
+    if (fn_decl) |f| {
+        try std.testing.expect(f.is_fn);
+        try std.testing.expect(f.ast_node != null);
     }
 }

@@ -3,6 +3,7 @@ const Rule = @import("../rule.zig").Rule;
 const Source = @import("../source.zig").Source;
 const Diagnostic = @import("../diagnostic.zig").Diagnostic;
 const RuleError = @import("../rule.zig").RuleError;
+const zir_bridge_mod = @import("../zir_bridge.zig");
 
 /// Rule that enforces Zig naming conventions:
 /// - Type names (struct, enum, union, opaque, error set): PascalCase
@@ -25,6 +26,44 @@ pub const IdentifierStyleRule = struct {
         camel_case,
         snake_case,
     };
+
+    /// Result of type-aware classification for a declaration.
+    /// When ZIR-based type information is available, we can definitively
+    /// classify the declaration. Otherwise, we fall back to heuristics.
+    const DeclClassification = enum {
+        type_decl, // Struct, enum, union, or type alias - should be PascalCase
+        function_type, // Function type (fn() void) - should be PascalCase
+        function, // Function declaration - should be camelCase
+        constant, // Constant value - should be snake_case
+        variable, // Variable - should be snake_case
+        unknown, // Could not determine - fall back to heuristics
+    };
+
+    /// Classify a declaration using ZIR-based type information.
+    /// Returns .unknown if type info is not available, allowing fallback to heuristics.
+    fn classifyDeclWithTypeInfo(src: *Source, name: []const u8, node_idx: u32) DeclClassification {
+        const decl = findDeclByAstNode(src, node_idx) orelse return .unknown;
+        if (!std.mem.eql(u8, decl.name, name)) return .unknown;
+
+        // Check if it's a function
+        if (decl.is_fn) return .function;
+
+        // Check type kind from ZIR
+        switch (decl.type_info.kind) {
+            .@"struct" => {
+                if (isNamespaceStructDecl(src, decl)) return .unknown;
+                return .type_decl;
+            },
+            .@"enum", .@"union", .type_type => return .type_decl,
+            .function => return .function_type,
+            .unknown => return .unknown,
+            else => {},
+        }
+
+        // It's a value declaration
+        if (decl.is_const) return .constant;
+        return .variable;
+    }
 
     fn check(src: *Source, allocator: std.mem.Allocator, diagnostics: *std.ArrayList(Diagnostic)) RuleError!void {
         const tree = try src.ast();
@@ -150,6 +189,63 @@ pub const IdentifierStyleRule = struct {
         else
             null;
 
+        // First, try to use ZIR-based type information for definitive classification.
+        // This provides more accurate results than heuristics when available.
+        const type_classification = classifyDeclWithTypeInfo(src, name, node_idx);
+        switch (type_classification) {
+            .type_decl => {
+                // ZIR confirms this is a type - must be PascalCase
+                if (!isPascalCase(name) and !isCTypeAliasName(name)) {
+                    try emitDiagnostic(src, allocator, diagnostics, token_starts[name_token], name, "type", .pascal_case);
+                }
+                return;
+            },
+            .function_type => {
+                // ZIR confirms this is a function type alias - must be PascalCase
+                if (!isPascalCase(name) and !isCTypeAliasName(name)) {
+                    try emitDiagnostic(src, allocator, diagnostics, token_starts[name_token], name, "function type", .pascal_case);
+                }
+                return;
+            },
+            .function => {
+                // This shouldn't happen for var decls, but handle gracefully
+                if (!isCamelCase(name)) {
+                    try emitDiagnostic(src, allocator, diagnostics, token_starts[name_token], name, "function", .camel_case);
+                }
+                return;
+            },
+            .constant => {
+                // ZIR confirms this is a constant value (not a type)
+                // Check for external convention aliasing
+                const is_external_alias = isScreamingSnakeCase(name) and
+                    (if (init_idx_opt) |init_idx|
+                        isExternalConventionAlias(tree, tags, datas, token_tags, init_idx)
+                    else
+                        false);
+                if (!isLowerSnakeCase(name) and !is_external_alias) {
+                    // Allow function aliases to use camelCase
+                    if (init_idx_opt) |init_idx| {
+                        if (isFunctionAlias(tree, tags, datas, token_tags, init_idx) and isCamelCase(name)) {
+                            return;
+                        }
+                    }
+                    try emitDiagnostic(src, allocator, diagnostics, token_starts[name_token], name, "constant", .snake_case);
+                }
+                return;
+            },
+            .variable => {
+                // ZIR confirms this is a variable
+                if (!isLowerSnakeCase(name)) {
+                    try emitDiagnostic(src, allocator, diagnostics, token_starts[name_token], name, "variable", .snake_case);
+                }
+                return;
+            },
+            .unknown => {
+                // ZIR info not available, fall back to heuristic analysis
+            },
+        }
+
+        // Fallback: heuristic-based analysis when ZIR type info is not available
         // Check if this is a type definition (const Foo = struct { ... })
         if (is_const) {
             if (init_idx_opt) |init_idx| {
@@ -706,6 +802,35 @@ pub const IdentifierStyleRule = struct {
         };
     }
 
+    fn isNamespaceStructDecl(src: *Source, decl: zir_bridge_mod.DeclInfo) bool {
+        const ast_node = decl.ast_node orelse return false;
+        const tree = src.ast() catch return false;
+        const tags = tree.nodes.items(.tag);
+        const main_tokens = tree.nodes.items(.main_token);
+        const token_tags = tree.tokens.items(.tag);
+
+        const full = tree.fullVarDecl(@enumFromInt(ast_node)) orelse return false;
+        const init_node = full.ast.init_node.unwrap() orelse return false;
+        const init_idx = @intFromEnum(init_node);
+        if (init_idx >= tags.len) return false;
+        if (!isTypeDefinitionTag(tags[init_idx])) return false;
+        if (!isStructContainer(init_idx, main_tokens, token_tags)) return false;
+
+        return !containerHasFields(tree, tags, init_idx);
+    }
+
+    fn findDeclByAstNode(src: *Source, node_idx: u32) ?zir_bridge_mod.DeclInfo {
+        const count = src.getDeclCount();
+        for (0..count) |i| {
+            if (src.getDecl(i)) |decl| {
+                if (decl.ast_node) |decl_node| {
+                    if (decl_node == node_idx) return decl;
+                }
+            }
+        }
+        return null;
+    }
+
     fn isFunctionTypeTag(tag: std.zig.Ast.Node.Tag) bool {
         return switch (tag) {
             .fn_proto,
@@ -1064,4 +1189,82 @@ test "isScreamingSnakeCase" {
     try std.testing.expect(!isScreamingSnakeCase("foo"));
     try std.testing.expect(!isScreamingSnakeCase("Foo"));
     try std.testing.expect(!isScreamingSnakeCase("foo_Bar"));
+}
+
+test "classifyDeclWithTypeInfo for struct" {
+    const allocator = std.testing.allocator;
+    const code: [:0]const u8 = "const MyStruct = struct { value: i32 };";
+    var source = Source.init(allocator, "test.zig", code);
+    defer source.deinit();
+
+    const tree = try source.ast();
+    const root_decls = tree.rootDecls();
+    const node_idx = @intFromEnum(root_decls[0]);
+    const classification = IdentifierStyleRule.classifyDeclWithTypeInfo(&source, "MyStruct", node_idx);
+    try std.testing.expectEqual(IdentifierStyleRule.DeclClassification.type_decl, classification);
+}
+
+test "classifyDeclWithTypeInfo for enum" {
+    const allocator = std.testing.allocator;
+    const code: [:0]const u8 = "const MyEnum = enum { a, b, c };";
+    var source = Source.init(allocator, "test.zig", code);
+    defer source.deinit();
+
+    const tree = try source.ast();
+    const root_decls = tree.rootDecls();
+    const node_idx = @intFromEnum(root_decls[0]);
+    const classification = IdentifierStyleRule.classifyDeclWithTypeInfo(&source, "MyEnum", node_idx);
+    try std.testing.expectEqual(IdentifierStyleRule.DeclClassification.type_decl, classification);
+}
+
+test "classifyDeclWithTypeInfo for constant" {
+    const allocator = std.testing.allocator;
+    const code: [:0]const u8 = "const my_const: i32 = 42;";
+    var source = Source.init(allocator, "test.zig", code);
+    defer source.deinit();
+
+    const tree = try source.ast();
+    const root_decls = tree.rootDecls();
+    const node_idx = @intFromEnum(root_decls[0]);
+    const classification = IdentifierStyleRule.classifyDeclWithTypeInfo(&source, "my_const", node_idx);
+    try std.testing.expectEqual(IdentifierStyleRule.DeclClassification.constant, classification);
+}
+
+test "classifyDeclWithTypeInfo for variable" {
+    const allocator = std.testing.allocator;
+    const code: [:0]const u8 = "var my_var: i32 = 0;";
+    var source = Source.init(allocator, "test.zig", code);
+    defer source.deinit();
+
+    const tree = try source.ast();
+    const root_decls = tree.rootDecls();
+    const node_idx = @intFromEnum(root_decls[0]);
+    const classification = IdentifierStyleRule.classifyDeclWithTypeInfo(&source, "my_var", node_idx);
+    try std.testing.expectEqual(IdentifierStyleRule.DeclClassification.variable, classification);
+}
+
+test "classifyDeclWithTypeInfo for function" {
+    const allocator = std.testing.allocator;
+    const code: [:0]const u8 = "fn myFunc() void {}";
+    var source = Source.init(allocator, "test.zig", code);
+    defer source.deinit();
+
+    const tree = try source.ast();
+    const root_decls = tree.rootDecls();
+    const node_idx = @intFromEnum(root_decls[0]);
+    const classification = IdentifierStyleRule.classifyDeclWithTypeInfo(&source, "myFunc", node_idx);
+    try std.testing.expectEqual(IdentifierStyleRule.DeclClassification.function, classification);
+}
+
+test "classifyDeclWithTypeInfo returns unknown for nonexistent" {
+    const allocator = std.testing.allocator;
+    const code: [:0]const u8 = "const x: i32 = 42;";
+    var source = Source.init(allocator, "test.zig", code);
+    defer source.deinit();
+
+    const tree = try source.ast();
+    const root_decls = tree.rootDecls();
+    const node_idx = @intFromEnum(root_decls[0]);
+    const classification = IdentifierStyleRule.classifyDeclWithTypeInfo(&source, "nonexistent", node_idx);
+    try std.testing.expectEqual(IdentifierStyleRule.DeclClassification.unknown, classification);
 }

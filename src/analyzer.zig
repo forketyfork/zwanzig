@@ -6,6 +6,7 @@ const RuleFilter = @import("rule_filter.zig").RuleFilter;
 const checker_mod = @import("checker.zig");
 const Checker = checker_mod.Checker;
 const CheckerManagerWithRules = checker_mod.CheckerManagerWithRules;
+const TypeContext = checker_mod.TypeContext;
 const ZirBridge = @import("zir_bridge.zig").ZirBridge;
 const BuildMetadata = @import("build_metadata.zig").BuildMetadata;
 const cache_mod = @import("cache.zig");
@@ -198,8 +199,20 @@ pub const Analyzer = struct {
 
     /// Internal method to run checks on a source with the analyzer's filter.
     fn runChecksOnSource(self: *Analyzer, source: *Source) !void {
+        // Create type context if typed IR is enabled
+        var type_ctx: ?TypeContext = null;
+        if (self.use_typed_ir) {
+            type_ctx = TypeContext.init(self.allocator, source);
+            log.debug("type context: created for {s}, available={}", .{
+                source.getFilePath(),
+                if (type_ctx) |*tc| tc.isAvailable() else false,
+            });
+        }
+        defer if (type_ctx) |*tc| tc.deinit();
+
         const context = checker_mod.CheckerContext{
             .build_metadata = self.getBuildMetadata(),
+            .type_context = if (type_ctx) |*tc| tc else null,
         };
 
         // Run native checkers
