@@ -9,7 +9,21 @@ permissions:
   contents: write
 
 jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install Zig
+        uses: mlugg/setup-zig@v2
+        with:
+          version: 0.15.2
+
+      - name: Run release checks
+        run: ./scripts/release-check.sh "${{ github.ref_name }}"
+
   release:
+    needs: validate
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
