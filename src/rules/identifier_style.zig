@@ -41,9 +41,9 @@ pub const IdentifierStyleRule = struct {
 
     /// Classify a declaration using ZIR-based type information.
     /// Returns .unknown if type info is not available, allowing fallback to heuristics.
-    fn classifyDeclWithTypeInfo(src: *Source, name: []const u8) DeclClassification {
-        // Try to get declaration info from ZIR
-        const decl = src.findDecl(name) orelse return .unknown;
+    fn classifyDeclWithTypeInfo(src: *Source, name: []const u8, node_idx: u32) DeclClassification {
+        const decl = findDeclByAstNode(src, node_idx) orelse return .unknown;
+        if (!std.mem.eql(u8, decl.name, name)) return .unknown;
 
         // Check if it's a function
         if (decl.is_fn) return .function;
@@ -191,7 +191,7 @@ pub const IdentifierStyleRule = struct {
 
         // First, try to use ZIR-based type information for definitive classification.
         // This provides more accurate results than heuristics when available.
-        const type_classification = classifyDeclWithTypeInfo(src, name);
+        const type_classification = classifyDeclWithTypeInfo(src, name, node_idx);
         switch (type_classification) {
             .type_decl => {
                 // ZIR confirms this is a type - must be PascalCase
@@ -819,6 +819,18 @@ pub const IdentifierStyleRule = struct {
         return !containerHasFields(tree, tags, init_idx);
     }
 
+    fn findDeclByAstNode(src: *Source, node_idx: u32) ?zir_bridge_mod.DeclInfo {
+        const count = src.getDeclCount();
+        for (0..count) |i| {
+            if (src.getDecl(i)) |decl| {
+                if (decl.ast_node) |decl_node| {
+                    if (decl_node == node_idx) return decl;
+                }
+            }
+        }
+        return null;
+    }
+
     fn isFunctionTypeTag(tag: std.zig.Ast.Node.Tag) bool {
         return switch (tag) {
             .fn_proto,
@@ -1185,7 +1197,10 @@ test "classifyDeclWithTypeInfo for struct" {
     var source = Source.init(allocator, "test.zig", code);
     defer source.deinit();
 
-    const classification = IdentifierStyleRule.classifyDeclWithTypeInfo(&source, "MyStruct");
+    const tree = try source.ast();
+    const root_decls = tree.rootDecls();
+    const node_idx = @intFromEnum(root_decls[0]);
+    const classification = IdentifierStyleRule.classifyDeclWithTypeInfo(&source, "MyStruct", node_idx);
     try std.testing.expectEqual(IdentifierStyleRule.DeclClassification.type_decl, classification);
 }
 
@@ -1195,7 +1210,10 @@ test "classifyDeclWithTypeInfo for enum" {
     var source = Source.init(allocator, "test.zig", code);
     defer source.deinit();
 
-    const classification = IdentifierStyleRule.classifyDeclWithTypeInfo(&source, "MyEnum");
+    const tree = try source.ast();
+    const root_decls = tree.rootDecls();
+    const node_idx = @intFromEnum(root_decls[0]);
+    const classification = IdentifierStyleRule.classifyDeclWithTypeInfo(&source, "MyEnum", node_idx);
     try std.testing.expectEqual(IdentifierStyleRule.DeclClassification.type_decl, classification);
 }
 
@@ -1205,7 +1223,10 @@ test "classifyDeclWithTypeInfo for constant" {
     var source = Source.init(allocator, "test.zig", code);
     defer source.deinit();
 
-    const classification = IdentifierStyleRule.classifyDeclWithTypeInfo(&source, "my_const");
+    const tree = try source.ast();
+    const root_decls = tree.rootDecls();
+    const node_idx = @intFromEnum(root_decls[0]);
+    const classification = IdentifierStyleRule.classifyDeclWithTypeInfo(&source, "my_const", node_idx);
     try std.testing.expectEqual(IdentifierStyleRule.DeclClassification.constant, classification);
 }
 
@@ -1215,7 +1236,10 @@ test "classifyDeclWithTypeInfo for variable" {
     var source = Source.init(allocator, "test.zig", code);
     defer source.deinit();
 
-    const classification = IdentifierStyleRule.classifyDeclWithTypeInfo(&source, "my_var");
+    const tree = try source.ast();
+    const root_decls = tree.rootDecls();
+    const node_idx = @intFromEnum(root_decls[0]);
+    const classification = IdentifierStyleRule.classifyDeclWithTypeInfo(&source, "my_var", node_idx);
     try std.testing.expectEqual(IdentifierStyleRule.DeclClassification.variable, classification);
 }
 
@@ -1225,7 +1249,10 @@ test "classifyDeclWithTypeInfo for function" {
     var source = Source.init(allocator, "test.zig", code);
     defer source.deinit();
 
-    const classification = IdentifierStyleRule.classifyDeclWithTypeInfo(&source, "myFunc");
+    const tree = try source.ast();
+    const root_decls = tree.rootDecls();
+    const node_idx = @intFromEnum(root_decls[0]);
+    const classification = IdentifierStyleRule.classifyDeclWithTypeInfo(&source, "myFunc", node_idx);
     try std.testing.expectEqual(IdentifierStyleRule.DeclClassification.function, classification);
 }
 
@@ -1235,6 +1262,9 @@ test "classifyDeclWithTypeInfo returns unknown for nonexistent" {
     var source = Source.init(allocator, "test.zig", code);
     defer source.deinit();
 
-    const classification = IdentifierStyleRule.classifyDeclWithTypeInfo(&source, "nonexistent");
+    const tree = try source.ast();
+    const root_decls = tree.rootDecls();
+    const node_idx = @intFromEnum(root_decls[0]);
+    const classification = IdentifierStyleRule.classifyDeclWithTypeInfo(&source, "nonexistent", node_idx);
     try std.testing.expectEqual(IdentifierStyleRule.DeclClassification.unknown, classification);
 }

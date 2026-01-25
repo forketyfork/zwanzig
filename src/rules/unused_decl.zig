@@ -43,6 +43,7 @@ pub const UnusedDeclRule = struct {
     /// Classify a declaration using ZIR-based type information for better diagnostics.
     fn classifyDecl(src: *Source, decl: DeclInfo) DeclKind {
         if (decl.is_function) return .function;
+        if (decl.owner_container != null) return .declaration;
 
         // Try to get type info from ZIR
         const zir_decl = src.findDecl(decl.name) orelse {
@@ -52,7 +53,7 @@ pub const UnusedDeclRule = struct {
 
         // Check if it's a type
         switch (zir_decl.type_info.kind) {
-            .@"struct", .@"enum", .@"union", .type_type => return .type_decl,
+            .@"struct", .@"enum", .@"union", .type_type, .function => return .type_decl,
             else => {},
         }
 
