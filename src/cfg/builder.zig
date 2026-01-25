@@ -80,14 +80,6 @@ pub const CfgBuilder = struct {
         return node;
     }
 
-    /// Get type info for a declaration name.
-    fn getDeclTypeInfo(self: *CfgBuilder, source: *Source, name: []const u8) ?TypeInfo {
-        if (self.type_context) |ctx| {
-            return ctx.getDeclType(name);
-        }
-        return source.findDeclType(name);
-    }
-
     /// Build CFG for a function body starting at the given AST node.
     /// Returns null if the node is not a function or cannot be processed.
     pub fn buildFromFn(self: *CfgBuilder, source: *Source, fn_node: AstNodeId) !?Cfg {
@@ -392,7 +384,9 @@ pub const CfgBuilder = struct {
         // Return with try expression: return try bar();
         //   prev -> try_node -> ret_node -> exit (success path)
         //   try_node --[try_error]--> fn_exit (error path)
-        const try_node = try cfg.addNode(IrNode.initFull(.try_expr, try_expr_node, try_range));
+        var try_ir = IrNode.initFull(.try_expr, try_expr_node, try_range);
+        try_ir = try_ir.withType(TypeInfo.initErrorUnion());
+        const try_node = try cfg.addNode(try_ir);
         try cfg.addEdge(prev_node, try_node);
 
         // Error path: propagate to function exit
@@ -420,7 +414,9 @@ pub const CfgBuilder = struct {
         const data = tree.nodes.items(.data);
 
         // Return with catch expression
-        const catch_node = try cfg.addNode(IrNode.initFull(.catch_expr, catch_expr_node, catch_range));
+        var catch_ir = IrNode.initFull(.catch_expr, catch_expr_node, catch_range);
+        catch_ir = catch_ir.withType(TypeInfo.initErrorUnion());
+        const catch_node = try cfg.addNode(catch_ir);
         try cfg.addEdge(prev_node, catch_node);
 
         // Get the handler from catch node
@@ -631,7 +627,9 @@ pub const CfgBuilder = struct {
         // Assignment with try expression: x = try bar();
         //   prev -> try_node -> assign_node (success path)
         //   try_node --[try_error]--> fn_exit (error path)
-        const try_node = try cfg.addNode(IrNode.initFull(.try_expr, try_expr_node, try_range));
+        var try_ir = IrNode.initFull(.try_expr, try_expr_node, try_range);
+        try_ir = try_ir.withType(TypeInfo.initErrorUnion());
+        const try_node = try cfg.addNode(try_ir);
         try cfg.addEdge(prev_node, try_node);
 
         // Error path: propagate to function exit
@@ -659,7 +657,9 @@ pub const CfgBuilder = struct {
         const data = tree.nodes.items(.data);
 
         // Assignment with catch expression
-        const catch_node = try cfg.addNode(IrNode.initFull(.catch_expr, catch_expr_node, catch_range));
+        var catch_ir = IrNode.initFull(.catch_expr, catch_expr_node, catch_range);
+        catch_ir = catch_ir.withType(TypeInfo.initErrorUnion());
+        const catch_node = try cfg.addNode(catch_ir);
         try cfg.addEdge(prev_node, catch_node);
 
         // Get the handler from catch node

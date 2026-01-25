@@ -3,7 +3,7 @@ const Rule = @import("../rule.zig").Rule;
 const Source = @import("../source.zig").Source;
 const Diagnostic = @import("../diagnostic.zig").Diagnostic;
 const RuleError = @import("../rule.zig").RuleError;
-const TypeInfo = @import("../zir_bridge.zig").TypeInfo;
+const zir_bridge_mod = @import("../zir_bridge.zig");
 
 /// Rule that enforces Zig naming conventions:
 /// - Type names (struct, enum, union, opaque, error set): PascalCase
@@ -50,8 +50,13 @@ pub const IdentifierStyleRule = struct {
 
         // Check type kind from ZIR
         switch (decl.type_info.kind) {
-            .@"struct", .@"enum", .@"union", .type_type => return .type_decl,
-            .@"fn" => return .function_type,
+            .@"struct" => {
+                if (isNamespaceStructDecl(src, decl)) return .unknown;
+                return .type_decl;
+            },
+            .@"enum", .@"union", .type_type => return .type_decl,
+            .function => return .function_type,
+            .unknown => return .unknown,
             else => {},
         }
 
@@ -795,6 +800,23 @@ pub const IdentifierStyleRule = struct {
             => true,
             else => false,
         };
+    }
+
+    fn isNamespaceStructDecl(src: *Source, decl: zir_bridge_mod.DeclInfo) bool {
+        const ast_node = decl.ast_node orelse return false;
+        const tree = src.ast() catch return false;
+        const tags = tree.nodes.items(.tag);
+        const main_tokens = tree.nodes.items(.main_token);
+        const token_tags = tree.tokens.items(.tag);
+
+        const full = tree.fullVarDecl(@enumFromInt(ast_node)) orelse return false;
+        const init_node = full.ast.init_node.unwrap() orelse return false;
+        const init_idx = @intFromEnum(init_node);
+        if (init_idx >= tags.len) return false;
+        if (!isTypeDefinitionTag(tags[init_idx])) return false;
+        if (!isStructContainer(init_idx, main_tokens, token_tags)) return false;
+
+        return !containerHasFields(tree, tags, init_idx);
     }
 
     fn isFunctionTypeTag(tag: std.zig.Ast.Node.Tag) bool {

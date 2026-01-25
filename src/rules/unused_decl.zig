@@ -3,7 +3,6 @@ const Rule = @import("../rule.zig").Rule;
 const RuleError = @import("../rule.zig").RuleError;
 const Diagnostic = @import("../rule.zig").Diagnostic;
 const Source = @import("../source.zig").Source;
-const TypeInfo = @import("../zir_bridge.zig").TypeInfo;
 
 /// Rule that detects unused const/var declarations and functions.
 ///

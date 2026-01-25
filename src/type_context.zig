@@ -119,7 +119,9 @@ pub const TypeContext = struct {
             if (bridge.getDecl(i)) |decl| {
                 if (decl.ast_node == ast_node) {
                     // Cache and return
-                    self.node_type_cache.put(ast_node, decl.type_info) catch {};
+                    self.node_type_cache.put(ast_node, decl.type_info) catch |err| {
+                        std.debug.assert(err == error.OutOfMemory);
+                    };
                     return decl.type_info;
                 }
             }
@@ -130,7 +132,9 @@ pub const TypeContext = struct {
 
     /// Cache a type for an AST node (useful when building CFG).
     pub fn cacheNodeType(self: *TypeContext, ast_node: u32, type_info: TypeInfo) void {
-        self.node_type_cache.put(ast_node, type_info) catch {};
+        self.node_type_cache.put(ast_node, type_info) catch |err| {
+            std.debug.assert(err == error.OutOfMemory);
+        };
     }
 
     // =========================================================================
