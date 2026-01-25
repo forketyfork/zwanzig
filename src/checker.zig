@@ -8,10 +8,61 @@ pub const SourceRange = diagnostic_mod.SourceRange;
 const Rule = @import("rule.zig").Rule;
 const RuleError = @import("rule.zig").RuleError;
 const BuildMetadata = @import("build_metadata.zig").BuildMetadata;
+const type_context_mod = @import("type_context.zig");
+pub const TypeContext = type_context_mod.TypeContext;
+pub const TypeInfo = type_context_mod.TypeInfo;
 
-/// Context passed to checkers providing access to analyzer-level configuration.
+/// Context passed to checkers providing access to analyzer-level configuration
+/// and type information.
+///
+/// The context provides:
+/// - Build metadata (target info, build flags)
+/// - Type context for ZIR-based type queries (when available)
+///
+/// Checkers can use the type context to make type-aware decisions,
+/// reducing false positives and enabling more precise analysis.
 pub const CheckerContext = struct {
     build_metadata: ?*const BuildMetadata,
+    /// Type context for ZIR-based type queries.
+    /// This is null if typed IR is not enabled or ZIR generation failed.
+    type_context: ?*TypeContext = null,
+
+    /// Check if type information is available.
+    pub fn hasTypeInfo(self: *const CheckerContext) bool {
+        if (self.type_context) |ctx| {
+            return ctx.isAvailable();
+        }
+        return false;
+    }
+
+    /// Get the type context if available.
+    pub fn getTypeContext(self: *const CheckerContext) ?*TypeContext {
+        return self.type_context;
+    }
+
+    /// Convenience: Get type info for a declaration by name.
+    pub fn getDeclType(self: *const CheckerContext, name: []const u8) ?TypeInfo {
+        const ctx = self.type_context orelse return null;
+        return ctx.getDeclType(name);
+    }
+
+    /// Convenience: Check if a declaration is a function.
+    pub fn isDeclFunction(self: *const CheckerContext, name: []const u8) bool {
+        const ctx = self.type_context orelse return false;
+        return ctx.isDeclFunction(name);
+    }
+
+    /// Convenience: Check if a declaration is a type.
+    pub fn isDeclType(self: *const CheckerContext, name: []const u8) bool {
+        const ctx = self.type_context orelse return false;
+        return ctx.isDeclType(name);
+    }
+
+    /// Convenience: Classify an identifier.
+    pub fn classifyIdentifier(self: *const CheckerContext, name: []const u8) TypeContext.IdentifierKind {
+        const ctx = self.type_context orelse return .unknown;
+        return ctx.classifyIdentifier(name);
+    }
 };
 
 /// Error type for checker operations

@@ -944,11 +944,137 @@ This mapping enables correlating high-level AST constructs with their correspond
 
 ### Integration with Analysis
 
-The ZirBridge provides typed information that can be used by:
+The ZirBridge provides typed information that is integrated throughout the analysis pipeline:
 
 - **Type-aware rules**: Rules that need to distinguish between integer types, pointers, error unions, etc.
 - **CFG-based analysis**: Control flow analysis can use type information to understand error propagation
-- **Future semantic analysis**: Foundation for more sophisticated dataflow analysis
+- **IR nodes**: `IrNode` instances can carry `TypeInfo` for type-aware dataflow analysis
+
+### TypeContext
+
+The `TypeContext` (`src/type_context.zig`) provides a unified interface for type queries, wrapping ZirBridge with caching and convenience methods:
+
+```zig
+const TypeContext = @import("type_context.zig").TypeContext;
+
+var ctx = TypeContext.init(allocator, &source);
+defer ctx.deinit();
+
+// Query declaration types
+if (ctx.getDeclType("my_var")) |ti| {
+    if (ti.kind == .error_union) {
+        // Handle error union type
+    }
+}
+
+// Classify identifiers (useful for naming rules)
+switch (ctx.classifyIdentifier("MyType")) {
+    .type_decl => {},   // struct, enum, union
+    .function => {},    // function
+    .constant => {},    // const declaration
+    .variable => {},    // var declaration
+    .unknown => {},     // not found or ZIR unavailable
+}
+
+// Type kind queries
+if (ctx.isDeclErrorUnion("result")) { /* ... */ }
+if (ctx.isDeclOptional("maybe_val")) { /* ... */ }
+if (ctx.isDeclPointer("ptr")) { /* ... */ }
+```
+
+### Source Type API
+
+The `Source` struct (`src/source.zig`) provides direct access to type information via lazy-loaded ZirBridge:
+
+```zig
+var source = Source.init(allocator, "test.zig", code);
+defer source.deinit();
+
+// Check if type info is available
+if (source.hasTypeInfo()) {
+    // Query by declaration name
+    if (source.findDeclType("x")) |ti| {
+        // Use type information
+    }
+
+    // Check declaration properties
+    if (source.isDeclFunction("foo")) { /* ... */ }
+    if (source.isDeclType("MyStruct")) { /* ... */ }
+    if (source.isDeclPublic("exported")) { /* ... */ }
+}
+```
+
+### CheckerContext Type Access
+
+The `CheckerContext` (`src/checker.zig`) passed to checkers includes an optional `TypeContext`:
+
+```zig
+pub fn checkAst(
+    source: *Source,
+    allocator: std.mem.Allocator,
+    diagnostics: *std.ArrayList(Diagnostic),
+    context: CheckerContext,
+) CheckerError!void {
+    // Check if type info is available
+    if (context.hasTypeInfo()) {
+        // Use type context for type-aware analysis
+        if (context.getDeclType("my_var")) |ti| {
+            // Make decisions based on type
+        }
+
+        // Classify identifiers for naming rules
+        const kind = context.classifyIdentifier("MyType");
+    }
+}
+```
+
+### Typed IR Nodes
+
+`IrNode` (`src/ir.zig`) now carries optional type information:
+
+```zig
+pub const IrNode = struct {
+    tag: IrTag,
+    ast_node: ?u32,
+    source_range: ?SourceRange,
+    operand_node: ?u32,
+    operand2_node: ?u32,
+    type_info: ?TypeInfo,  // NEW: Type info from ZIR
+
+    // Type query helpers
+    pub fn hasType(self: *const IrNode) bool;
+    pub fn getTypeKind(self: *const IrNode) ?TypeInfo.TypeKind;
+    pub fn isErrorUnion(self: *const IrNode) bool;
+    pub fn isOptional(self: *const IrNode) bool;
+    pub fn isPointer(self: *const IrNode) bool;
+    pub fn isInteger(self: *const IrNode) bool;
+};
+```
+
+### CfgBuilder Type Annotation
+
+The `CfgBuilder` (`src/cfg/builder.zig`) can annotate IR nodes with types during CFG construction:
+
+```zig
+// Create builder with type context for type-annotated CFG
+var type_ctx = TypeContext.init(allocator, &source);
+defer type_ctx.deinit();
+
+var builder = CfgBuilder.initWithTypes(allocator, &type_ctx);
+const cfg = try builder.buildFromFn(&source, fn_node);
+
+// IR nodes in the CFG now have type information
+for (cfg.nodes.items) |node| {
+    if (node.ir_node.isErrorUnion()) {
+        // Handle error union
+    }
+}
+```
+
+Key annotations:
+- **var_decl nodes**: Annotated with the variable's declared type
+- **try_expr nodes**: Annotated with `error_union` type
+- **catch_expr nodes**: Annotated with `error_union` type
 
 ## Analysis Engine
 

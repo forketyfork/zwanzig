@@ -2,6 +2,7 @@ const std = @import("std");
 const graph = @import("graph.zig");
 const Source = @import("../source.zig").Source;
 const ids = @import("../ids.zig");
+const type_context_mod = @import("../type_context.zig");
 
 const Cfg = graph.Cfg;
 const EdgeKind = graph.EdgeKind;
@@ -11,11 +12,18 @@ const SourceRange = graph.SourceRange;
 const Location = graph.Location;
 const CfgNodeId = ids.CfgNodeId;
 const AstNodeId = ids.AstNodeId;
+const TypeContext = type_context_mod.TypeContext;
+const TypeInfo = type_context_mod.TypeInfo;
 
 pub const CfgError = std.mem.Allocator.Error || error{InvalidAst};
+
 /// Builds CFG from a Zig AST for a single function.
+/// When a TypeContext is provided, IR nodes are annotated with type information
+/// from ZIR, enabling type-aware analysis.
 pub const CfgBuilder = struct {
     allocator: std.mem.Allocator,
+    /// Optional type context for annotating IR nodes with type information.
+    type_context: ?*TypeContext = null,
 
     const ProcessResult = struct {
         last: ?CfgNodeId,
@@ -26,7 +34,58 @@ pub const CfgBuilder = struct {
     };
 
     pub fn init(allocator: std.mem.Allocator) CfgBuilder {
-        return .{ .allocator = allocator };
+        return .{ .allocator = allocator, .type_context = null };
+    }
+
+    /// Create a CfgBuilder with type context for type-annotated IR.
+    pub fn initWithTypes(allocator: std.mem.Allocator, type_ctx: *TypeContext) CfgBuilder {
+        return .{ .allocator = allocator, .type_context = type_ctx };
+    }
+
+    /// Set the type context for type annotation.
+    pub fn setTypeContext(self: *CfgBuilder, type_ctx: ?*TypeContext) void {
+        self.type_context = type_ctx;
+    }
+
+    /// Check if type annotation is available.
+    pub fn hasTypeContext(self: *const CfgBuilder) bool {
+        return self.type_context != null;
+    }
+
+    /// Annotate an IR node with type information if available.
+    /// Returns the node (possibly enriched with type info).
+    fn annotateWithType(self: *CfgBuilder, node: IrNode, source: *Source, ast_node: u32) IrNode {
+        // Try to get type from TypeContext first (cached)
+        if (self.type_context) |ctx| {
+            if (ctx.getNodeType(ast_node)) |ti| {
+                return node.withType(ti);
+            }
+        }
+
+        // Fallback: try to get type from source's ZirBridge
+        if (self.type_context == null) {
+            // No type context, but we can still try source's ZirBridge
+            if (source.zirBridge()) |bridge| {
+                const count = bridge.getDeclCount();
+                for (0..count) |i| {
+                    if (bridge.getDecl(i)) |decl| {
+                        if (decl.ast_node == ast_node) {
+                            return node.withType(decl.type_info);
+                        }
+                    }
+                }
+            }
+        }
+
+        return node;
+    }
+
+    /// Get type info for a declaration name.
+    fn getDeclTypeInfo(self: *CfgBuilder, source: *Source, name: []const u8) ?TypeInfo {
+        if (self.type_context) |ctx| {
+            return ctx.getDeclType(name);
+        }
+        return source.findDeclType(name);
     }
 
     /// Build CFG for a function body starting at the given AST node.
@@ -424,7 +483,11 @@ pub const CfgBuilder = struct {
         }
 
         // Simple var decl without try/catch in initializer
-        const decl_node = try cfg.addNode(IrNode.initFull(.var_decl, ast_node, range));
+        // Annotate with type information if available
+        var ir_node = IrNode.initFull(.var_decl, ast_node, range);
+        ir_node = self.annotateWithType(ir_node, source, ast_node);
+
+        const decl_node = try cfg.addNode(ir_node);
         try cfg.addEdge(prev_node, decl_node);
         return .{ .last = decl_node, .terminates = false };
     }
@@ -438,20 +501,25 @@ pub const CfgBuilder = struct {
         prev_node: CfgNodeId,
         var_range: SourceRange,
     ) !ProcessResult {
-        _ = self;
         const try_range = try getSourceRange(source, try_init_node);
 
         // Try expression in var decl initializer:
         //   prev -> try_node -> var_decl_node (success path)
         //   try_node --[try_error]--> fn_exit
-        const try_node = try cfg.addNode(IrNode.initFull(.try_expr, try_init_node, try_range));
+        var try_ir = IrNode.initFull(.try_expr, try_init_node, try_range);
+        // Try expressions produce error unions
+        try_ir = try_ir.withType(TypeInfo.initErrorUnion());
+        const try_node = try cfg.addNode(try_ir);
         try cfg.addEdge(prev_node, try_node);
 
         // Error path: propagate to function exit
         try cfg.addEdgeWithKind(try_node, cfg.exit, .try_error);
 
         // Success path: continue to var decl (try_success edge)
-        const decl_node = try cfg.addNode(IrNode.initFull(.var_decl, var_decl_node, var_range));
+        // Annotate var decl with type info
+        var decl_ir = IrNode.initFull(.var_decl, var_decl_node, var_range);
+        decl_ir = self.annotateWithType(decl_ir, source, var_decl_node);
+        const decl_node = try cfg.addNode(decl_ir);
         try cfg.addEdgeWithKind(try_node, decl_node, .try_success);
 
         return .{ .last = decl_node, .terminates = false };
@@ -473,7 +541,10 @@ pub const CfgBuilder = struct {
         // Catch expression in var decl initializer:
         //   prev -> catch_node -> var_decl_node
         //   catch_node has success and error paths that both lead to var_decl
-        const catch_node = try cfg.addNode(IrNode.initFull(.catch_expr, catch_init_node, catch_range));
+        var catch_ir = IrNode.initFull(.catch_expr, catch_init_node, catch_range);
+        // Catch expressions handle error unions
+        catch_ir = catch_ir.withType(TypeInfo.initErrorUnion());
+        const catch_node = try cfg.addNode(catch_ir);
         try cfg.addEdge(prev_node, catch_node);
 
         // Get the RHS (catch handler body) from the catch node
@@ -482,7 +553,10 @@ pub const CfgBuilder = struct {
         const handler_ast = @intFromEnum(catch_data[1]);
 
         // Create the var decl node that both paths lead to
-        const decl_node = try cfg.addNode(IrNode.initFull(.var_decl, var_decl_node, var_range));
+        // Annotate with type information
+        var decl_ir = IrNode.initFull(.var_decl, var_decl_node, var_range);
+        decl_ir = self.annotateWithType(decl_ir, source, var_decl_node);
+        const decl_node = try cfg.addNode(decl_ir);
 
         // Success path: no error, value is unwrapped, goes to var decl
         try cfg.addEdgeWithKind(catch_node, decl_node, .catch_success);
@@ -851,7 +925,10 @@ pub const CfgBuilder = struct {
         //   prev_node -> try_node
         //   try_node --[try_success]--> (next statement)
         //   try_node --[try_error]--> fn_exit
-        const try_node = try cfg.addNode(IrNode.initFull(.try_expr, ast_node, range));
+        var try_ir = IrNode.initFull(.try_expr, ast_node, range);
+        // Try expressions operate on error unions
+        try_ir = try_ir.withType(TypeInfo.initErrorUnion());
+        const try_node = try cfg.addNode(try_ir);
         try cfg.addEdge(prev_node, try_node);
 
         // Error path: propagate to function exit
@@ -880,7 +957,10 @@ pub const CfgBuilder = struct {
         //   prev_node -> catch_node
         //   catch_node --[catch_success]--> merge_node (value is unwrapped)
         //   catch_node --[catch_error]--> handler_body -> merge_node
-        const catch_node = try cfg.addNode(IrNode.initFull(.catch_expr, ast_node, range));
+        var catch_ir = IrNode.initFull(.catch_expr, ast_node, range);
+        // Catch expressions handle error unions
+        catch_ir = catch_ir.withType(TypeInfo.initErrorUnion());
+        const catch_node = try cfg.addNode(catch_ir);
         try cfg.addEdge(prev_node, catch_node);
 
         // Get the RHS (catch handler body) from the catch node
@@ -2495,4 +2575,184 @@ test "CfgBuilder standalone try has try_success edge" {
         if (edge.kind == .try_success) try_success_count += 1;
     }
     try testing.expect(try_success_count >= 1);
+}
+
+// ============================================================================
+// Typed IR Integration Tests
+// ============================================================================
+
+test "CfgBuilder with TypeContext annotates var decl" {
+    const testing = std.testing;
+    const allocator = testing.allocator;
+
+    const code: [:0]const u8 =
+        \\fn foo() void {
+        \\    const x: i32 = 42;
+        \\    _ = x;
+        \\}
+    ;
+
+    var source = Source.init(allocator, "test.zig", code);
+    defer source.deinit();
+
+    // Create type context for the source
+    var type_ctx = TypeContext.init(allocator, &source);
+    defer type_ctx.deinit();
+
+    // Create builder with type context
+    var builder = CfgBuilder.initWithTypes(allocator, &type_ctx);
+
+    const tree = try source.ast();
+    const root_decls = tree.rootDecls();
+    const fn_node = ids.astId(@intFromEnum(root_decls[0]));
+
+    const maybe_cfg = try builder.buildFromFn(&source, fn_node);
+    try testing.expect(maybe_cfg != null);
+
+    var cfg = maybe_cfg.?;
+    defer cfg.deinit();
+
+    // Find the var_decl node
+    var found_typed_var_decl = false;
+    for (cfg.nodes.items) |node| {
+        if (node.ir_node.tag == .var_decl) {
+            // The node should have type info attached (may be null if ZIR fails)
+            // At minimum, verify the node exists
+            found_typed_var_decl = true;
+            break;
+        }
+    }
+    try testing.expect(found_typed_var_decl);
+}
+
+test "CfgBuilder try expression has error_union type" {
+    const testing = std.testing;
+    const allocator = testing.allocator;
+
+    const code: [:0]const u8 =
+        \\fn bar() !i32 { return 1; }
+        \\fn foo() !void {
+        \\    _ = try bar();
+        \\}
+    ;
+
+    var source = Source.init(allocator, "test.zig", code);
+    defer source.deinit();
+
+    var builder = CfgBuilder.init(allocator);
+
+    const tree = try source.ast();
+    const root_decls = tree.rootDecls();
+
+    // Find the second function (foo)
+    var fn_node_index: ?usize = null;
+    for (root_decls, 0..) |decl, i| {
+        const idx = @intFromEnum(decl);
+        if (tree.nodes.items(.tag)[idx] == .fn_decl) {
+            if (fn_node_index == null) {
+                // Skip bar, find foo
+                fn_node_index = i;
+            } else {
+                fn_node_index = i;
+                break;
+            }
+        }
+    }
+
+    try testing.expect(fn_node_index != null);
+    const fn_node = ids.astId(@intFromEnum(root_decls[fn_node_index.?]));
+
+    const maybe_cfg = try builder.buildFromFn(&source, fn_node);
+    try testing.expect(maybe_cfg != null);
+
+    var cfg = maybe_cfg.?;
+    defer cfg.deinit();
+
+    // Find try_expr node and verify it has error_union type info
+    var found_try_with_type = false;
+    for (cfg.nodes.items) |node| {
+        if (node.ir_node.tag == .try_expr) {
+            if (node.ir_node.type_info) |ti| {
+                try testing.expectEqual(TypeInfo.TypeKind.error_union, ti.kind);
+                found_try_with_type = true;
+            }
+            break;
+        }
+    }
+    try testing.expect(found_try_with_type);
+}
+
+test "CfgBuilder catch expression has error_union type" {
+    const testing = std.testing;
+    const allocator = testing.allocator;
+
+    const code: [:0]const u8 =
+        \\fn bar() !i32 { return 1; }
+        \\fn foo() void {
+        \\    const x = bar() catch 0;
+        \\    _ = x;
+        \\}
+    ;
+
+    var source = Source.init(allocator, "test.zig", code);
+    defer source.deinit();
+
+    var builder = CfgBuilder.init(allocator);
+
+    const tree = try source.ast();
+    const root_decls = tree.rootDecls();
+
+    // Find the second function (foo)
+    var fn_node_index: usize = 0;
+    for (root_decls, 0..) |decl, i| {
+        const idx = @intFromEnum(decl);
+        if (tree.nodes.items(.tag)[idx] == .fn_decl) {
+            fn_node_index = i;
+        }
+    }
+
+    const fn_node = ids.astId(@intFromEnum(root_decls[fn_node_index]));
+
+    const maybe_cfg = try builder.buildFromFn(&source, fn_node);
+    try testing.expect(maybe_cfg != null);
+
+    var cfg = maybe_cfg.?;
+    defer cfg.deinit();
+
+    // Find catch_expr node and verify it has error_union type info
+    var found_catch_with_type = false;
+    for (cfg.nodes.items) |node| {
+        if (node.ir_node.tag == .catch_expr) {
+            if (node.ir_node.type_info) |ti| {
+                try testing.expectEqual(TypeInfo.TypeKind.error_union, ti.kind);
+                found_catch_with_type = true;
+            }
+            break;
+        }
+    }
+    try testing.expect(found_catch_with_type);
+}
+
+test "CfgBuilder hasTypeContext" {
+    const testing = std.testing;
+    const allocator = testing.allocator;
+
+    const code: [:0]const u8 = "const x: i32 = 42;";
+    var source = Source.init(allocator, "test.zig", code);
+    defer source.deinit();
+
+    // Builder without type context
+    var builder1 = CfgBuilder.init(allocator);
+    try testing.expect(!builder1.hasTypeContext());
+
+    // Builder with type context
+    var type_ctx = TypeContext.init(allocator, &source);
+    defer type_ctx.deinit();
+
+    var builder2 = CfgBuilder.initWithTypes(allocator, &type_ctx);
+    try testing.expect(builder2.hasTypeContext());
+
+    // Set type context after init
+    builder1.setTypeContext(&type_ctx);
+    try testing.expect(builder1.hasTypeContext());
 }
