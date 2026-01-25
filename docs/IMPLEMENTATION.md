@@ -925,11 +925,22 @@ if (bridge.hasZir()) {
 3. **Declaration Extraction**: Root declarations are extracted from both AST and ZIR
 4. **Type Mapping**: ZIR instruction types are mapped to the simplified `TypeInfo` representation
 
+### AST to ZIR Mapping
+
+The `findZirInstForNode` function provides a best-effort mapping from AST node indices to ZIR instruction indices. It iterates through ZIR instructions and checks their source node references:
+
+- **pl_node format**: Most expression and declaration operations store their source node in `data.pl_node.src_node`
+- **node format**: Parameters and declaration references store the node directly in `data.node`
+- **un_node format**: Unary operations store their source node in `data.un_node.src_node`
+
+This mapping enables correlating high-level AST constructs with their corresponding ZIR instructions, which is useful for type-aware analysis and debugging.
+
 ### Limitations
 
 - ZIR generation requires valid, parseable Zig code (no syntax errors)
 - Full type resolution requires the complete compilation context; standalone analysis provides limited type inference
 - Currently supports module-level declarations; nested scopes require future work
+- AST-to-ZIR mapping is best-effort; some AST nodes may not have corresponding ZIR instructions or may map to multiple instructions
 
 ### Integration with Analysis
 
