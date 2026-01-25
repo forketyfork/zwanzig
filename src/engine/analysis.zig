@@ -10,8 +10,8 @@ const Source = @import("../source.zig").Source;
 const BuildMetadata = @import("../build_metadata.zig").BuildMetadata;
 const base = @import("base.zig");
 const EngineError = base.EngineError;
-const DEFAULT_MAX_INLINE_DEPTH = base.DEFAULT_MAX_INLINE_DEPTH;
-const DEFAULT_MAX_WORKLIST_STEPS = base.DEFAULT_MAX_WORKLIST_STEPS;
+const default_max_inline_depth = base.default_max_inline_depth;
+const default_max_worklist_steps = base.default_max_worklist_steps;
 const Constraint = @import("constraints.zig").Constraint;
 const FunctionSummary = @import("summary.zig").FunctionSummary;
 const SummaryCache = @import("summary.zig").SummaryCache;
@@ -78,8 +78,8 @@ pub const AnalysisEngine = struct {
             .graph = ExplodedGraph.init(allocator, cfg),
             .worklist = .empty,
             .pruned_path_count = 0,
-            .max_inline_depth = DEFAULT_MAX_INLINE_DEPTH,
-            .max_worklist_steps = DEFAULT_MAX_WORKLIST_STEPS,
+            .max_inline_depth = default_max_inline_depth,
+            .max_worklist_steps = default_max_worklist_steps,
             .source = null,
             .function_cfgs = std.AutoHashMap(AstNodeId, *Cfg).init(allocator),
             .function_names = std.StringHashMap(AstNodeId).init(allocator),
@@ -1074,7 +1074,7 @@ test "AnalysisEngine max inline depth configuration" {
     var engine = AnalysisEngine.init(allocator, &cfg);
     defer engine.deinit();
 
-    try std.testing.expectEqual(DEFAULT_MAX_INLINE_DEPTH, engine.max_inline_depth);
+    try std.testing.expectEqual(default_max_inline_depth, engine.max_inline_depth);
 
     engine.setMaxInlineDepth(5);
     try std.testing.expectEqual(@as(u32, 5), engine.max_inline_depth);

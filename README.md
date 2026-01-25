@@ -228,8 +228,8 @@ Enforces Zig naming conventions:
 
 - Types: PascalCase
 - Functions: camelCase
-- Variables/constants/parameters/payloads: snake_case
-- Type aliases (e.g. const Foo = SomeType, pointer/function types, switch expressions yielding types, @typeInfo-derived return types, and C-style *_t aliases) are treated as types and should use PascalCase
+- Variables/constants/parameters/payloads: snake_case (lowercase); SCREAMING_SNAKE_CASE only when mirroring established external conventions (e.g., std.posix.ENOENT)
+- Type aliases (e.g. const Foo = SomeType, pointer/function types, switch/if expressions yielding types, @typeInfo-derived return types, and C-style *_t aliases) are treated as types and should use PascalCase
 
 **Bad:**
 ```zig

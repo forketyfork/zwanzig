@@ -11,8 +11,8 @@ pub const CacheError = error{
     InvalidCacheEntry,
 };
 
-const CACHE_VERSION: u32 = 1;
-const CACHE_DIR_NAME = ".zwanzig-cache";
+const cache_version: u32 = 1;
+const cache_dir_name = ".zwanzig-cache";
 
 pub const CacheKey = struct {
     file_hash: [32]u8,
@@ -63,7 +63,7 @@ pub const CacheEntry = struct {
 
     pub fn init(key: CacheKey, data_len: u32) CacheEntry {
         return CacheEntry{
-            .version = CACHE_VERSION,
+            .version = cache_version,
             .key = key,
             .timestamp = std.time.timestamp(),
             .data_len = data_len,
@@ -88,7 +88,7 @@ pub const CacheEntry = struct {
         }
 
         const version = std.mem.readInt(u32, buf[0..4], .little);
-        if (version != CACHE_VERSION) {
+        if (version != cache_version) {
             return CacheError.VersionMismatch;
         }
 
@@ -108,7 +108,7 @@ pub const Cache = struct {
     cache_dir: ?std.fs.Dir,
 
     pub fn init(allocator: std.mem.Allocator) !Cache {
-        const cache_dir = std.fs.cwd().makeOpenPath(CACHE_DIR_NAME, .{ .iterate = true }) catch |err| {
+        const cache_dir = std.fs.cwd().makeOpenPath(cache_dir_name, .{ .iterate = true }) catch |err| {
             switch (err) {
                 error.AccessDenied => return Cache{
                     .allocator = allocator,

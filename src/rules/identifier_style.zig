@@ -9,6 +9,7 @@ const RuleError = @import("../rule.zig").RuleError;
 /// - Function names: camelCase
 /// - Variable/constant names: snake_case
 /// - Parameter and payload names: snake_case
+/// - SCREAMING_SNAKE_CASE is allowed only when aliasing external conventions
 ///
 /// Names starting with underscore (_) are ignored as they indicate
 /// intentionally ignored/internal identifiers.
@@ -144,17 +145,20 @@ pub const IdentifierStyleRule = struct {
         if (shouldSkipName(name)) return;
 
         const is_const = token_tags[full.ast.mut_token] == .keyword_const;
+        const init_idx_opt = if (full.ast.init_node.unwrap()) |init_node|
+            @intFromEnum(init_node)
+        else
+            null;
 
         // Check if this is a type definition (const Foo = struct { ... })
         if (is_const) {
-            if (full.ast.init_node.unwrap()) |init_node| {
-                const init_idx = @intFromEnum(init_node);
+            if (init_idx_opt) |init_idx| {
                 if (init_idx < tags.len) {
                     const init_tag = tags[init_idx];
                     if (isTypeDefinitionTag(init_tag)) {
                         const is_struct = isStructContainer(init_idx, main_tokens, token_tags);
                         if (!is_struct or init_tag == .error_set_decl) {
-                            if (!isPascalCase(name)) {
+                            if (!isPascalCase(name) and !isCTypeAliasName(name)) {
                                 try emitDiagnostic(src, allocator, diagnostics, token_starts[name_token], name, "type", .pascal_case);
                             }
                             return;
@@ -162,7 +166,7 @@ pub const IdentifierStyleRule = struct {
 
                         const has_fields = containerHasFields(tree, tags, init_idx);
                         if (has_fields) {
-                            if (!isPascalCase(name)) {
+                            if (!isPascalCase(name) and !isCTypeAliasName(name)) {
                                 try emitDiagnostic(src, allocator, diagnostics, token_starts[name_token], name, "type", .pascal_case);
                             }
                             return;
@@ -177,7 +181,7 @@ pub const IdentifierStyleRule = struct {
                     // Check for function type (const foo = fn() void)
                     if (isFunctionTypeTag(init_tag)) {
                         // Function type alias - check for PascalCase
-                        if (!isPascalCase(name)) {
+                        if (!isPascalCase(name) and !isCTypeAliasName(name)) {
                             try emitDiagnostic(src, allocator, diagnostics, token_starts[name_token], name, "function type", .pascal_case);
                         }
                         return;
@@ -187,7 +191,7 @@ pub const IdentifierStyleRule = struct {
                     // or type alias: const Foo = SomeType
                     if (isLikelyTypeAlias(tree, tags, datas, main_tokens, token_tags, init_idx)) {
                         // This is likely a type alias - check for PascalCase
-                        if (!isPascalCase(name)) {
+                        if (!isPascalCase(name) and !isCTypeAliasName(name)) {
                             try emitDiagnostic(src, allocator, diagnostics, token_starts[name_token], name, "type alias", .pascal_case);
                         }
                         return;
@@ -203,9 +207,14 @@ pub const IdentifierStyleRule = struct {
             }
         }
 
-        // For constants: require snake_case or SCREAMING_SNAKE_CASE unless handled above
+        // For constants: require snake_case unless aliasing an external convention
         if (is_const) {
-            if (!isLowerSnakeCase(name) and !isScreamingSnakeCase(name)) {
+            const is_external_alias = isScreamingSnakeCase(name) and
+                (if (init_idx_opt) |init_idx|
+                    isExternalConventionAlias(tree, tags, datas, token_tags, init_idx)
+                else
+                    false);
+            if (!isLowerSnakeCase(name) and !is_external_alias) {
                 try emitDiagnostic(src, allocator, diagnostics, token_starts[name_token], name, "constant", .snake_case);
             }
             return;
@@ -227,17 +236,14 @@ pub const IdentifierStyleRule = struct {
         init_idx: usize,
     ) bool {
         const init_tag = tags[init_idx];
+        if (isTypeDefinitionTag(init_tag)) return true;
 
         return switch (init_tag) {
             // Direct identifier reference - check if PascalCase (likely type)
             .identifier => isTypeAliasCallee(tree, tags, datas, token_tags, init_idx),
             // Field access: @import("...").Foo or Module.Type
             .field_access => isTypeAliasCallee(tree, tags, datas, token_tags, init_idx),
-            .call, .call_comma, .call_one, .call_one_comma => blk: {
-                var buf: [1]std.zig.Ast.Node.Index = undefined;
-                const call_info = tree.fullCall(&buf, @enumFromInt(init_idx)) orelse break :blk false;
-                break :blk isTypeAliasCallee(tree, tags, datas, token_tags, @intFromEnum(call_info.ast.fn_expr));
-            },
+            .call, .call_comma, .call_one, .call_one_comma => isTypeFactoryCall(tree, tags, datas, main_tokens, token_tags, init_idx),
             .builtin_call, .builtin_call_comma, .builtin_call_two, .builtin_call_two_comma => blk: {
                 const builtin_name = builtinCallName(tree, tags, token_tags, init_idx) orelse break :blk false;
                 break :blk isTypeFactoryBuiltin(builtin_name);
@@ -254,6 +260,7 @@ pub const IdentifierStyleRule = struct {
             .array_type_sentinel,
             => true,
             .@"switch", .switch_comma => isTypeSwitchAlias(tree, tags, datas, main_tokens, token_tags, init_idx),
+            .@"if", .if_simple => isTypeIfAlias(tree, tags, datas, main_tokens, token_tags, init_idx),
             .unwrap_optional,
             .grouped_expression,
             => blk: {
@@ -280,6 +287,61 @@ pub const IdentifierStyleRule = struct {
             if (!isLikelyTypeAlias(tree, tags, datas, main_tokens, token_tags, target_idx)) return false;
         }
         return true;
+    }
+
+    fn isTypeIfAlias(
+        tree: *const std.zig.Ast,
+        tags: []const std.zig.Ast.Node.Tag,
+        datas: []const std.zig.Ast.Node.Data,
+        main_tokens: []const std.zig.Ast.TokenIndex,
+        token_tags: []const std.zig.Token.Tag,
+        init_idx: usize,
+    ) bool {
+        const full_if = tree.fullIf(@enumFromInt(init_idx)) orelse return false;
+        const then_idx = @intFromEnum(full_if.ast.then_expr);
+        const else_expr = full_if.ast.else_expr.unwrap() orelse return false;
+        const else_idx = @intFromEnum(else_expr);
+
+        const then_is_type = isCompileErrorExpr(tree, tags, datas, token_tags, then_idx) or
+            isLikelyTypeAlias(tree, tags, datas, main_tokens, token_tags, then_idx);
+        const else_is_type = isCompileErrorExpr(tree, tags, datas, token_tags, else_idx) or
+            isLikelyTypeAlias(tree, tags, datas, main_tokens, token_tags, else_idx);
+        return then_is_type and else_is_type;
+    }
+
+    fn isExternalConventionAlias(
+        tree: *const std.zig.Ast,
+        tags: []const std.zig.Ast.Node.Tag,
+        datas: []const std.zig.Ast.Node.Data,
+        token_tags: []const std.zig.Token.Tag,
+        init_idx: usize,
+    ) bool {
+        return switch (tags[init_idx]) {
+            .identifier => isScreamingIdentifier(tree, token_tags, init_idx),
+            .field_access => blk: {
+                const field_token = datas[init_idx].node_and_token[1];
+                if (field_token >= token_tags.len or token_tags[field_token] != .identifier) break :blk false;
+                const field_name = tree.tokenSlice(field_token);
+                break :blk isScreamingSnakeCase(field_name);
+            },
+            .unwrap_optional,
+            .grouped_expression,
+            => blk: {
+                const data = datas[init_idx].node_and_token;
+                break :blk isExternalConventionAlias(tree, tags, datas, token_tags, @intFromEnum(data[0]));
+            },
+            else => false,
+        };
+    }
+
+    fn isScreamingIdentifier(
+        tree: *const std.zig.Ast,
+        token_tags: []const std.zig.Token.Tag,
+        node_idx: usize,
+    ) bool {
+        const ident_token = tree.nodes.items(.main_token)[node_idx];
+        if (ident_token >= token_tags.len or token_tags[ident_token] != .identifier) return false;
+        return isScreamingSnakeCase(tree.tokenSlice(ident_token));
     }
 
     fn isCompileErrorExpr(
@@ -413,7 +475,7 @@ pub const IdentifierStyleRule = struct {
                 const ident_token = tree.nodes.items(.main_token)[node_idx];
                 if (ident_token >= token_tags.len or token_tags[ident_token] != .identifier) return false;
                 const ident_name = tree.tokenSlice(ident_token);
-                return isPascalCase(ident_name);
+                return isPascalCase(ident_name) or isBuiltinTypeName(ident_name) or isCTypeAliasName(ident_name);
             },
             .field_access => {
                 if (isTypeInfoDerivedExpr(tree, tags, datas, token_tags, node_idx)) return true;
@@ -421,7 +483,7 @@ pub const IdentifierStyleRule = struct {
                 const field_token = data.node_and_token[1];
                 if (field_token < token_tags.len and token_tags[field_token] == .identifier) {
                     const field_name = tree.tokenSlice(field_token);
-                    return isPascalCase(field_name) or isCTypeFieldName(field_name);
+                    return isPascalCase(field_name) or isCTypeAliasName(field_name);
                 }
                 return false;
             },
@@ -435,9 +497,85 @@ pub const IdentifierStyleRule = struct {
         };
     }
 
-    fn isCTypeFieldName(name: []const u8) bool {
+    fn isCTypeAliasName(name: []const u8) bool {
         if (!isLowerSnakeCase(name)) return false;
         return std.mem.endsWith(u8, name, "_t");
+    }
+
+    fn isBuiltinTypeName(name: []const u8) bool {
+        if (std.mem.eql(u8, name, "bool") or
+            std.mem.eql(u8, name, "void") or
+            std.mem.eql(u8, name, "noreturn") or
+            std.mem.eql(u8, name, "type") or
+            std.mem.eql(u8, name, "anytype") or
+            std.mem.eql(u8, name, "anyopaque") or
+            std.mem.eql(u8, name, "anyerror") or
+            std.mem.eql(u8, name, "usize") or
+            std.mem.eql(u8, name, "isize") or
+            std.mem.eql(u8, name, "comptime_int") or
+            std.mem.eql(u8, name, "comptime_float"))
+        {
+            return true;
+        }
+
+        if (name.len < 2) return false;
+        const prefix = name[0];
+        if (prefix != 'u' and prefix != 'i' and prefix != 'f') return false;
+        for (name[1..]) |c| {
+            if (!std.ascii.isDigit(c)) return false;
+        }
+        return true;
+    }
+
+    fn isTypeFactoryCall(
+        tree: *const std.zig.Ast,
+        tags: []const std.zig.Ast.Node.Tag,
+        datas: []const std.zig.Ast.Node.Data,
+        main_tokens: []const std.zig.Ast.TokenIndex,
+        token_tags: []const std.zig.Token.Tag,
+        init_idx: usize,
+    ) bool {
+        var buf: [1]std.zig.Ast.Node.Index = undefined;
+        const call_info = tree.fullCall(&buf, @enumFromInt(init_idx)) orelse return false;
+        const callee_idx = @intFromEnum(call_info.ast.fn_expr);
+        if (!isTypeAliasCallee(tree, tags, datas, token_tags, callee_idx)) return false;
+
+        var saw_type_arg = false;
+        for (call_info.ast.params) |param| {
+            const arg_idx = @intFromEnum(param);
+            if (isLikelyTypeAlias(tree, tags, datas, main_tokens, token_tags, arg_idx)) {
+                saw_type_arg = true;
+                continue;
+            }
+            if (isTypeFactoryLiteral(tags, datas, arg_idx)) {
+                continue;
+            }
+            return false;
+        }
+
+        return saw_type_arg;
+    }
+
+    fn isTypeFactoryLiteral(
+        tags: []const std.zig.Ast.Node.Tag,
+        datas: []const std.zig.Ast.Node.Data,
+        node_idx: usize,
+    ) bool {
+        return switch (tags[node_idx]) {
+            .number_literal,
+            .string_literal,
+            .multiline_string_literal,
+            .char_literal,
+            .enum_literal,
+            => true,
+            .unwrap_optional,
+            .grouped_expression,
+            => blk: {
+                const data = datas[node_idx].node_and_token;
+                break :blk isTypeFactoryLiteral(tags, datas, @intFromEnum(data[0]));
+            },
+            else => false,
+        };
     }
 
     fn isFunctionAlias(
@@ -619,10 +757,9 @@ pub const IdentifierStyleRule = struct {
         return true;
     }
 
-    /// Check if name follows snake_case: all lowercase with underscores, or
-    /// SCREAMING_SNAKE_CASE: all uppercase with underscores (for constants)
+    /// Check if name follows snake_case: all lowercase with underscores
     fn isSnakeCase(name: []const u8) bool {
-        return isLowerSnakeCase(name) or isScreamingSnakeCase(name);
+        return isLowerSnakeCase(name);
     }
 
     fn isLowerSnakeCase(name: []const u8) bool {
@@ -901,12 +1038,11 @@ test "isSnakeCase" {
     try std.testing.expect(isSnakeCase("foo"));
     try std.testing.expect(isSnakeCase("foo_bar"));
     try std.testing.expect(isSnakeCase("foo_bar_baz"));
-    try std.testing.expect(isSnakeCase("FOO"));
-    try std.testing.expect(isSnakeCase("FOO_BAR"));
-    try std.testing.expect(isSnakeCase("MAX_SIZE"));
     try std.testing.expect(!isSnakeCase("fooBar"));
     try std.testing.expect(!isSnakeCase("FooBar"));
     try std.testing.expect(!isSnakeCase("foo_Bar"));
+    try std.testing.expect(!isSnakeCase("FOO"));
+    try std.testing.expect(!isSnakeCase("FOO_BAR"));
 }
 
 test "isLowerSnakeCase" {
@@ -924,6 +1060,7 @@ test "isScreamingSnakeCase" {
     try std.testing.expect(isScreamingSnakeCase("FOO"));
     try std.testing.expect(isScreamingSnakeCase("FOO_BAR"));
     try std.testing.expect(isScreamingSnakeCase("FOO2_BAR3"));
+    try std.testing.expect(isScreamingSnakeCase("MAX_SIZE"));
     try std.testing.expect(!isScreamingSnakeCase("foo"));
     try std.testing.expect(!isScreamingSnakeCase("Foo"));
     try std.testing.expect(!isScreamingSnakeCase("foo_Bar"));
