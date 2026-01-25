@@ -23,7 +23,7 @@ if [ -n "$(git status --porcelain)" ]; then
     exit 1
 fi
 
-version_line=$(rg -n "^\\s*\\.version\\s*=" build.zig.zon | head -n1 || true)
+version_line=$(grep -nE "^[[:space:]]*\\.version[[:space:]]*=" build.zig.zon | head -n1 || true)
 if [ -z "$version_line" ]; then
     echo "Failed to locate .version in build.zig.zon" >&2
     exit 1
@@ -40,7 +40,7 @@ if [ "v$version" != "$tag" ]; then
     exit 1
 fi
 
-readme_tags=$(rg -o "refs/tags/v[0-9]+\\.[0-9]+\\.[0-9]+" README.md || true)
+readme_tags=$(grep -oE "refs/tags/v[0-9]+\.[0-9]+\.[0-9]+" README.md || true)
 if [ -n "$readme_tags" ]; then
     mapfile -t uniq_tags < <(printf '%s\n' "$readme_tags" | sed 's#.*refs/tags/##' | sort -u)
     for readme_tag in "${uniq_tags[@]}"; do
