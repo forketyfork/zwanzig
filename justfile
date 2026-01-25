@@ -24,6 +24,7 @@ lint:
     if [ -f validate.sh ]; then
         shellcheck validate.sh
     fi
+    shellcheck scripts/*.sh
 
     zig fmt --check src/
     zig build run -- src/**/*.zig
