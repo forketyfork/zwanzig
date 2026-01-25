@@ -4,26 +4,30 @@ This plan starts after the Adjustment Plan is complete. Its goal is to achieve t
 
 Each step is scoped to be completed in a single agent session (target: < ~1000 LOC change per step).
 
-## Step 1: Typed IR Integration (ZIR → Analysis IR)
+---
 
-### Status Quo
-ZIR bridge exists but CFG/IR and the engine do not consume typed information.
+## Completed Steps
 
-### Objectives
-Make typed IR a first‑class input for analysis and attach type info to IR nodes.
+### ✅ Step 1: Typed IR Integration (COMPLETED)
 
-### Tech Notes
-- Use ZIR to annotate IR nodes (vars, literals, calls) with type info.
-- Add a small type table or `TypeInfo` references on IR nodes.
-- Keep typed IR optional but preferred when available.
+Typed IR is now a first-class input for analysis. Key implementations:
 
-### Acceptance Criteria
-- CFG/IR nodes carry type info when ZIR is present.
-- Tests cover typed var declarations and call signatures.
-- `zig build` succeeds.
-- `zig build test` succeeds.
+- **ZirBridge** (`src/zir_bridge.zig`): Generates ZIR from source and extracts typed information
+- **TypeInfo/TypeKind**: Type representation with 16+ type categories (int, pointer, error_union, etc.)
+- **TypeContext** (`src/type_context.zig`): Unified interface for type queries with caching
+- **IrNode type_info field**: IR nodes carry optional `TypeInfo` for type-aware analysis
+- **CfgBuilder integration**: CFG builder annotates nodes with types during construction
+- **CheckerContext**: Checkers receive type context for type-aware analysis
 
-## Step 2: Region/Store Model (Heap + Resources)
+Type information is used by:
+- `identifier-style` rule for type-aware naming convention enforcement
+- `unused-decl` rule for distinguishing types from values
+
+---
+
+## Remaining Steps
+
+## Step 1: Region/Store Model (Heap + Resources)
 
 ### Status Quo
 ProgramState only tracks environment and constraints; heap/resources are not modeled.
@@ -42,7 +46,7 @@ Introduce a region/store abstraction for ownership and resource tracking.
 - `zig build` succeeds.
 - `zig build test` succeeds.
 
-## Step 3: Richer Abstract Domains
+## Step 2: Richer Abstract Domains
 
 ### Status Quo
 Abstract values are minimal and lack expression support (arithmetic, slices, ownership).
@@ -61,7 +65,7 @@ Improve value precision to support real‑world bug detection.
 - `zig build` succeeds.
 - `zig build test` succeeds.
 
-## Step 4: Constraint Solver Upgrade
+## Step 3: Constraint Solver Upgrade
 
 ### Status Quo
 ConstraintManager is a simple consistency checker without a solver backend.
@@ -79,7 +83,7 @@ Introduce a modular constraint solver capable of pruning infeasible paths.
 - `zig build` succeeds.
 - `zig build test` succeeds.
 
-## Step 5: Interprocedural Summaries (Pre/Post Conditions)
+## Step 4: Interprocedural Summaries (Pre/Post Conditions)
 
 ### Status Quo
 Summaries exist but are coarse and heuristic.
@@ -98,7 +102,7 @@ Compute meaningful pre/postconditions and return constraints for functions.
 - `zig build` succeeds.
 - `zig build test` succeeds.
 
-## Step 6: Cross-File Analysis Integration
+## Step 5: Cross-File Analysis Integration
 
 ### Status Quo
 Analysis is single‑file; calls across files are treated as external.
@@ -117,7 +121,7 @@ Enable cross‑file analysis using build metadata or compilation database.
 - `zig build` succeeds.
 - `zig build test` succeeds.
 
-## Step 7: Checker API Parity (Bug Reports + Path Notes)
+## Step 6: Checker API Parity (Bug Reports + Path Notes)
 
 ### Status Quo
 Checkers can emit diagnostics but cannot attach path context.
@@ -134,7 +138,7 @@ Add path reporting mechanisms similar to Clang SA.
 - `zig build` succeeds.
 - `zig build test` succeeds.
 
-## Step 8: Comptime + Target‑Aware Semantics
+## Step 7: Comptime + Target‑Aware Semantics
 
 ### Status Quo
 Target metadata exists but is not used; comptime code is not modeled.
@@ -152,7 +156,7 @@ Model comptime boundaries and target‑specific constraints.
 - `zig build` succeeds.
 - `zig build test` succeeds.
 
-## Step 9: Expanded Checker Suite
+## Step 8: Expanded Checker Suite
 
 ### Status Quo
 Checkers cover a small set of error‑handling patterns only.
@@ -169,7 +173,7 @@ Deliver practical, high‑value checkers aligned with Zig usage.
 - `zig build` succeeds.
 - `zig build test` succeeds.
 
-## Step 10: Documentation Updates (Vision Scope)
+## Step 9: Documentation Updates (Vision Scope)
 
 ### Status Quo
 Docs do not reflect the full analysis pipeline and advanced features.

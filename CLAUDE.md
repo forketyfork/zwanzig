@@ -54,11 +54,13 @@ nix develop
 4. Analyzer reports results and exits with code 1 if diagnostics found
 
 ### Key Types
-- **`Source`** (`src/source.zig`): Lazy-parsed source with cached AST. Call `ast()` or `tokens()` to parse on demand; subsequent calls return cached result.
+- **`Source`** (`src/source.zig`): Lazy-parsed source with cached AST. Call `ast()` or `tokens()` to parse on demand; subsequent calls return cached result. Also provides type information via `hasTypeInfo()`, `findDeclType()`, etc.
 - **`Rule`** (`src/rule.zig`): Interface with `name` and `checkFn`. Rules implement `check(source, allocator, diagnostics)`.
-- **`Checker`** (`src/checker.zig`): Engine-based interface with `checkAstFn`. Checkers use CFG and analysis engine for sophisticated analysis.
+- **`Checker`** (`src/checker.zig`): Engine-based interface with `checkAstFn`. Checkers use CFG and analysis engine for sophisticated analysis. Checkers receive a `CheckerContext` with optional `TypeContext` for type-aware analysis.
 - **`Analyzer`** (`src/analyzer.zig`): Orchestrates file reading, rule/checker execution, result collection.
-- **`Diagnostic`**: Issue report with file path, line/column, rule name, severity, and message.
+- **`Diagnostic`**: Issue report with file path, line/column, rule name, severity, and message. Diagnostics own their message strings; `Analyzer.deinit()` frees them.
+- **`TypeContext`** (`src/type_context.zig`): Unified interface for type queries wrapping the ZIR bridge. Use `getDeclType()`, `classifyIdentifier()`, `isDeclFunction()`, etc.
+- **`ZirBridge`** (`src/zir_bridge.zig`): Generates ZIR from source and extracts typed information (`TypeInfo`, `DeclInfo`).
 
 ### Adding a New Rule
 

@@ -155,6 +155,10 @@ The `Diagnostic` type (`src/diagnostic.zig`) provides:
 - `SourceRange` struct for start/end location pairs
 - `LocationMapper` for converting byte offsets to line/column positions
 
+**Message Ownership:**
+
+Diagnostics always own their message strings. When creating a diagnostic via `Diagnostic.init()` or `Diagnostic.initAtLocation()`, an allocator must be provided and the message is duplicated. The `Analyzer.deinit()` method is the single point that frees all diagnostic messages, ensuring safe memory management. Rules and checkers should never manually free diagnostic messages.
+
 **Output Formats:**
 
 The analyzer supports multiple output formats via the `Analyzer.OutputFormat` enum:
