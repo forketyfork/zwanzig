@@ -1,6 +1,7 @@
 const std = @import("std");
 const fixture_runner = @import("fixture_runner.zig");
 const runFixturesInDir = fixture_runner.runFixturesInDir;
+const runCheckerFixturesInDir = fixture_runner.runCheckerFixturesInDir;
 
 // Import all rules from the src module
 const src = @import("src");
@@ -13,6 +14,7 @@ const FileAsStructRule = src.rules.file_as_struct.FileAsStructRule;
 const UnusedDeclRule = src.rules.unused_decl.UnusedDeclRule;
 const ShadowedVariableRule = src.rules.shadowed_variable.ShadowedVariableRule;
 const IdentifierStyleRule = src.rules.identifier_style.IdentifierStyleRule;
+const UnreachableCodeChecker = @import("src/checkers/unreachable_code_checker.zig").UnreachableCodeChecker;
 
 test "dupe_import fixtures" {
     try runFixturesInDir(std.testing.allocator, &DupeImportRule.rule, "test/fixtures/dupe_import");
@@ -48,4 +50,8 @@ test "shadowed_variable fixtures" {
 
 test "identifier_style fixtures" {
     try runFixturesInDir(std.testing.allocator, &IdentifierStyleRule.rule, "test/fixtures/identifier_style");
+}
+
+test "unreachable_code_engine fixtures" {
+    try runCheckerFixturesInDir(std.testing.allocator, &UnreachableCodeChecker.checker, "test/fixtures/unreachable_code_engine");
 }
