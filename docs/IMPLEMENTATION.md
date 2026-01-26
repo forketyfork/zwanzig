@@ -1843,6 +1843,161 @@ pub fn fromNative() BuildMetadata {
 }
 ```
 
+## Incremental Cache
+
+The analyzer supports incremental caching of intermediate artifacts to speed up repeated analysis runs. The cache stores precomputed CFGs and other analysis data, avoiding redundant computation.
+
+### Cache Architecture
+
+The cache system consists of two main components:
+
+1. **Cache** (`src/cache.zig`): Low-level persistent storage
+2. **CachedArtifacts** (`src/cached_artifacts.zig`): Serialization of intermediate artifacts
+
+### Cache Key Components
+
+Cache keys (`CacheKey`) are computed from multiple sources to ensure proper invalidation:
+
+```zig
+pub const CacheKey = struct {
+    file_hash: [32]u8,      // SHA-256 of file content
+    target_hash: [32]u8,    // Hash of target architecture/OS/ABI
+    version_hash: [32]u8,   // Hash of Zwanzig tool version
+    config_hash: [32]u8,    // Hash of enabled rules/checkers
+};
+```
+
+**Invalidation triggers:**
+- File content changes → `file_hash` changes
+- Target platform changes (`--target` flag) → `target_hash` changes
+- Zwanzig version update → `version_hash` changes
+- Rule configuration changes (`--do`/`--skip` flags) → `config_hash` changes
+
+### Cache Behavior
+
+**Key principle:** The cache never skips analysis. It only caches intermediate artifacts like CFGs.
+
+When analyzing a file:
+1. Compute cache key from file content, target, version, and enabled rules
+2. Check if cached artifacts exist for this key
+3. If cache hit: load cached CFGs and other precomputed data
+4. **Always run analysis** - diagnostics are produced on every run
+5. Store computed artifacts back to cache
+
+This ensures diagnostics are always reported regardless of cache state.
+
+```zig
+// Cache hit still produces diagnostics
+var analyzer = Analyzer.init(allocator);
+try analyzer.enableCache();
+try analyzer.registerRule(&MyRule.rule);
+
+// First run - computes and caches artifacts
+try analyzer.analyzeFile("test.zig");
+const first_diag_count = analyzer.diagnostics.items.len;
+
+// Second run - uses cached artifacts, still produces same diagnostics
+try analyzer.analyzeFile("test.zig");
+const second_diag_count = analyzer.diagnostics.items.len;
+// first_diag_count == second_diag_count
+```
+
+### Cached Artifacts
+
+The `CachedArtifacts` struct stores:
+
+- **CFGs per function**: Control-flow graphs keyed by function AST node index
+- **Type info availability**: Whether ZIR/type info was available during caching
+
+```zig
+pub const CachedArtifacts = struct {
+    allocator: std.mem.Allocator,
+    cfgs: std.AutoHashMap(u32, *Cfg),
+    had_type_info: bool,
+};
+```
+
+### Serialization Format
+
+Cached artifacts use a binary format with:
+- Magic bytes: `ZWCA` (Zwanzig Cached Artifacts)
+- Format version: Incremented when serialization format changes
+- Payload: Serialized CFGs with nodes, edges, and metadata
+
+The format version ensures old cache entries are automatically invalidated when the format changes.
+
+### CLI Usage
+
+Enable caching with `--cache`:
+
+```bash
+zwanzig --cache src/
+```
+
+Cache files are stored in `.zwanzig-cache/` in the current directory.
+
+### Cache Directory Structure
+
+```
+.zwanzig-cache/
+├── <hash1>.cache    # Cached artifacts for file 1
+├── <hash2>.cache    # Cached artifacts for file 2
+└── ...
+```
+
+Each cache file contains:
+- Header: version, key hashes, timestamp, data length
+- Body: serialized `CachedArtifacts`
+
+## Variable Identification (VarId)
+
+The analysis engine uses a `VarId` type for identifying variables throughout the analysis. This is an opaque identifier that maps to AST node indices.
+
+### VarId Mapping
+
+Variables are identified by their AST node index, providing a simple and unique identifier within a module:
+
+```zig
+pub const VarId = struct {
+    value: u32,
+
+    pub fn fromAstNode(node: u32) VarId {
+        return .{ .value = node };
+    }
+
+    pub fn toAstNode(self: VarId) u32 {
+        return self.value;
+    }
+};
+```
+
+**Benefits of AST-based identification:**
+- Unique within a compilation unit
+- Direct mapping back to source locations for diagnostics
+- No separate symbol table required
+- Works with nested scopes (inner declarations get different AST nodes)
+
+### Environment Bindings
+
+The `Environment` maps `VarId` to `AbstractValue`:
+
+```zig
+pub const Environment = struct {
+    bindings: std.AutoHashMap(u32, AbstractValue),
+    allocator: std.mem.Allocator,
+};
+```
+
+When a variable declaration is processed:
+1. Extract the AST node index for the declaration
+2. Create a `VarId` from the AST node
+3. Bind the variable to an initial abstract value (typically `unknown`)
+
+When a variable is used:
+1. Look up the AST node of the identifier
+2. Query the environment for the abstract value
+3. Use the value in transfer functions or constraint checks
+
 ## Future Directions
 
 The current implementation provides a solid foundation. Potential future enhancements include:

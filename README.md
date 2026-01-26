@@ -161,6 +161,46 @@ fn bar(x: i32) void {
 }
 ```
 
+### unreachable-code-engine
+
+Detects path-sensitive unreachable code where the condition is a compile-time constant.
+
+**Bad:**
+```zig
+fn foo() i32 {
+    if (false) {
+        return 1;  // Unreachable - condition is always false
+    }
+    return 0;
+}
+
+fn bar() i32 {
+    if (true) {
+        return 1;
+    } else {
+        return 0;  // Unreachable - condition is always true
+    }
+}
+
+fn baz() void {
+    while (false) {
+        doWork();  // Unreachable - loop never executes
+    }
+}
+```
+
+**Good:**
+```zig
+fn foo(condition: bool) i32 {
+    if (condition) {
+        return 1;
+    }
+    return 0;
+}
+```
+
+This checker complements `unreachable-code` by handling cases where conditions are compile-time constants (`true`/`false` literals). It's conservative and only reports when the condition is definitely constant.
+
 ### empty-defer
 
 Flags empty `defer {}` blocks that serve no purpose.
@@ -527,7 +567,15 @@ Speed up repeated runs with `--cache`:
 zwanzig --cache src/
 ```
 
-Cache lives in `.zwanzig-cache/`. It's keyed by file content hash and target, so it invalidates automatically when either changes.
+Cache lives in `.zwanzig-cache/`. It's keyed by:
+- File content hash
+- Target platform (`--target`)
+- Zwanzig version
+- Enabled rules/checkers configuration
+
+The cache invalidates automatically when any of these change.
+
+**Important:** The cache stores intermediate artifacts (CFGs) but never skips analysis - diagnostics are always produced on every run.
 
 **Tip:** Add `.zwanzig-cache/` to `.gitignore`.
 
