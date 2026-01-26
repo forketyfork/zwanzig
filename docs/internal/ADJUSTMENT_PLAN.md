@@ -6,43 +6,19 @@ This plan focuses on correctness fixes and minimal analysis improvements that ma
 
 Each step is designed for a single agent session (target: < ~1000 LOC change per step).
 
-## Step 1: Diagnostic Ownership (Always Owned)
+---
 
-### Status Quo
-Diagnostics are freed unconditionally, but messages are a mix of owned and borrowed strings, causing invalid frees.
+## Completed Steps
 
-### Objectives
-Make `Diagnostic` always own its message and enforce allocation at creation sites.
+### ✅ Step 1-2: Diagnostic Ownership (COMPLETED)
 
-### Tech Notes
-- Update `Diagnostic.init` and `Diagnostic.initAtLocation` to accept an allocator and duplicate the message.
-- Remove manual message duplication in rules/checkers to avoid double allocations.
-- Keep `Analyzer.deinit` as the single owner that frees messages.
+Diagnostics now always own their message strings. `Diagnostic.init` and `Diagnostic.initAtLocation` accept an allocator and duplicate the message. `Analyzer.deinit` is the single owner that frees messages. All call sites have been migrated and tests cover ownership safety.
 
-### Acceptance Criteria
-- All diagnostics own their messages.
-- `zig build` succeeds.
-- `zig build test` succeeds.
+---
 
-## Step 2: Diagnostic API Migration + Tests
+## Remaining Steps
 
-### Status Quo
-Rules/checkers allocate message strings inconsistently; tests do not cover ownership safety.
-
-### Objectives
-Normalize all diagnostic creation and add regression tests for message ownership.
-
-### Tech Notes
-- Update all call sites to the new `Diagnostic` API.
-- Add a test that creates diagnostics from string literals and verifies `Analyzer.deinit` safety.
-
-### Acceptance Criteria
-- No manual message free remains in rules/checkers.
-- Tests cover literal messages + analyzer deinit.
-- `zig build` succeeds.
-- `zig build test` succeeds.
-
-## Step 3: Variable Identity (VarId) Unification
+## Step 1: Variable Identity (VarId) Unification
 
 ### Status Quo
 Decls, assignments, and branch constraints use different AST node IDs, so ProgramState does not propagate values or constraints.
@@ -60,7 +36,7 @@ Introduce a stable VarId mapping for locals and use it consistently.
 - `zig build` succeeds.
 - `zig build test` succeeds.
 
-## Step 4: CFG/IR VarId Integration
+## Step 2: CFG/IR VarId Integration
 
 ### Status Quo
 IR nodes store raw AST indices; engine assumes those are VarIds.
@@ -79,7 +55,7 @@ Embed VarId in IR/CFG to align state updates and constraints.
 - `zig build` succeeds.
 - `zig build test` succeeds.
 
-## Step 5: Constraint Extraction (Minimal Semantics)
+## Step 3: Constraint Extraction (Minimal Semantics)
 
 ### Status Quo
 Branch constraint extraction is a placeholder and does not reflect actual conditions.
@@ -98,7 +74,7 @@ Extract simple constraints from conditions (`x == 0`, `x != 0`, `x < N`, `x == n
 - `zig build` succeeds.
 - `zig build test` succeeds.
 
-## Step 6: Summary Error-Path Correctness
+## Step 4: Summary Error-Path Correctness
 
 ### Status Quo
 Summaries may drop error paths; error behavior detection is limited to `try_expr`.
@@ -117,7 +93,7 @@ Ensure summaries conservatively preserve error behavior.
 - `zig build` succeeds.
 - `zig build test` succeeds.
 
-## Step 7: Unreachable Code via CFG/Engine
+## Step 5: Unreachable Code via CFG/Engine
 
 ### Status Quo
 `unreachable-code` is AST‑based and misses path‑sensitive unreachable cases.
@@ -135,7 +111,7 @@ Use CFG + exploded graph reachability for unreachable detection.
 - `zig build` succeeds.
 - `zig build test` succeeds.
 
-## Step 8: Intermediate Artifact Cache (Typed IR/CFG/Summaries)
+## Step 6: Intermediate Artifact Cache (Typed IR/CFG/Summaries)
 
 ### Status Quo
 Cache stores an empty blob and skips analysis on hit, dropping diagnostics.
@@ -154,7 +130,7 @@ Cache intermediate artifacts only, never diagnostics; analysis always runs.
 - `zig build` succeeds.
 - `zig build test` succeeds.
 
-## Step 9: Cache Key Expansion and Invalidation
+## Step 7: Cache Key Expansion and Invalidation
 
 ### Status Quo
 Cache key includes only file hash + target, which is insufficient.
@@ -172,7 +148,7 @@ Ensure cached artifacts invalidate across config/version changes.
 - `zig build` succeeds.
 - `zig build test` succeeds.
 
-## Step 10: Documentation Update (Adjustment Scope)
+## Step 8: Documentation Update (Adjustment Scope)
 
 ### Status Quo
 Docs do not reflect the diagnostic ownership model or the artifact cache.
