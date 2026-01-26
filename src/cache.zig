@@ -199,7 +199,7 @@ pub const Cache = struct {
 
         const entry = CacheEntry.readFromFile(file) catch |err| {
             return switch (err) {
-                error.VersionMismatch => null,
+                error.VersionMismatch, error.CacheCorrupted => null,
                 else => err,
             };
         };
