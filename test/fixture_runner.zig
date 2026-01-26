@@ -4,7 +4,7 @@ const Source = src.Source;
 const Diagnostic = src.Diagnostic;
 const Severity = src.Severity;
 const Rule = src.Rule;
-const checker_mod = @import("src/checker.zig");
+const checker_mod = src.checker;
 const Checker = checker_mod.Checker;
 const CheckerContext = checker_mod.CheckerContext;
 

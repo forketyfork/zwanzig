@@ -14,7 +14,7 @@ const FileAsStructRule = src.rules.file_as_struct.FileAsStructRule;
 const UnusedDeclRule = src.rules.unused_decl.UnusedDeclRule;
 const ShadowedVariableRule = src.rules.shadowed_variable.ShadowedVariableRule;
 const IdentifierStyleRule = src.rules.identifier_style.IdentifierStyleRule;
-const UnreachableCodeChecker = @import("src/checkers/unreachable_code_checker.zig").UnreachableCodeChecker;
+const UnreachableCodeChecker = src.checkers.unreachable_code_checker.UnreachableCodeChecker;
 
 test "dupe_import fixtures" {
     try runFixturesInDir(std.testing.allocator, &DupeImportRule.rule, "test/fixtures/dupe_import");
