@@ -159,8 +159,27 @@ pub const Analyzer = struct {
         defer if (cached_artifacts) |*ca| ca.deinit();
 
         var cache_key: ?CacheKey = null;
+        var enabled_rules_buf: std.ArrayList([]const u8) = .empty;
+        defer enabled_rules_buf.deinit(self.allocator);
+
         if (self.use_cache) {
-            cache_key = CacheKey.init(content, self.getBuildMetadata());
+            for (self.checker_manager.checkers.items) |chkr| {
+                if (self.isRuleEnabled(chkr.name)) {
+                    try enabled_rules_buf.append(self.allocator, chkr.name);
+                }
+            }
+            for (self.checker_manager.adapted_rules.items) |rule| {
+                if (self.isRuleEnabled(rule.name)) {
+                    try enabled_rules_buf.append(self.allocator, rule.name);
+                }
+            }
+
+            cache_key = CacheKey.init(
+                content,
+                self.getBuildMetadata(),
+                self.tool_version,
+                enabled_rules_buf.items,
+            );
             if (self.cache) |*c| {
                 if (try c.get(cache_key.?)) |cached_data| {
                     defer self.allocator.free(cached_data);
