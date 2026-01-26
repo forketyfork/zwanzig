@@ -12,6 +12,8 @@ const BuildMetadata = @import("build_metadata.zig").BuildMetadata;
 const cache_mod = @import("cache.zig");
 const Cache = cache_mod.Cache;
 const CacheKey = cache_mod.CacheKey;
+const cached_artifacts_mod = @import("cached_artifacts.zig");
+const CachedArtifacts = cached_artifacts_mod.CachedArtifacts;
 const log = std.log.scoped(.analyzer);
 const diagnostic_mod = @import("diagnostic.zig");
 const suppression = @import("suppression.zig");
@@ -135,6 +137,30 @@ pub const Analyzer = struct {
         }
     }
 
+    fn ruleNameLess(a: []const u8, b: []const u8) bool {
+        const min_len = if (a.len < b.len) a.len else b.len;
+        var i: usize = 0;
+        while (i < min_len) : (i += 1) {
+            if (a[i] < b[i]) return true;
+            if (a[i] > b[i]) return false;
+        }
+        return a.len < b.len;
+    }
+
+    fn sortRuleNames(names: [][]const u8) void {
+        var i: usize = 0;
+        while (i < names.len) : (i += 1) {
+            var j: usize = i + 1;
+            while (j < names.len) : (j += 1) {
+                if (ruleNameLess(names[j], names[i])) {
+                    const tmp = names[i];
+                    names[i] = names[j];
+                    names[j] = tmp;
+                }
+            }
+        }
+    }
+
     pub fn analyzeFile(self: *Analyzer, file_path: []const u8) !void {
         log.debug("analyze: start {s}", .{file_path});
         const file = try std.fs.cwd().openFile(file_path, .{});
@@ -153,13 +179,41 @@ pub const Analyzer = struct {
         var source = Source.init(self.allocator, file_path, content);
         defer source.deinit();
 
+        var cached_artifacts: ?CachedArtifacts = null;
+        defer if (cached_artifacts) |*ca| ca.deinit();
+
+        var cache_key: ?CacheKey = null;
+        var enabled_rules_buf: std.ArrayList([]const u8) = .empty;
+        defer enabled_rules_buf.deinit(self.allocator);
+
         if (self.use_cache) {
-            const cache_key = CacheKey.init(content, self.getBuildMetadata());
+            for (self.checker_manager.checkers.items) |chkr| {
+                if (self.isRuleEnabled(chkr.name)) {
+                    try enabled_rules_buf.append(self.allocator, chkr.name);
+                }
+            }
+            for (self.checker_manager.adapted_rules.items) |rule| {
+                if (self.isRuleEnabled(rule.name)) {
+                    try enabled_rules_buf.append(self.allocator, rule.name);
+                }
+            }
+
+            sortRuleNames(enabled_rules_buf.items);
+            cache_key = CacheKey.init(
+                content,
+                self.getBuildMetadata(),
+                self.tool_version,
+                enabled_rules_buf.items,
+            );
             if (self.cache) |*c| {
-                if (try c.get(cache_key)) |cached_data| {
+                if (try c.get(cache_key.?)) |cached_data| {
                     defer self.allocator.free(cached_data);
-                    log.debug("analyze: cache hit {s}", .{file_path});
-                    return;
+                    log.debug("analyze: cache hit {s}, loading artifacts", .{file_path});
+
+                    cached_artifacts = CachedArtifacts.deserialize(self.allocator, cached_data) catch |err| blk: {
+                        log.debug("analyze: failed to deserialize cached artifacts: {}", .{err});
+                        break :blk null;
+                    };
                 }
             }
         }
@@ -175,10 +229,22 @@ pub const Analyzer = struct {
 
         try self.filterSuppressedDiagnostics(content, diag_start_index);
 
-        if (self.use_cache and self.cache != null) {
-            const cache_key = CacheKey.init(content, self.getBuildMetadata());
+        if (self.use_cache and cache_key != null) {
             if (self.cache) |*c| {
-                try c.put(cache_key, "");
+                var artifacts = CachedArtifacts.init(self.allocator);
+                defer artifacts.deinit();
+
+                artifacts.had_type_info = self.use_typed_ir;
+
+                const serialized = artifacts.serialize(self.allocator) catch |err| {
+                    log.debug("analyze: failed to serialize artifacts: {}", .{err});
+                    return;
+                };
+                defer self.allocator.free(serialized);
+
+                c.put(cache_key.?, serialized) catch |err| {
+                    log.debug("analyze: failed to cache artifacts: {}", .{err});
+                };
             }
         }
 
@@ -540,4 +606,50 @@ test "Analyzer cache enabled" {
     try analyzer.enableCache();
     try testing.expect(analyzer.use_cache);
     try testing.expect(analyzer.cache != null);
+}
+
+test "Analyzer cache hit still produces diagnostics" {
+    const testing = std.testing;
+    const allocator = testing.allocator;
+    const DupeImportRule = @import("rules/dupe_import.zig").DupeImportRule;
+
+    var tmp_dir = testing.tmpDir(.{});
+    defer tmp_dir.cleanup();
+
+    // File with duplicate imports to trigger a diagnostic
+    const test_file_content =
+        \\const std = @import("std");
+        \\const std2 = @import("std");
+    ;
+    const test_file = try tmp_dir.dir.createFile("test.zig", .{});
+    try test_file.writeAll(test_file_content);
+    test_file.close();
+
+    var path_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const test_file_path = try tmp_dir.dir.realpath("test.zig", &path_buf);
+
+    var first_run_diag_count: usize = 0;
+
+    // First run - populates cache
+    {
+        var analyzer1 = Analyzer.init(allocator);
+        defer analyzer1.deinit();
+        try analyzer1.enableCache();
+        try analyzer1.registerRule(&DupeImportRule.rule);
+
+        try analyzer1.analyzeFile(test_file_path);
+        first_run_diag_count = analyzer1.diagnostics.items.len;
+        try testing.expect(first_run_diag_count > 0);
+    }
+
+    // Second run - should hit cache but still produce same diagnostics
+    {
+        var analyzer2 = Analyzer.init(allocator);
+        defer analyzer2.deinit();
+        try analyzer2.enableCache();
+        try analyzer2.registerRule(&DupeImportRule.rule);
+
+        try analyzer2.analyzeFile(test_file_path);
+        try testing.expectEqual(first_run_diag_count, analyzer2.diagnostics.items.len);
+    }
 }

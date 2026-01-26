@@ -4,6 +4,9 @@ const Source = src.Source;
 const Diagnostic = src.Diagnostic;
 const Severity = src.Severity;
 const Rule = src.Rule;
+const checker_mod = src.checker;
+const Checker = checker_mod.Checker;
+const CheckerContext = checker_mod.CheckerContext;
 
 /// Expected diagnostic parsed from fixture comments.
 /// All fields are optional - only specified fields will be checked.
@@ -201,6 +204,132 @@ pub fn runFixture(
             }
             return error.ExpectedDiagnosticNotFound;
         }
+    }
+}
+
+/// Run a checker against a fixture file and verify expectations.
+pub fn runCheckerFixture(
+    allocator: std.mem.Allocator,
+    checker: *const Checker,
+    fixture_path: []const u8,
+    fixture_content: [:0]const u8,
+) !void {
+    var expectations = try parseExpectations(allocator, fixture_content);
+    defer expectations.deinit();
+
+    var source = Source.init(allocator, fixture_path, fixture_content);
+    defer source.deinit();
+
+    var diagnostics: std.ArrayList(Diagnostic) = .empty;
+    defer {
+        for (diagnostics.items) |*diag| {
+            diag.deinit(allocator);
+        }
+        diagnostics.deinit(allocator);
+    }
+
+    const context = CheckerContext{
+        .build_metadata = null,
+        .type_context = null,
+    };
+    try checker.checkAst(&source, allocator, &diagnostics, context);
+
+    if (expectations.expects_none) {
+        if (diagnostics.items.len != 0) {
+            std.debug.print("\nFixture: {s}\n", .{fixture_path});
+            std.debug.print("Expected no diagnostics, but got {d}:\n", .{diagnostics.items.len});
+            for (diagnostics.items) |diag| {
+                std.debug.print("  - {s}:{d}:{d}: [{s}] {s}\n", .{
+                    diag.file_path,
+                    diag.range.start.line,
+                    diag.range.start.column,
+                    diag.rule_id,
+                    diag.message,
+                });
+            }
+            return error.UnexpectedDiagnostics;
+        }
+        return;
+    }
+
+    if (diagnostics.items.len != expectations.diagnostics.len) {
+        std.debug.print("\nFixture: {s}\n", .{fixture_path});
+        std.debug.print("Expected {d} diagnostics, but got {d}:\n", .{ expectations.diagnostics.len, diagnostics.items.len });
+        for (diagnostics.items) |diag| {
+            std.debug.print("  - {s}:{d}:{d}: [{s}] {s}\n", .{
+                diag.file_path,
+                diag.range.start.line,
+                diag.range.start.column,
+                diag.rule_id,
+                diag.message,
+            });
+        }
+        return error.DiagnosticCountMismatch;
+    }
+
+    var matched = try allocator.alloc(bool, diagnostics.items.len);
+    defer allocator.free(matched);
+    @memset(matched, false);
+
+    for (expectations.diagnostics, 0..) |expected, i| {
+        var found = false;
+        for (diagnostics.items, 0..) |actual, j| {
+            if (!matched[j] and expected.matches(actual)) {
+                matched[j] = true;
+                found = true;
+                break;
+            }
+        }
+        if (!found) {
+            std.debug.print("\nFixture: {s}\n", .{fixture_path});
+            std.debug.print("Expected diagnostic #{d} not found:\n", .{i + 1});
+            if (expected.line) |l| std.debug.print("  line={d}\n", .{l});
+            if (expected.col) |c| std.debug.print("  col={d}\n", .{c});
+            if (expected.rule) |r| std.debug.print("  rule={s}\n", .{r});
+            if (expected.severity) |s| std.debug.print("  severity={s}\n", .{s.toString()});
+            if (expected.message) |m| std.debug.print("  message={s}\n", .{m});
+            std.debug.print("\nActual diagnostics:\n", .{});
+            for (diagnostics.items) |diag| {
+                std.debug.print("  - {s}:{d}:{d}: [{s}] {s}\n", .{
+                    diag.file_path,
+                    diag.range.start.line,
+                    diag.range.start.column,
+                    diag.rule_id,
+                    diag.message,
+                });
+            }
+            return error.ExpectedDiagnosticNotFound;
+        }
+    }
+}
+
+/// Run all fixtures in a directory against a checker.
+pub fn runCheckerFixturesInDir(
+    allocator: std.mem.Allocator,
+    checker: *const Checker,
+    dir_path: []const u8,
+) !void {
+    var dir = std.fs.cwd().openDir(dir_path, .{ .iterate = true }) catch |err| {
+        std.debug.print("Failed to open fixture directory: {s}: {}\n", .{ dir_path, err });
+        return err;
+    };
+    defer dir.close();
+
+    var iter = dir.iterate();
+    while (try iter.next()) |entry| {
+        if (entry.kind != .file) continue;
+        if (!std.mem.endsWith(u8, entry.name, ".zig")) continue;
+
+        const fixture_path = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ dir_path, entry.name });
+        defer allocator.free(fixture_path);
+
+        const file = try dir.openFile(entry.name, .{});
+        defer file.close();
+
+        const content = try file.readToEndAllocOptions(allocator, 1024 * 1024, null, .of(u8), 0);
+        defer allocator.free(content);
+
+        try runCheckerFixture(allocator, checker, fixture_path, content);
     }
 }
 

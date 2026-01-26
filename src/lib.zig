@@ -1,11 +1,13 @@
 pub const source = @import("source.zig");
 pub const diagnostic = @import("diagnostic.zig");
 pub const rule = @import("rule.zig");
+pub const checker = @import("checker.zig");
 
 pub const Source = source.Source;
 pub const Diagnostic = diagnostic.Diagnostic;
 pub const Severity = diagnostic.Severity;
 pub const Rule = rule.Rule;
+pub const Checker = checker.Checker;
 
 pub const rules = struct {
     pub const dupe_import = @import("rules/dupe_import.zig");
@@ -17,4 +19,8 @@ pub const rules = struct {
     pub const unused_decl = @import("rules/unused_decl.zig");
     pub const shadowed_variable = @import("rules/shadowed_variable.zig");
     pub const identifier_style = @import("rules/identifier_style.zig");
+};
+
+pub const checkers = struct {
+    pub const unreachable_code_checker = @import("checkers/unreachable_code_checker.zig");
 };

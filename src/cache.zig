@@ -11,14 +11,21 @@ pub const CacheError = error{
     InvalidCacheEntry,
 };
 
-const cache_version: u32 = 1;
+const cache_version: u32 = 2;
 const cache_dir_name = ".zwanzig-cache";
 
 pub const CacheKey = struct {
     file_hash: [32]u8,
     target_hash: [32]u8,
+    version_hash: [32]u8,
+    config_hash: [32]u8,
 
-    pub fn init(file_content: []const u8, target: ?*const BuildMetadata) CacheKey {
+    pub fn init(
+        file_content: []const u8,
+        target: ?*const BuildMetadata,
+        tool_version: []const u8,
+        enabled_rules: []const []const u8,
+    ) CacheKey {
         var key: CacheKey = undefined;
         std.crypto.hash.sha2.Sha256.hash(file_content, &key.file_hash, .{});
 
@@ -36,6 +43,15 @@ pub const CacheKey = struct {
             @memset(&key.target_hash, 0);
         }
 
+        std.crypto.hash.sha2.Sha256.hash(tool_version, &key.version_hash, .{});
+
+        var config_hasher = std.crypto.hash.sha2.Sha256.init(.{});
+        for (enabled_rules) |rule_name| {
+            config_hasher.update(rule_name);
+            config_hasher.update("\x00");
+        }
+        config_hasher.final(&key.config_hash);
+
         return key;
     }
 
@@ -47,11 +63,21 @@ pub const CacheKey = struct {
         for (self.target_hash) |byte| {
             try writer.print("{x:0>2}", .{byte});
         }
+        try writer.writeByte('_');
+        for (self.version_hash) |byte| {
+            try writer.print("{x:0>2}", .{byte});
+        }
+        try writer.writeByte('_');
+        for (self.config_hash) |byte| {
+            try writer.print("{x:0>2}", .{byte});
+        }
     }
 
     pub fn eql(self: CacheKey, other: CacheKey) bool {
         return std.mem.eql(u8, &self.file_hash, &other.file_hash) and
-            std.mem.eql(u8, &self.target_hash, &other.target_hash);
+            std.mem.eql(u8, &self.target_hash, &other.target_hash) and
+            std.mem.eql(u8, &self.version_hash, &other.version_hash) and
+            std.mem.eql(u8, &self.config_hash, &other.config_hash);
     }
 };
 
@@ -71,17 +97,20 @@ pub const CacheEntry = struct {
     }
 
     pub fn writeToFile(self: CacheEntry, file: std.fs.File) !void {
-        var buf: [4 + 32 + 32 + 8 + 4]u8 = undefined;
+        // Header: version(4) + file_hash(32) + target_hash(32) + version_hash(32) + config_hash(32) + timestamp(8) + data_len(4) = 144 bytes
+        var buf: [4 + 32 + 32 + 32 + 32 + 8 + 4]u8 = undefined;
         std.mem.writeInt(u32, buf[0..4], self.version, .little);
         @memcpy(buf[4..36], &self.key.file_hash);
         @memcpy(buf[36..68], &self.key.target_hash);
-        std.mem.writeInt(i64, buf[68..76], self.timestamp, .little);
-        std.mem.writeInt(u32, buf[76..80], self.data_len, .little);
+        @memcpy(buf[68..100], &self.key.version_hash);
+        @memcpy(buf[100..132], &self.key.config_hash);
+        std.mem.writeInt(i64, buf[132..140], self.timestamp, .little);
+        std.mem.writeInt(u32, buf[140..144], self.data_len, .little);
         try file.writeAll(&buf);
     }
 
     pub fn readFromFile(file: std.fs.File) !CacheEntry {
-        var buf: [4 + 32 + 32 + 8 + 4]u8 = undefined;
+        var buf: [4 + 32 + 32 + 32 + 32 + 8 + 4]u8 = undefined;
         const bytes_read = try file.readAll(&buf);
         if (bytes_read != buf.len) {
             return CacheError.CacheCorrupted;
@@ -96,8 +125,10 @@ pub const CacheEntry = struct {
         entry.version = version;
         @memcpy(&entry.key.file_hash, buf[4..36]);
         @memcpy(&entry.key.target_hash, buf[36..68]);
-        entry.timestamp = std.mem.readInt(i64, buf[68..76], .little);
-        entry.data_len = std.mem.readInt(u32, buf[76..80], .little);
+        @memcpy(&entry.key.version_hash, buf[68..100]);
+        @memcpy(&entry.key.config_hash, buf[100..132]);
+        entry.timestamp = std.mem.readInt(i64, buf[132..140], .little);
+        entry.data_len = std.mem.readInt(u32, buf[140..144], .little);
 
         return entry;
     }
@@ -131,16 +162,18 @@ pub const Cache = struct {
     }
 
     pub fn getCachePath(key: CacheKey, buf: []u8) ![]const u8 {
+        var hasher = std.crypto.hash.sha2.Sha256.init(.{});
+        hasher.update(&key.file_hash);
+        hasher.update(&key.target_hash);
+        hasher.update(&key.version_hash);
+        hasher.update(&key.config_hash);
+        var combined_hash: [32]u8 = undefined;
+        hasher.final(&combined_hash);
+
         var offset: usize = 0;
-        for (key.file_hash) |byte| {
+        for (combined_hash) |byte| {
             const written = try std.fmt.bufPrint(buf[offset..], "{x:0>2}", .{byte});
             offset += written.len;
-        }
-        const written = try std.fmt.bufPrint(buf[offset..], "_", .{});
-        offset += written.len;
-        for (key.target_hash) |byte| {
-            const written2 = try std.fmt.bufPrint(buf[offset..], "{x:0>2}", .{byte});
-            offset += written2.len;
         }
         const ext = try std.fmt.bufPrint(buf[offset..], ".cache", .{});
         offset += ext.len;
@@ -166,7 +199,7 @@ pub const Cache = struct {
 
         const entry = CacheEntry.readFromFile(file) catch |err| {
             return switch (err) {
-                error.VersionMismatch => null,
+                error.VersionMismatch, error.CacheCorrupted => null,
                 else => err,
             };
         };
@@ -256,28 +289,59 @@ test "CacheKey: init and format" {
         .root_source_file = null,
     };
 
-    const key = CacheKey.init("test content", &target);
+    const rules = [_][]const u8{ "rule1", "rule2" };
+    const key = CacheKey.init("test content", &target, "1.0.0", &rules);
 
-    var buf: [512]u8 = undefined;
+    var buf: [256]u8 = undefined;
     const path = try Cache.getCachePath(key, &buf);
 
     try std.testing.expect(path.len > 0);
     try std.testing.expect(std.mem.endsWith(u8, path, ".cache"));
-    try std.testing.expect(std.mem.indexOf(u8, path, "_") != null);
+    try std.testing.expectEqual(@as(usize, 70), path.len);
 }
 
 test "CacheKey: eql" {
-    const key1 = CacheKey.init("test", null);
-    const key2 = CacheKey.init("test", null);
-    const key3 = CacheKey.init("different", null);
+    const rules = [_][]const u8{"rule1"};
+    const key1 = CacheKey.init("test", null, "1.0.0", &rules);
+    const key2 = CacheKey.init("test", null, "1.0.0", &rules);
+    const key3 = CacheKey.init("different", null, "1.0.0", &rules);
 
     try std.testing.expect(key1.eql(key2));
     try std.testing.expect(!key1.eql(key3));
 }
 
+test "CacheKey: version changes invalidate" {
+    const rules = [_][]const u8{"rule1"};
+    const key1 = CacheKey.init("test", null, "1.0.0", &rules);
+    const key2 = CacheKey.init("test", null, "1.0.1", &rules);
+
+    try std.testing.expect(!key1.eql(key2));
+}
+
+test "CacheKey: config changes invalidate" {
+    const rules1 = [_][]const u8{"rule1"};
+    const rules2 = [_][]const u8{ "rule1", "rule2" };
+    const key1 = CacheKey.init("test", null, "1.0.0", &rules1);
+    const key2 = CacheKey.init("test", null, "1.0.0", &rules2);
+
+    try std.testing.expect(!key1.eql(key2));
+}
+
+test "CacheKey: deterministic across runs" {
+    const rules = [_][]const u8{ "rule1", "rule2" };
+    const key1 = CacheKey.init("test content", null, "1.0.0", &rules);
+    const key2 = CacheKey.init("test content", null, "1.0.0", &rules);
+
+    try std.testing.expect(key1.eql(key2));
+    try std.testing.expect(std.mem.eql(u8, &key1.file_hash, &key2.file_hash));
+    try std.testing.expect(std.mem.eql(u8, &key1.version_hash, &key2.version_hash));
+    try std.testing.expect(std.mem.eql(u8, &key1.config_hash, &key2.config_hash));
+}
+
 test "CacheEntry: write and read" {
     const allocator = std.testing.allocator;
-    const key = CacheKey.init("test", null);
+    const rules = [_][]const u8{"rule1"};
+    const key = CacheKey.init("test", null, "1.0.0", &rules);
     const entry = CacheEntry.init(key, 42);
 
     var tmp_dir = std.testing.tmpDir(.{});
@@ -313,7 +377,8 @@ test "Cache: put and get" {
     };
     defer cache.deinit();
 
-    const key = CacheKey.init("test content", null);
+    const rules = [_][]const u8{"rule1"};
+    const key = CacheKey.init("test content", null, "1.0.0", &rules);
     const data = "cached data";
 
     try cache.put(key, data);
@@ -336,7 +401,8 @@ test "Cache: get non-existent key returns null" {
     };
     defer cache.deinit();
 
-    const key = CacheKey.init("non-existent", null);
+    const rules = [_][]const u8{"rule1"};
+    const key = CacheKey.init("non-existent", null, "1.0.0", &rules);
     const result = try cache.get(key);
 
     try std.testing.expectEqual(@as(?[]u8, null), result);
@@ -358,7 +424,8 @@ test "Cache: invalidate removes entry" {
     };
     defer cache.deinit();
 
-    const key = CacheKey.init("test", null);
+    const rules = [_][]const u8{"rule1"};
+    const key = CacheKey.init("test", null, "1.0.0", &rules);
     try cache.put(key, "data");
 
     try cache.invalidate(key);
@@ -383,8 +450,9 @@ test "Cache: clear removes all entries" {
     };
     defer cache.deinit();
 
-    const key1 = CacheKey.init("test1", null);
-    const key2 = CacheKey.init("test2", null);
+    const rules = [_][]const u8{"rule1"};
+    const key1 = CacheKey.init("test1", null, "1.0.0", &rules);
+    const key2 = CacheKey.init("test2", null, "1.0.0", &rules);
 
     try cache.put(key1, "data1");
     try cache.put(key2, "data2");
@@ -407,7 +475,8 @@ test "Cache: handles access denied gracefully" {
     };
     defer cache.deinit();
 
-    const key = CacheKey.init("test", null);
+    const rules = [_][]const u8{"rule1"};
+    const key = CacheKey.init("test", null, "1.0.0", &rules);
 
     try cache.put(key, "data");
 
