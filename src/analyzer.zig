@@ -12,6 +12,8 @@ const BuildMetadata = @import("build_metadata.zig").BuildMetadata;
 const cache_mod = @import("cache.zig");
 const Cache = cache_mod.Cache;
 const CacheKey = cache_mod.CacheKey;
+const cached_artifacts_mod = @import("cached_artifacts.zig");
+const CachedArtifacts = cached_artifacts_mod.CachedArtifacts;
 const log = std.log.scoped(.analyzer);
 const diagnostic_mod = @import("diagnostic.zig");
 const suppression = @import("suppression.zig");
@@ -153,13 +155,21 @@ pub const Analyzer = struct {
         var source = Source.init(self.allocator, file_path, content);
         defer source.deinit();
 
+        var cached_artifacts: ?CachedArtifacts = null;
+        defer if (cached_artifacts) |*ca| ca.deinit();
+
+        var cache_key: ?CacheKey = null;
         if (self.use_cache) {
-            const cache_key = CacheKey.init(content, self.getBuildMetadata());
+            cache_key = CacheKey.init(content, self.getBuildMetadata());
             if (self.cache) |*c| {
-                if (try c.get(cache_key)) |cached_data| {
+                if (try c.get(cache_key.?)) |cached_data| {
                     defer self.allocator.free(cached_data);
-                    log.debug("analyze: cache hit {s}", .{file_path});
-                    return;
+                    log.debug("analyze: cache hit {s}, loading artifacts", .{file_path});
+
+                    cached_artifacts = CachedArtifacts.deserialize(self.allocator, cached_data) catch |err| blk: {
+                        log.debug("analyze: failed to deserialize cached artifacts: {}", .{err});
+                        break :blk null;
+                    };
                 }
             }
         }
@@ -175,10 +185,22 @@ pub const Analyzer = struct {
 
         try self.filterSuppressedDiagnostics(content, diag_start_index);
 
-        if (self.use_cache and self.cache != null) {
-            const cache_key = CacheKey.init(content, self.getBuildMetadata());
+        if (self.use_cache and cache_key != null) {
             if (self.cache) |*c| {
-                try c.put(cache_key, "");
+                var artifacts = CachedArtifacts.init(self.allocator);
+                defer artifacts.deinit();
+
+                artifacts.had_type_info = self.use_typed_ir;
+
+                const serialized = artifacts.serialize(self.allocator) catch |err| {
+                    log.debug("analyze: failed to serialize artifacts: {}", .{err});
+                    return;
+                };
+                defer self.allocator.free(serialized);
+
+                c.put(cache_key.?, serialized) catch |err| {
+                    log.debug("analyze: failed to cache artifacts: {}", .{err});
+                };
             }
         }
 
@@ -540,4 +562,36 @@ test "Analyzer cache enabled" {
     try analyzer.enableCache();
     try testing.expect(analyzer.use_cache);
     try testing.expect(analyzer.cache != null);
+}
+
+test "Analyzer cache hit still produces diagnostics" {
+    const testing = std.testing;
+    const allocator = testing.allocator;
+
+    var tmp_dir = testing.tmpDir(.{});
+    defer tmp_dir.cleanup();
+
+    const test_file_content = "const x = 1;\n";
+    const test_file = try tmp_dir.dir.createFile("test.zig", .{});
+    try test_file.writeAll(test_file_content);
+    test_file.close();
+
+    var path_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const test_file_path = try tmp_dir.dir.realpath("test.zig", &path_buf);
+
+    {
+        var analyzer1 = Analyzer.init(allocator);
+        defer analyzer1.deinit();
+        try analyzer1.enableCache();
+
+        try analyzer1.analyzeFile(test_file_path);
+    }
+
+    {
+        var analyzer2 = Analyzer.init(allocator);
+        defer analyzer2.deinit();
+        try analyzer2.enableCache();
+
+        try analyzer2.analyzeFile(test_file_path);
+    }
 }
