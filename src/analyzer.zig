@@ -567,11 +567,16 @@ test "Analyzer cache enabled" {
 test "Analyzer cache hit still produces diagnostics" {
     const testing = std.testing;
     const allocator = testing.allocator;
+    const DupeImportRule = @import("rules/dupe_import.zig").DupeImportRule;
 
     var tmp_dir = testing.tmpDir(.{});
     defer tmp_dir.cleanup();
 
-    const test_file_content = "const x = 1;\n";
+    // File with duplicate imports to trigger a diagnostic
+    const test_file_content =
+        \\const std = @import("std");
+        \\const std2 = @import("std");
+    ;
     const test_file = try tmp_dir.dir.createFile("test.zig", .{});
     try test_file.writeAll(test_file_content);
     test_file.close();
@@ -579,19 +584,28 @@ test "Analyzer cache hit still produces diagnostics" {
     var path_buf: [std.fs.max_path_bytes]u8 = undefined;
     const test_file_path = try tmp_dir.dir.realpath("test.zig", &path_buf);
 
+    var first_run_diag_count: usize = 0;
+
+    // First run - populates cache
     {
         var analyzer1 = Analyzer.init(allocator);
         defer analyzer1.deinit();
         try analyzer1.enableCache();
+        try analyzer1.registerRule(&DupeImportRule.rule);
 
         try analyzer1.analyzeFile(test_file_path);
+        first_run_diag_count = analyzer1.diagnostics.items.len;
+        try testing.expect(first_run_diag_count > 0);
     }
 
+    // Second run - should hit cache but still produce same diagnostics
     {
         var analyzer2 = Analyzer.init(allocator);
         defer analyzer2.deinit();
         try analyzer2.enableCache();
+        try analyzer2.registerRule(&DupeImportRule.rule);
 
         try analyzer2.analyzeFile(test_file_path);
+        try testing.expectEqual(first_run_diag_count, analyzer2.diagnostics.items.len);
     }
 }

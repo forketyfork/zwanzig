@@ -39,6 +39,10 @@ pub const CachedArtifacts = struct {
     pub fn deinit(self: *CachedArtifacts) void {
         var iter = self.cfgs.valueIterator();
         while (iter.next()) |cfg_ptr| {
+            // Free fn_name if it was allocated during deserialization
+            if (cfg_ptr.*.fn_name) |name| {
+                self.allocator.free(name);
+            }
             cfg_ptr.*.deinit();
             self.allocator.destroy(cfg_ptr.*);
         }
@@ -312,13 +316,13 @@ fn deserializeCfg(allocator: std.mem.Allocator, data: []const u8, start_offset: 
         if (data.len < offset + 4) {
             return error.InvalidFormat;
         }
-        const name_len = std.mem.readInt(u32, data[offset..][0..4], .little);
+        const name_len: usize = std.mem.readInt(u32, data[offset..][0..4], .little);
         offset += 4;
 
         if (data.len < offset + name_len) {
             return error.InvalidFormat;
         }
-        cfg.fn_name = data[offset .. offset + name_len];
+        cfg.fn_name = try allocator.dupe(u8, data[offset..][0..name_len]);
         offset += name_len;
     }
 
