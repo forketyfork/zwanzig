@@ -325,6 +325,7 @@ fn deserializeCfg(allocator: std.mem.Allocator, data: []const u8, start_offset: 
         cfg.fn_name = try allocator.dupe(u8, data[offset..][0..name_len]);
         offset += name_len;
     }
+    errdefer if (cfg.fn_name) |name| allocator.free(name);
 
     if (data.len < offset + 1) {
         return error.InvalidFormat;
