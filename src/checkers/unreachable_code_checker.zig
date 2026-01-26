@@ -139,10 +139,21 @@ pub const UnreachableCodeChecker = struct {
 
             const start = token_starts[token];
             const source = tree.source;
-            if (start + 5 <= source.len and std.mem.eql(u8, source[start .. start + 5], "false")) {
+
+            // Get the full identifier length by scanning until a non-identifier character
+            var len: u32 = 0;
+            while (start + len < source.len) {
+                const c = source[start + len];
+                if (!std.ascii.isAlphanumeric(c) and c != '_') break;
+                len += 1;
+            }
+
+            // Check for exact match with "false" (5 characters)
+            if (len == 5 and std.mem.eql(u8, source[start .. start + 5], "false")) {
                 return false;
             }
-            if (start + 4 <= source.len and std.mem.eql(u8, source[start .. start + 4], "true")) {
+            // Check for exact match with "true" (4 characters)
+            if (len == 4 and std.mem.eql(u8, source[start .. start + 4], "true")) {
                 return true;
             }
         }
@@ -366,4 +377,36 @@ test "unreachable_code_engine - detects nested if(false)" {
     try UnreachableCodeChecker.checker.checkAst(&source, allocator, &diagnostics, context);
 
     try testing.expectEqual(@as(usize, 1), diagnostics.items.len);
+}
+
+test "unreachable_code_engine - no false positive for identifiers starting with true/false" {
+    const testing = std.testing;
+    const allocator = testing.allocator;
+
+    const code: [:0]const u8 =
+        \\fn foo(trueValue: bool) i32 {
+        \\    if (trueValue) {
+        \\        return 1;
+        \\    } else {
+        \\        return 0;
+        \\    }
+        \\}
+        \\fn bar(falsey: bool) i32 {
+        \\    if (falsey) {
+        \\        return 1;
+        \\    }
+        \\    return 0;
+        \\}
+    ;
+    var source = Source.init(allocator, "test.zig", code);
+    defer source.deinit();
+
+    var diagnostics: std.ArrayList(Diagnostic) = .empty;
+    defer diagnostics.deinit(allocator);
+    defer for (diagnostics.items) |diag| allocator.free(@constCast(diag.message));
+
+    const context = checker_mod.CheckerContext{ .build_metadata = null };
+    try UnreachableCodeChecker.checker.checkAst(&source, allocator, &diagnostics, context);
+
+    try testing.expectEqual(@as(usize, 0), diagnostics.items.len);
 }
