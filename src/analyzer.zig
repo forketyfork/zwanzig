@@ -137,6 +137,30 @@ pub const Analyzer = struct {
         }
     }
 
+    fn ruleNameLess(a: []const u8, b: []const u8) bool {
+        const min_len = if (a.len < b.len) a.len else b.len;
+        var i: usize = 0;
+        while (i < min_len) : (i += 1) {
+            if (a[i] < b[i]) return true;
+            if (a[i] > b[i]) return false;
+        }
+        return a.len < b.len;
+    }
+
+    fn sortRuleNames(names: [][]const u8) void {
+        var i: usize = 0;
+        while (i < names.len) : (i += 1) {
+            var j: usize = i + 1;
+            while (j < names.len) : (j += 1) {
+                if (ruleNameLess(names[j], names[i])) {
+                    const tmp = names[i];
+                    names[i] = names[j];
+                    names[j] = tmp;
+                }
+            }
+        }
+    }
+
     pub fn analyzeFile(self: *Analyzer, file_path: []const u8) !void {
         log.debug("analyze: start {s}", .{file_path});
         const file = try std.fs.cwd().openFile(file_path, .{});
@@ -174,6 +198,7 @@ pub const Analyzer = struct {
                 }
             }
 
+            sortRuleNames(enabled_rules_buf.items);
             cache_key = CacheKey.init(
                 content,
                 self.getBuildMetadata(),
