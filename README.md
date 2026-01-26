@@ -575,7 +575,7 @@ Cache lives in `.zwanzig-cache/`. It's keyed by:
 
 The cache invalidates automatically when any of these change.
 
-**Important:** The cache stores intermediate artifacts (CFGs) but never skips analysis - diagnostics are always produced on every run.
+**Important:** The cache stores metadata (e.g., whether type info was loaded) but never skips analysis - diagnostics are always produced on every run. CFG caching is not yet implemented.
 
 **Tip:** Add `.zwanzig-cache/` to `.gitignore`.
 

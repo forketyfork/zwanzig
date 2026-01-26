@@ -1845,7 +1845,7 @@ pub fn fromNative() BuildMetadata {
 
 ## Incremental Cache
 
-The analyzer supports incremental caching of intermediate artifacts to speed up repeated analysis runs. The cache stores precomputed CFGs and other analysis data, avoiding redundant computation.
+The analyzer supports incremental caching to track analysis metadata across runs. Currently, the cache stores metadata (e.g., whether type info was loaded) but CFG caching is not yet implemented - CFGs are recomputed on each run.
 
 ### Cache Architecture
 
@@ -1875,14 +1875,14 @@ pub const CacheKey = struct {
 
 ### Cache Behavior
 
-**Key principle:** The cache never skips analysis. It only caches intermediate artifacts like CFGs.
+**Key principle:** The cache never skips analysis. Currently, it only stores metadata (e.g., whether type info was loaded). CFG caching is not yet implemented.
 
 When analyzing a file:
 1. Compute cache key from file content, target, version, and enabled rules
 2. Check if cached artifacts exist for this key
-3. If cache hit: load cached CFGs and other precomputed data
+3. If cache hit: load cached metadata (CFG caching is planned but not yet implemented)
 4. **Always run analysis** - diagnostics are produced on every run
-5. Store computed artifacts back to cache
+5. Store metadata back to cache
 
 This ensures diagnostics are always reported regardless of cache state.
 
@@ -1958,17 +1958,16 @@ The analysis engine uses a `VarId` type for identifying variables throughout the
 Variables are identified by their AST node index, providing a simple and unique identifier within a module:
 
 ```zig
-pub const VarId = struct {
-    value: u32,
+// In src/ids.zig
+pub const VarId = enum(u32) { _ };
 
-    pub fn fromAstNode(node: u32) VarId {
-        return .{ .value = node };
-    }
+pub fn varId(value: u32) VarId {
+    return @enumFromInt(value);
+}
 
-    pub fn toAstNode(self: VarId) u32 {
-        return self.value;
-    }
-};
+pub fn varIndex(id: VarId) u32 {
+    return @intFromEnum(id);
+}
 ```
 
 **Benefits of AST-based identification:**
@@ -1982,8 +1981,9 @@ pub const VarId = struct {
 The `Environment` maps `VarId` to `AbstractValue`:
 
 ```zig
+// In src/engine/env.zig
 pub const Environment = struct {
-    bindings: std.AutoHashMap(u32, AbstractValue),
+    bindings: std.AutoHashMap(VarId, AbstractValue),
     allocator: std.mem.Allocator,
 };
 ```
