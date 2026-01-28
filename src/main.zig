@@ -16,6 +16,7 @@ const file_discovery = @import("file_discovery.zig");
 const EmptyCatchEngineChecker = @import("checkers/empty_catch_engine.zig").EmptyCatchEngineChecker;
 const SwallowedErrorChecker = @import("checkers/swallowed_error.zig").SwallowedErrorChecker;
 const UnreachableCodeChecker = @import("checkers/unreachable_code_checker.zig").UnreachableCodeChecker;
+const StoreViolationsEngineChecker = @import("checkers/store_violations_engine.zig").StoreViolationsEngineChecker;
 const build_metadata = @import("build_metadata.zig");
 const BuildMetadata = build_metadata.BuildMetadata;
 const TargetConfig = build_metadata.TargetConfig;
@@ -36,6 +37,7 @@ test {
     _ = @import("checkers/empty_catch_engine.zig");
     _ = @import("checkers/swallowed_error.zig");
     _ = @import("checkers/unreachable_code_checker.zig");
+    _ = @import("checkers/store_violations_engine.zig");
     _ = @import("build_metadata.zig");
     _ = @import("config.zig");
     _ = @import("cache.zig");
@@ -339,6 +341,7 @@ pub fn main() !void {
     try analyzer.registerChecker(&EmptyCatchEngineChecker.checker);
     try analyzer.registerChecker(&SwallowedErrorChecker.checker);
     try analyzer.registerChecker(&UnreachableCodeChecker.checker);
+    try analyzer.registerChecker(&StoreViolationsEngineChecker.checker);
 
     analyzer.setRuleFilter(final_rule_filter);
 

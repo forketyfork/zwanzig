@@ -15,6 +15,7 @@ const UnusedDeclRule = src.rules.unused_decl.UnusedDeclRule;
 const ShadowedVariableRule = src.rules.shadowed_variable.ShadowedVariableRule;
 const IdentifierStyleRule = src.rules.identifier_style.IdentifierStyleRule;
 const UnreachableCodeChecker = src.checkers.unreachable_code_checker.UnreachableCodeChecker;
+const StoreViolationsEngineChecker = src.checkers.store_violations_engine.StoreViolationsEngineChecker;
 
 test "dupe_import fixtures" {
     try runFixturesInDir(std.testing.allocator, &DupeImportRule.rule, "test/fixtures/dupe_import");
@@ -54,4 +55,8 @@ test "identifier_style fixtures" {
 
 test "unreachable_code_engine fixtures" {
     try runCheckerFixturesInDir(std.testing.allocator, &UnreachableCodeChecker.checker, "test/fixtures/unreachable_code_engine");
+}
+
+test "store_violations_engine fixtures" {
+    try runCheckerFixturesInDir(std.testing.allocator, &StoreViolationsEngineChecker.checker, "test/fixtures/store_violations_engine");
 }

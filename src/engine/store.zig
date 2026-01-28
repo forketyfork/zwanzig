@@ -87,7 +87,7 @@ pub const Store = struct {
     }
 
     pub fn computeHash(self: *const Store) u64 {
-        var combined_hash: u64 = 0;
+        var resources_hash: u64 = 0;
 
         var iter = self.resources.iterator();
         while (iter.next()) |entry| {
@@ -95,14 +95,21 @@ pub const Store = struct {
             const key = ids.varIndex(entry.key_ptr.*);
             hasher.update(std.mem.asBytes(&key));
             hasher.update(std.mem.asBytes(&entry.value_ptr.*));
-            combined_hash ^= hasher.final();
+            resources_hash ^= hasher.final();
         }
 
+        var hasher = std.hash.Wyhash.init(0);
+        const resources_count = self.resources.count();
+        const violations_len = self.violations.items.len;
+        hasher.update(std.mem.asBytes(&resources_hash));
+        hasher.update(std.mem.asBytes(&resources_count));
+        hasher.update(std.mem.asBytes(&violations_len));
         for (self.violations.items) |violation| {
-            combined_hash ^= violation.hash();
+            const violation_hash = violation.hash();
+            hasher.update(std.mem.asBytes(&violation_hash));
         }
 
-        return combined_hash;
+        return hasher.final();
     }
 
     pub fn getState(self: *const Store, region: VarId) ?ResourceState {
@@ -121,11 +128,11 @@ pub const Store = struct {
                 },
                 else => {},
             }
-        } else {
-            try self.recordViolation(region, .free_without_alloc);
         }
 
-        try self.resources.put(region, .freed);
+        if (self.resources.contains(region)) {
+            try self.resources.put(region, .freed);
+        }
     }
 
     pub fn violationCount(self: *const Store) usize {
@@ -177,4 +184,24 @@ test "Store records double free violations" {
     try testing.expectEqual(ResourceState.freed, store.getState(region).?);
     try testing.expectEqual(@as(usize, 1), store.violationCount());
     try testing.expectEqual(StoreViolationKind.double_free, store.getViolations()[0].kind);
+}
+
+test "Store hash accounts for repeated violations" {
+    const testing = std.testing;
+    const allocator = testing.allocator;
+
+    var store = Store.init(allocator);
+    defer store.deinit();
+
+    const region = ids.varId(12);
+
+    try store.markAllocated(region);
+    try store.markFreed(region);
+    try store.markFreed(region);
+    const hash_after_double = store.computeHash();
+
+    try store.markFreed(region);
+    const hash_after_triple = store.computeHash();
+
+    try testing.expect(hash_after_double != hash_after_triple);
 }

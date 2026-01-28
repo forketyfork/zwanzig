@@ -379,13 +379,38 @@ pub const AnalysisEngine = struct {
         first_arg: ?u32,
     };
 
-    fn resolveAllocatorCall(self: *AnalysisEngine, call_ast_node: u32) ?AllocatorCall {
+    fn resolveAllocatorCall(self: *AnalysisEngine, expr_node: u32) ?AllocatorCall {
         const src = self.source orelse return null;
         const tree = src.ast() catch return null;
+        return self.resolveAllocatorCallFromExpr(tree, expr_node);
+    }
+
+    fn resolveAllocatorCallFromExpr(self: *AnalysisEngine, tree: *const std.zig.Ast, expr_node: u32) ?AllocatorCall {
+        const tags = tree.nodes.items(.tag);
+        const datas = tree.nodes.items(.data);
+
+        if (expr_node >= tags.len) return null;
+        const tag = tags[expr_node];
+
+        return switch (tag) {
+            .call, .call_comma, .call_one, .call_one_comma => self.resolveAllocatorCallFromCall(tree, expr_node),
+            .@"try" => self.resolveAllocatorCallFromExpr(tree, @intFromEnum(datas[expr_node].node)),
+            .@"catch" => blk: {
+                const pair = datas[expr_node].node_and_node;
+                if (self.resolveAllocatorCallFromExpr(tree, @intFromEnum(pair[0]))) |call_info| {
+                    break :blk call_info;
+                }
+                break :blk self.resolveAllocatorCallFromExpr(tree, @intFromEnum(pair[1]));
+            },
+            .unwrap_optional, .grouped_expression => self.resolveAllocatorCallFromExpr(tree, @intFromEnum(datas[expr_node].node_and_token[0])),
+            else => null,
+        };
+    }
+
+    fn resolveAllocatorCallFromCall(self: *AnalysisEngine, tree: *const std.zig.Ast, call_ast_node: u32) ?AllocatorCall {
         const tags = tree.nodes.items(.tag);
         const datas = tree.nodes.items(.data);
         const token_tags = tree.tokens.items(.tag);
-        const main_tokens = tree.nodes.items(.main_token);
 
         if (call_ast_node >= tags.len) return null;
         const tag = tags[call_ast_node];
@@ -406,11 +431,7 @@ pub const AnalysisEngine = struct {
         if (field_token >= token_tags.len or token_tags[field_token] != .identifier) return null;
         const field_name = tree.tokenSlice(field_token);
 
-        if (base_node >= tags.len or tags[base_node] != .identifier) return null;
-        const base_token = main_tokens[base_node];
-        if (base_token >= token_tags.len or token_tags[base_token] != .identifier) return null;
-        const base_name = tree.tokenSlice(base_token);
-        if (!std.mem.eql(u8, base_name, "allocator")) return null;
+        if (!self.isAllocatorBase(tree, base_node)) return null;
 
         const first_arg: ?u32 = if (full_call.ast.params.len > 0)
             @intFromEnum(full_call.ast.params[0])
@@ -424,6 +445,32 @@ pub const AnalysisEngine = struct {
             return .{ .kind = .free, .first_arg = first_arg };
         }
         return null;
+    }
+
+    fn isAllocatorBase(self: *AnalysisEngine, tree: *const std.zig.Ast, base_node: u32) bool {
+        _ = self;
+        const tags = tree.nodes.items(.tag);
+        const datas = tree.nodes.items(.data);
+        const token_tags = tree.tokens.items(.tag);
+        const main_tokens = tree.nodes.items(.main_token);
+
+        if (base_node >= tags.len) return false;
+        switch (tags[base_node]) {
+            .identifier => {
+                const base_token = main_tokens[base_node];
+                if (base_token >= token_tags.len or token_tags[base_token] != .identifier) return false;
+                const base_name = tree.tokenSlice(base_token);
+                return std.mem.eql(u8, base_name, "allocator");
+            },
+            .field_access => {
+                const field_access_data = datas[base_node].node_and_token;
+                const field_token = field_access_data[1];
+                if (field_token >= token_tags.len or token_tags[field_token] != .identifier) return false;
+                const field_name = tree.tokenSlice(field_token);
+                return std.mem.eql(u8, field_name, "allocator");
+            },
+            else => return false,
+        }
     }
 
     fn resolveVarIdFromVarDecl(self: *AnalysisEngine, var_decl_node: u32) ?ids.VarId {
@@ -1371,8 +1418,8 @@ test "AnalysisEngine store tracks allocator alloc/free" {
 
     const code: [:0]const u8 =
         \\const std = @import("std");
-        \\fn foo(allocator: std.mem.Allocator) void {
-        \\    var ptr = allocator.alloc(u8, 1);
+        \\fn foo(allocator: std.mem.Allocator) !void {
+        \\    var ptr = try allocator.alloc(u8, 1);
         \\    allocator.free(ptr);
         \\}
     ;
@@ -1452,8 +1499,8 @@ test "AnalysisEngine store records double free violations" {
 
     const code: [:0]const u8 =
         \\const std = @import("std");
-        \\fn foo(allocator: std.mem.Allocator) void {
-        \\    var ptr = allocator.alloc(u8, 1);
+        \\fn foo(allocator: std.mem.Allocator) !void {
+        \\    var ptr = try allocator.alloc(u8, 1);
         \\    allocator.free(ptr);
         \\    allocator.free(ptr);
         \\}
@@ -1522,6 +1569,81 @@ test "AnalysisEngine store records double free violations" {
                 try testing.expectEqual(StoreViolationKind.double_free, state.getStoreViolations()[0].kind);
                 found = true;
                 break;
+            }
+        }
+        try testing.expect(found);
+    }
+}
+
+test "AnalysisEngine store tracks self allocator calls" {
+    const testing = std.testing;
+    const allocator = testing.allocator;
+
+    const code: [:0]const u8 =
+        \\const std = @import("std");
+        \\const Foo = struct {
+        \\    allocator: std.mem.Allocator,
+        \\    fn bar(self: *Foo) !void {
+        \\        var ptr = try self.allocator.alloc(u8, 1);
+        \\        self.allocator.free(ptr);
+        \\        self.allocator.free(ptr);
+        \\    }
+        \\};
+    ;
+
+    var source = Source.init(allocator, "test.zig", code);
+    defer source.deinit();
+
+    const tree = source.ast() catch return;
+    const tags = tree.nodes.items(.tag);
+    const token_tags = tree.tokens.items(.tag);
+
+    var fn_node: ?AstNodeId = null;
+    var ptr_var_id: ?ids.VarId = null;
+    for (tags, 0..) |tag, i| {
+        if (tag == .fn_decl) {
+            fn_node = ids.astId(@intCast(i));
+        }
+        switch (tag) {
+            .simple_var_decl,
+            .aligned_var_decl,
+            .local_var_decl,
+            .global_var_decl,
+            => {
+                const full = tree.fullVarDecl(@enumFromInt(i)) orelse continue;
+                const name_token = full.ast.mut_token + 1;
+                if (name_token >= token_tags.len or token_tags[name_token] != .identifier) continue;
+                const name = tree.tokenSlice(name_token);
+                if (std.mem.eql(u8, name, "ptr")) {
+                    ptr_var_id = ids.varId(name_token);
+                }
+            },
+            else => {},
+        }
+    }
+    const fn_idx = fn_node orelse return;
+    const region = ptr_var_id orelse return;
+
+    var builder = CfgBuilder.init(allocator);
+    var cfg_opt = builder.buildFromFn(&source, fn_idx) catch return;
+    if (cfg_opt) |*cfg| {
+        defer cfg.deinit();
+
+        var engine = AnalysisEngine.initWithSource(allocator, cfg, &source);
+        defer engine.deinit();
+
+        try engine.run();
+
+        var found = false;
+        for (engine.getGraph().nodes.items) |node| {
+            if (node.point.kind == .post) {
+                const state = &node.state;
+                if (state.getRegionState(region)) |region_state| {
+                    if (region_state == .freed and state.getStoreViolations().len == 1) {
+                        found = true;
+                        break;
+                    }
+                }
             }
         }
         try testing.expect(found);

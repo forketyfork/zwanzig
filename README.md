@@ -353,6 +353,19 @@ fn baz() i32 {
 }
 ```
 
+### store-violations-engine
+
+Detects allocator misuse based on the store model, including double-free (and frees without a tracked allocation).
+
+**Bad:**
+```zig
+fn foo(allocator: std.mem.Allocator) !void {
+    var ptr = try allocator.alloc(u8, 1);
+    allocator.free(ptr);
+    allocator.free(ptr); // double-free
+}
+```
+
 ## Building
 
 ```bash
