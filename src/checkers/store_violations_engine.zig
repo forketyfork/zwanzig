@@ -90,6 +90,11 @@ pub const StoreViolationsEngineChecker = struct {
         const message = switch (violation.kind) {
             .double_free => "double-free detected for resource",
             .free_without_alloc => "free without tracked allocation",
+            .double_close => "double-close detected for resource",
+            .close_without_open => "close without tracked open",
+            .use_after_free => "use after free",
+            .use_after_close => "use after close",
+            .resource_leak => "resource leak: allocation or open not released",
         };
 
         const token = violation.call_token orelse ids.varIndex(violation.region);
@@ -170,4 +175,63 @@ test "store_violations_engine reports free without alloc" {
     try testing.expectEqual(@as(usize, 1), diagnostics.items.len);
     try testing.expectEqualStrings("store-violations-engine", diagnostics.items[0].rule_id);
     try testing.expect(std.mem.indexOf(u8, diagnostics.items[0].message, "free without tracked allocation") != null);
+}
+
+test "store_violations_engine reports use after free" {
+    const testing = std.testing;
+    const allocator = testing.allocator;
+
+    const code: [:0]const u8 =
+        \\const std = @import("std");
+        \\fn foo(allocator: std.mem.Allocator) !void {
+        \\    var ptr = try allocator.alloc(u8, 1);
+        \\    allocator.free(ptr);
+        \\    _ = ptr;
+        \\}
+    ;
+
+    var source = Source.init(allocator, "test.zig", code);
+    defer source.deinit();
+
+    var diagnostics: std.ArrayList(Diagnostic) = .empty;
+    defer {
+        for (diagnostics.items) |*diag| {
+            diag.deinit(allocator);
+        }
+        diagnostics.deinit(allocator);
+    }
+
+    try StoreViolationsEngineChecker.checker.checkAst(&source, allocator, &diagnostics, .{ .build_metadata = null, .type_context = null });
+    try testing.expectEqual(@as(usize, 1), diagnostics.items.len);
+    try testing.expectEqualStrings("store-violations-engine", diagnostics.items[0].rule_id);
+    try testing.expect(std.mem.indexOf(u8, diagnostics.items[0].message, "use after free") != null);
+}
+
+test "store_violations_engine reports leak" {
+    const testing = std.testing;
+    const allocator = testing.allocator;
+
+    const code: [:0]const u8 =
+        \\const std = @import("std");
+        \\fn foo(allocator: std.mem.Allocator) !void {
+        \\    var ptr = try allocator.alloc(u8, 1);
+        \\    _ = ptr;
+        \\}
+    ;
+
+    var source = Source.init(allocator, "test.zig", code);
+    defer source.deinit();
+
+    var diagnostics: std.ArrayList(Diagnostic) = .empty;
+    defer {
+        for (diagnostics.items) |*diag| {
+            diag.deinit(allocator);
+        }
+        diagnostics.deinit(allocator);
+    }
+
+    try StoreViolationsEngineChecker.checker.checkAst(&source, allocator, &diagnostics, .{ .build_metadata = null, .type_context = null });
+    try testing.expectEqual(@as(usize, 1), diagnostics.items.len);
+    try testing.expectEqualStrings("store-violations-engine", diagnostics.items[0].rule_id);
+    try testing.expect(std.mem.indexOf(u8, diagnostics.items[0].message, "resource leak") != null);
 }

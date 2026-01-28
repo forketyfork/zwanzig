@@ -355,7 +355,7 @@ fn baz() i32 {
 
 ### store-violations-engine
 
-Detects allocator misuse based on the store model, including double-free (and frees without a tracked allocation).
+Detects allocator/resource misuse based on the store model, including double-free, free-without-alloc, close-without-open, use-after-free/close, and leak violations.
 
 **Bad:**
 ```zig

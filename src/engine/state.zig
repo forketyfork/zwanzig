@@ -217,15 +217,72 @@ pub const ProgramState = struct {
         self.invalidateCache();
     }
 
+    /// Track a resource open for a region.
+    pub fn trackOpen(self: *ProgramState, region: VarId) !void {
+        try self.store.markOpened(region);
+        self.invalidateCache();
+    }
+
     /// Track a resource free for a region.
     pub fn trackFree(self: *ProgramState, region: VarId, call_token: ?u32) !void {
         try self.store.markFreed(region, call_token);
         self.invalidateCache();
     }
 
+    /// Track a resource close for a region.
+    pub fn trackClose(self: *ProgramState, region: VarId, call_token: ?u32) !void {
+        try self.store.markClosed(region, call_token);
+        self.invalidateCache();
+    }
+
     /// Track a resource known to be non-allocated.
     pub fn trackNonAllocation(self: *ProgramState, region: VarId) !void {
         try self.store.markNonAllocated(region);
+        self.invalidateCache();
+    }
+
+    pub fn resetRegion(self: *ProgramState, region: VarId) void {
+        self.store.resetRegion(region);
+        self.invalidateCache();
+    }
+
+    pub fn trackEscape(self: *ProgramState, region: VarId) void {
+        self.store.escapeRegion(region);
+        self.invalidateCache();
+    }
+
+    pub fn trackEscapeByName(self: *ProgramState, tree: *const std.zig.Ast, name: []const u8) !void {
+        try self.store.escapeByName(tree, name);
+        self.invalidateCache();
+    }
+
+    /// Track a resource use for a region.
+    pub fn trackUse(self: *ProgramState, region: VarId, call_token: ?u32) !void {
+        try self.store.markUsed(region, call_token);
+        self.invalidateCache();
+    }
+
+    /// Track a deferred free for a region.
+    pub fn trackDeferredFree(self: *ProgramState, region: VarId, call_token: ?u32) !void {
+        try self.store.markDeferredFree(region, call_token);
+        self.invalidateCache();
+    }
+
+    /// Track a deferred close for a region.
+    pub fn trackDeferredClose(self: *ProgramState, region: VarId, call_token: ?u32) !void {
+        try self.store.markDeferredClose(region, call_token);
+        self.invalidateCache();
+    }
+
+    /// Track a region aliasing another region.
+    pub fn trackAlias(self: *ProgramState, alias: VarId, target: VarId) !void {
+        try self.store.aliasRegion(alias, target);
+        self.invalidateCache();
+    }
+
+    /// Track resource leaks in the current state.
+    pub fn trackLeaks(self: *ProgramState) !void {
+        try self.store.recordLeaks();
         self.invalidateCache();
     }
 

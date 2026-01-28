@@ -1522,7 +1522,7 @@ fn isErrorSwallowed(cfg: *const Cfg, catch_node_idx: u32, engine: *const Analysi
 
 ### StoreViolationsEngineChecker
 
-The `StoreViolationsEngineChecker` (`src/checkers/store_violations_engine.zig`) reports allocator misuse detected by the store model, including double-free and free-without-alloc violations. It runs the analysis engine per function and scans the resulting `ProgramState` store violations to emit diagnostics.
+The `StoreViolationsEngineChecker` (`src/checkers/store_violations_engine.zig`) reports allocator/resource misuse detected by the store model, including double-free, free-without-alloc, close-without-open, use-after-free/close, and leak violations. It runs the analysis engine per function and scans the resulting `ProgramState` store violations to emit diagnostics.
 
 ### Registration
 

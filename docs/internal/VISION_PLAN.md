@@ -25,19 +25,29 @@ Type information is used by:
 
 ---
 
-### ✅ Step 2: Region/Store Model (Heap + Resources) (COMPLETED)
-
-Region/store tracking is now integrated into the analysis engine. Key implementations:
-
-- **Store model** (`src/engine/store.zig`) for resource state tracking and violations
-- **ProgramState integration** (`src/engine/state.zig`) with hashing/equality and helpers
-- **Allocator effects** (`src/engine/analysis.zig`) wired to `alloc`/`free` patterns
-- **Diagnostics** via `store-violations-engine` checker
-- **Tests/fixtures** covering alloc/free transitions and double-free detection
-
----
-
 ## Remaining Steps
+
+## ✅ Step 2: Region/Store Model (Heap + Resources) (COMPLETED)
+
+### Status Quo
+- ProgramState in `src/engine/state.zig` tracks environment (locals) and constraints
+- Heap allocations and resources (files, sockets) are not modeled
+- Cannot detect resource leaks or double-free bugs
+
+### Objectives
+Introduce a region/store abstraction for ownership and resource tracking, enabling resource leak and use-after-free detection.
+
+### Tech Notes
+- Add a Store mapping regions to abstract resource states (allocated, freed, open, closed)
+- Connect store updates to IR nodes for alloc/free/open/close patterns
+- Ensure the store is part of ProgramState equality and hashing for proper deduplication
+- Consider Zig's allocator patterns: `allocator.alloc()`, `allocator.free()`, etc.
+
+### Acceptance Criteria
+- `just test` passes with store model tests
+- Test fixture: `var ptr = allocator.alloc(...); allocator.free(ptr);` tracks allocated→freed transition
+- Test fixture: double-free produces a diagnostic
+- `just lint` passes
 
 ## Step 3: Richer Abstract Domains
 

@@ -18,6 +18,7 @@ const SummaryCache = @import("summary.zig").SummaryCache;
 const ProgramPoint = @import("state.zig").ProgramPoint;
 const ProgramState = @import("state.zig").ProgramState;
 const ResourceState = @import("store.zig").ResourceState;
+const VarResolver = @import("var_resolver.zig").VarResolver;
 const ExplodedGraph = @import("graph.zig").ExplodedGraph;
 const AstNodeId = ids.AstNodeId;
 const CfgNodeId = ids.CfgNodeId;
@@ -47,6 +48,8 @@ pub const AnalysisEngine = struct {
     function_cfgs: std.AutoHashMap(AstNodeId, *Cfg),
     /// Map from function name to AST node index
     function_names: std.StringHashMap(AstNodeId),
+    /// Cache of scope-aware variable resolvers per function
+    var_resolvers: std.AutoHashMap(AstNodeId, *VarResolver),
     /// Count of inlined calls (for testing/debugging)
     inlined_call_count: u32,
     /// Cache of function summaries for interprocedural analysis
@@ -84,6 +87,7 @@ pub const AnalysisEngine = struct {
             .source = null,
             .function_cfgs = std.AutoHashMap(AstNodeId, *Cfg).init(allocator),
             .function_names = std.StringHashMap(AstNodeId).init(allocator),
+            .var_resolvers = std.AutoHashMap(AstNodeId, *VarResolver).init(allocator),
             .inlined_call_count = 0,
             .summary_cache = SummaryCache.init(allocator),
             .use_summaries = true,
@@ -111,6 +115,12 @@ pub const AnalysisEngine = struct {
         }
         self.function_cfgs.deinit();
         self.function_names.deinit();
+        var resolver_iter = self.var_resolvers.valueIterator();
+        while (resolver_iter.next()) |resolver_ptr| {
+            resolver_ptr.*.deinit();
+            self.allocator.destroy(resolver_ptr.*);
+        }
+        self.var_resolvers.deinit();
         self.summary_cache.deinit();
     }
 
@@ -369,21 +379,23 @@ pub const AnalysisEngine = struct {
         return null;
     }
 
-    const AllocatorCallKind = enum {
+    const ResourceCallKind = enum {
         alloc,
         free,
+        open,
+        close,
     };
 
-    const AllocatorCall = struct {
-        kind: AllocatorCallKind,
-        first_arg: ?u32,
+    const ResourceCall = struct {
+        kind: ResourceCallKind,
+        target_expr: ?u32,
         call_node: u32,
     };
 
-    fn resolveAllocatorCall(self: *AnalysisEngine, expr_node: u32) ?AllocatorCall {
+    fn resolveResourceCall(self: *AnalysisEngine, expr_node: u32) ?ResourceCall {
         const src = self.source orelse return null;
         const tree = src.ast() catch return null;
-        return self.resolveAllocatorCallFromExpr(tree, expr_node);
+        return self.resolveResourceCallFromExpr(tree, expr_node);
     }
 
     fn isDefinitelyNonAlloc(self: *AnalysisEngine, expr_node: u32) bool {
@@ -392,7 +404,7 @@ pub const AnalysisEngine = struct {
         return self.isDefinitelyNonAllocExpr(tree, expr_node);
     }
 
-    fn resolveAllocatorCallFromExpr(self: *AnalysisEngine, tree: *const std.zig.Ast, expr_node: u32) ?AllocatorCall {
+    fn resolveResourceCallFromExpr(self: *AnalysisEngine, tree: *const std.zig.Ast, expr_node: u32) ?ResourceCall {
         const tags = tree.nodes.items(.tag);
         const datas = tree.nodes.items(.data);
 
@@ -400,21 +412,25 @@ pub const AnalysisEngine = struct {
         const tag = tags[expr_node];
 
         return switch (tag) {
-            .call, .call_comma, .call_one, .call_one_comma => self.resolveAllocatorCallFromCall(tree, expr_node),
-            .@"try" => self.resolveAllocatorCallFromExpr(tree, @intFromEnum(datas[expr_node].node)),
+            .call, .call_comma, .call_one, .call_one_comma => self.resolveResourceCallFromCall(tree, expr_node),
+            .@"try" => self.resolveResourceCallFromExpr(tree, @intFromEnum(datas[expr_node].node)),
             .@"catch" => blk: {
                 const pair = datas[expr_node].node_and_node;
-                if (self.resolveAllocatorCallFromExpr(tree, @intFromEnum(pair[0]))) |call_info| {
+                if (self.resolveResourceCallFromExpr(tree, @intFromEnum(pair[0]))) |call_info| {
                     break :blk call_info;
                 }
-                break :blk self.resolveAllocatorCallFromExpr(tree, @intFromEnum(pair[1]));
+                break :blk self.resolveResourceCallFromExpr(tree, @intFromEnum(pair[1]));
             },
-            .unwrap_optional, .grouped_expression => self.resolveAllocatorCallFromExpr(tree, @intFromEnum(datas[expr_node].node_and_token[0])),
+            .unwrap_optional, .grouped_expression => self.resolveResourceCallFromExpr(tree, @intFromEnum(datas[expr_node].node_and_token[0])),
+            .slice, .slice_open, .slice_sentinel => blk: {
+                const slice = tree.fullSlice(@enumFromInt(expr_node)) orelse break :blk null;
+                break :blk self.resolveResourceCallFromExpr(tree, @intFromEnum(slice.ast.sliced));
+            },
             else => null,
         };
     }
 
-    fn resolveAllocatorCallFromCall(self: *AnalysisEngine, tree: *const std.zig.Ast, call_ast_node: u32) ?AllocatorCall {
+    fn resolveResourceCallFromCall(self: *AnalysisEngine, tree: *const std.zig.Ast, call_ast_node: u32) ?ResourceCall {
         const tags = tree.nodes.items(.tag);
         const datas = tree.nodes.items(.data);
         const token_tags = tree.tokens.items(.tag);
@@ -445,19 +461,27 @@ pub const AnalysisEngine = struct {
 
         if (self.isAllocatorBase(tree, base_node)) {
             if (std.mem.eql(u8, field_name, "alloc") or std.mem.eql(u8, field_name, "dupe")) {
-                return .{ .kind = .alloc, .first_arg = first_arg, .call_node = call_ast_node };
+                return .{ .kind = .alloc, .target_expr = null, .call_node = call_ast_node };
             }
             if (std.mem.eql(u8, field_name, "free")) {
-                return .{ .kind = .free, .first_arg = first_arg, .call_node = call_ast_node };
+                return .{ .kind = .free, .target_expr = first_arg, .call_node = call_ast_node };
             }
         }
 
         if (std.mem.eql(u8, field_name, "allocPrint")) {
             if (first_arg) |arg_node| {
                 if (self.isAllocatorBase(tree, arg_node)) {
-                    return .{ .kind = .alloc, .first_arg = first_arg, .call_node = call_ast_node };
+                    return .{ .kind = .alloc, .target_expr = null, .call_node = call_ast_node };
                 }
             }
+        }
+
+        if (std.mem.eql(u8, field_name, "open") or std.mem.eql(u8, field_name, "openFile") or std.mem.eql(u8, field_name, "openDir") or std.mem.eql(u8, field_name, "openIterableDir") or std.mem.eql(u8, field_name, "createFile")) {
+            return .{ .kind = .open, .target_expr = null, .call_node = call_ast_node };
+        }
+
+        if (std.mem.eql(u8, field_name, "close")) {
+            return .{ .kind = .close, .target_expr = base_node, .call_node = call_ast_node };
         }
         return null;
     }
@@ -498,7 +522,7 @@ pub const AnalysisEngine = struct {
         return ids.varId(name_token);
     }
 
-    fn resolveVarIdFromIdentifier(self: *AnalysisEngine, identifier_node: u32) ?ids.VarId {
+    fn resolveVarIdFromIdentifier(self: *AnalysisEngine, identifier_node: u32, current_cfg: *const Cfg) ?ids.VarId {
         const src = self.source orelse return null;
         const tree = src.ast() catch return null;
         const tags = tree.nodes.items(.tag);
@@ -509,14 +533,19 @@ pub const AnalysisEngine = struct {
         if (tags[identifier_node] != .identifier) return null;
         const token = main_tokens[identifier_node];
         if (token >= token_tags.len or token_tags[token] != .identifier) return null;
-        const name = tree.tokenSlice(token);
-        if (self.resolveDeclTokenForName(name, token)) |decl_token| {
-            return ids.varId(decl_token);
+
+        if (current_cfg.fn_ast_node) |fn_node| {
+            if (self.getOrBuildVarResolver(fn_node)) |resolver| {
+                if (resolver.resolve(identifier_node)) |var_id| {
+                    return var_id;
+                }
+            }
         }
+
         return ids.varId(token);
     }
 
-    fn resolveVarIdFromExpr(self: *AnalysisEngine, expr_node: u32) ?ids.VarId {
+    fn resolveVarIdFromExpr(self: *AnalysisEngine, expr_node: u32, current_cfg: *const Cfg) ?ids.VarId {
         const src = self.source orelse return null;
         const tree = src.ast() catch return null;
         const tags = tree.nodes.items(.tag);
@@ -524,65 +553,51 @@ pub const AnalysisEngine = struct {
 
         if (expr_node >= tags.len) return null;
         return switch (tags[expr_node]) {
-            .identifier => self.resolveVarIdFromIdentifier(expr_node),
+            .identifier => self.resolveVarIdFromIdentifier(expr_node, current_cfg),
             .grouped_expression, .unwrap_optional => blk: {
                 const data = datas[expr_node].node_and_token;
-                break :blk self.resolveVarIdFromExpr(@intFromEnum(data[0]));
+                break :blk self.resolveVarIdFromExpr(@intFromEnum(data[0]), current_cfg);
+            },
+            .slice, .slice_open, .slice_sentinel => blk: {
+                const slice = tree.fullSlice(@enumFromInt(expr_node)) orelse break :blk null;
+                break :blk self.resolveVarIdFromExpr(@intFromEnum(slice.ast.sliced), current_cfg);
+            },
+            .array_access => blk: {
+                const pair = datas[expr_node].node_and_node;
+                break :blk self.resolveVarIdFromExpr(@intFromEnum(pair[0]), current_cfg);
+            },
+            .address_of, .deref, .@"try" => blk: {
+                const child = datas[expr_node].node;
+                break :blk self.resolveVarIdFromExpr(@intFromEnum(child), current_cfg);
+            },
+            .@"catch" => blk: {
+                const pair = datas[expr_node].node_and_node;
+                if (self.resolveVarIdFromExpr(@intFromEnum(pair[0]), current_cfg)) |var_id| {
+                    break :blk var_id;
+                }
+                break :blk self.resolveVarIdFromExpr(@intFromEnum(pair[1]), current_cfg);
             },
             else => null,
         };
     }
 
-    fn resolveDeclTokenForName(self: *AnalysisEngine, name: []const u8, ident_token: u32) ?u32 {
+    fn getOrBuildVarResolver(self: *AnalysisEngine, fn_node: AstNodeId) ?*VarResolver {
+        if (self.var_resolvers.get(fn_node)) |resolver| return resolver;
         const src = self.source orelse return null;
         const tree = src.ast() catch return null;
-        const tags = tree.nodes.items(.tag);
-        const token_tags = tree.tokens.items(.tag);
 
-        var best_token: ?u32 = null;
+        const resolver_ptr = self.allocator.create(VarResolver) catch return null;
+        resolver_ptr.* = VarResolver.init(self.allocator, tree, fn_node) catch {
+            self.allocator.destroy(resolver_ptr);
+            return null;
+        };
 
-        for (tags, 0..) |tag, i| {
-            switch (tag) {
-                .simple_var_decl,
-                .aligned_var_decl,
-                .local_var_decl,
-                .global_var_decl,
-                => {
-                    const full = tree.fullVarDecl(@enumFromInt(i)) orelse continue;
-                    const name_token = full.ast.mut_token + 1;
-                    if (name_token >= token_tags.len or token_tags[name_token] != .identifier) continue;
-                    if (name_token >= ident_token) continue;
-                    const decl_name = tree.tokenSlice(name_token);
-                    if (!std.mem.eql(u8, decl_name, name)) continue;
-                    if (best_token == null or name_token > best_token.?) {
-                        best_token = name_token;
-                    }
-                },
-                .fn_decl,
-                .fn_proto,
-                .fn_proto_multi,
-                .fn_proto_one,
-                .fn_proto_simple,
-                => {
-                    var buf: [1]std.zig.Ast.Node.Index = undefined;
-                    const full = tree.fullFnProto(&buf, @enumFromInt(i)) orelse continue;
-                    var it = full.iterate(tree);
-                    while (it.next()) |param| {
-                        const name_token = param.name_token orelse continue;
-                        if (name_token >= token_tags.len or token_tags[name_token] != .identifier) continue;
-                        if (name_token >= ident_token) continue;
-                        const decl_name = tree.tokenSlice(name_token);
-                        if (!std.mem.eql(u8, decl_name, name)) continue;
-                        if (best_token == null or name_token > best_token.?) {
-                            best_token = name_token;
-                        }
-                    }
-                },
-                else => {},
-            }
-        }
-
-        return best_token;
+        self.var_resolvers.put(fn_node, resolver_ptr) catch {
+            resolver_ptr.deinit();
+            self.allocator.destroy(resolver_ptr);
+            return null;
+        };
+        return resolver_ptr;
     }
 
     fn resolveVarDeclInitNode(self: *AnalysisEngine, var_decl_node: u32) ?u32 {
@@ -596,7 +611,9 @@ pub const AnalysisEngine = struct {
     }
 
     fn isDefinitelyNonAllocExpr(self: *AnalysisEngine, tree: *const std.zig.Ast, expr_node: u32) bool {
-        if (self.resolveAllocatorCallFromExpr(tree, expr_node) != null) return false;
+        if (self.resolveResourceCallFromExpr(tree, expr_node)) |call_info| {
+            return call_info.kind != .alloc and call_info.kind != .open;
+        }
 
         const tags = tree.nodes.items(.tag);
         const datas = tree.nodes.items(.data);
@@ -617,6 +634,14 @@ pub const AnalysisEngine = struct {
             .array_init_dot_comma,
             .array_init_dot_two,
             .array_init_dot_two_comma,
+            .struct_init,
+            .struct_init_comma,
+            .struct_init_one,
+            .struct_init_one_comma,
+            .struct_init_dot,
+            .struct_init_dot_comma,
+            .struct_init_dot_two,
+            .struct_init_dot_two_comma,
             => true,
             .grouped_expression, .unwrap_optional => blk: {
                 const data = datas[expr_node].node_and_token;
@@ -639,6 +664,414 @@ pub const AnalysisEngine = struct {
         const main_tokens = tree.nodes.items(.main_token);
         if (call_node >= main_tokens.len) return null;
         return main_tokens[call_node];
+    }
+
+    fn checkUseAfterFreeInCall(self: *AnalysisEngine, state: *ProgramState, call_node: u32, current_cfg: *const Cfg) EngineError!void {
+        const src = self.source orelse return;
+        const tree = src.ast() catch return;
+        const tags = tree.nodes.items(.tag);
+
+        if (call_node >= tags.len) return;
+
+        var call_buf: [1]std.zig.Ast.Node.Index = undefined;
+        const full_call = switch (tags[call_node]) {
+            .call, .call_comma, .call_one, .call_one_comma => tree.fullCall(&call_buf, @enumFromInt(call_node)),
+            else => null,
+        } orelse return;
+
+        for (full_call.ast.params) |param| {
+            try self.checkUseAfterFreeInExpr(state, @intFromEnum(param), current_cfg);
+        }
+    }
+
+    fn checkUseAfterFreeInExpr(self: *AnalysisEngine, state: *ProgramState, expr_node: u32, current_cfg: *const Cfg) EngineError!void {
+        const src = self.source orelse return;
+        const tree = src.ast() catch return;
+        const tags = tree.nodes.items(.tag);
+        const datas = tree.nodes.items(.data);
+        const main_tokens = tree.nodes.items(.main_token);
+
+        if (expr_node >= tags.len) return;
+
+        switch (tags[expr_node]) {
+            .identifier => {
+                if (self.resolveVarIdFromIdentifier(expr_node, current_cfg)) |var_id| {
+                    const token = main_tokens[expr_node];
+                    try state.trackUse(var_id, token);
+                }
+            },
+            .grouped_expression, .unwrap_optional => {
+                const data = datas[expr_node].node_and_token;
+                try self.checkUseAfterFreeInExpr(state, @intFromEnum(data[0]), current_cfg);
+            },
+            .slice, .slice_open, .slice_sentinel => {
+                const slice = tree.fullSlice(@enumFromInt(expr_node)) orelse return;
+                try self.checkUseAfterFreeInExpr(state, @intFromEnum(slice.ast.sliced), current_cfg);
+            },
+            .array_access => {
+                const pair = datas[expr_node].node_and_node;
+                try self.checkUseAfterFreeInExpr(state, @intFromEnum(pair[0]), current_cfg);
+            },
+            .field_access => {
+                const data = datas[expr_node].node_and_token;
+                try self.checkUseAfterFreeInExpr(state, @intFromEnum(data[0]), current_cfg);
+            },
+            .call, .call_comma, .call_one, .call_one_comma => {
+                try self.checkUseAfterFreeInCall(state, expr_node, current_cfg);
+            },
+            else => {},
+        }
+    }
+
+    fn markEscapedInExpr(self: *AnalysisEngine, state: *ProgramState, expr_node: u32, current_cfg: *const Cfg) EngineError!void {
+        const src = self.source orelse return;
+        const tree = src.ast() catch return;
+        const tags = tree.nodes.items(.tag);
+        const datas = tree.nodes.items(.data);
+        const main_tokens = tree.nodes.items(.main_token);
+        const token_tags = tree.tokens.items(.tag);
+
+        if (expr_node >= tags.len) return;
+
+        switch (tags[expr_node]) {
+            .identifier => {
+                if (self.resolveVarIdFromIdentifier(expr_node, current_cfg)) |var_id| {
+                    state.trackEscape(var_id);
+                    const token = main_tokens[expr_node];
+                    if (ids.varIndex(var_id) == token and token < token_tags.len and token_tags[token] == .identifier) {
+                        const name = tree.tokenSlice(token);
+                        try state.trackEscapeByName(tree, name);
+                    }
+                }
+            },
+            .grouped_expression, .unwrap_optional => {
+                const data = datas[expr_node].node_and_token;
+                try self.markEscapedInExpr(state, @intFromEnum(data[0]), current_cfg);
+            },
+            .slice, .slice_open, .slice_sentinel => {
+                const slice = tree.fullSlice(@enumFromInt(expr_node)) orelse return;
+                try self.markEscapedInExpr(state, @intFromEnum(slice.ast.sliced), current_cfg);
+            },
+            .array_access => {
+                const pair = datas[expr_node].node_and_node;
+                try self.markEscapedInExpr(state, @intFromEnum(pair[0]), current_cfg);
+            },
+            .field_access => {
+                const data = datas[expr_node].node_and_token;
+                try self.markEscapedInExpr(state, @intFromEnum(data[0]), current_cfg);
+            },
+            .address_of, .deref, .@"try" => {
+                const child = datas[expr_node].node;
+                try self.markEscapedInExpr(state, @intFromEnum(child), current_cfg);
+            },
+            .@"catch" => {
+                const pair = datas[expr_node].node_and_node;
+                try self.markEscapedInExpr(state, @intFromEnum(pair[0]), current_cfg);
+                try self.markEscapedInExpr(state, @intFromEnum(pair[1]), current_cfg);
+            },
+            .struct_init, .struct_init_comma, .struct_init_one, .struct_init_one_comma, .struct_init_dot, .struct_init_dot_comma, .struct_init_dot_two, .struct_init_dot_two_comma => {
+                var buf: [2]std.zig.Ast.Node.Index = undefined;
+                const struct_init = tree.fullStructInit(&buf, @enumFromInt(expr_node)) orelse return;
+                for (struct_init.ast.fields) |field| {
+                    try self.markEscapedInExpr(state, @intFromEnum(field), current_cfg);
+                }
+            },
+            .array_init, .array_init_comma, .array_init_one, .array_init_one_comma, .array_init_dot, .array_init_dot_comma, .array_init_dot_two, .array_init_dot_two_comma => {
+                var buf: [2]std.zig.Ast.Node.Index = undefined;
+                const array_init = tree.fullArrayInit(&buf, @enumFromInt(expr_node)) orelse return;
+                for (array_init.ast.elements) |elem| {
+                    try self.markEscapedInExpr(state, @intFromEnum(elem), current_cfg);
+                }
+            },
+            else => {},
+        }
+    }
+
+    fn trackEscapesFromCall(self: *AnalysisEngine, state: *ProgramState, call_node: u32, current_cfg: *const Cfg) void {
+        const src = self.source orelse return;
+        const tree = src.ast() catch return;
+        const tags = tree.nodes.items(.tag);
+        const datas = tree.nodes.items(.data);
+        const token_tags = tree.tokens.items(.tag);
+
+        if (call_node >= tags.len) return;
+
+        var call_buf: [1]std.zig.Ast.Node.Index = undefined;
+        const full_call = switch (tags[call_node]) {
+            .call, .call_comma, .call_one, .call_one_comma => tree.fullCall(&call_buf, @enumFromInt(call_node)),
+            else => null,
+        } orelse return;
+
+        const callee_node: u32 = @intFromEnum(full_call.ast.fn_expr);
+        if (callee_node >= tags.len or tags[callee_node] != .field_access) return;
+
+        const field_access_data = datas[callee_node].node_and_token;
+        const field_token = field_access_data[1];
+        if (field_token >= token_tags.len or token_tags[field_token] != .identifier) return;
+        const field_name = tree.tokenSlice(field_token);
+
+        if (std.mem.eql(u8, field_name, "append") or
+            std.mem.eql(u8, field_name, "appendAssumeCapacity") or
+            std.mem.eql(u8, field_name, "appendSlice") or
+            std.mem.eql(u8, field_name, "appendSliceAssumeCapacity"))
+        {
+            if (full_call.ast.params.len == 0) return;
+            const item_node = @intFromEnum(full_call.ast.params[full_call.ast.params.len - 1]);
+            if (self.resolveVarIdFromExpr(item_node, current_cfg)) |var_id| {
+                state.trackEscape(var_id);
+            }
+            return;
+        }
+
+        if (std.mem.eql(u8, field_name, "put") or
+            std.mem.eql(u8, field_name, "putNoClobber") or
+            std.mem.eql(u8, field_name, "putAssumeCapacity") or
+            std.mem.eql(u8, field_name, "putNoClobberAssumeCapacity"))
+        {
+            if (full_call.ast.params.len >= 1) {
+                const key_node = @intFromEnum(full_call.ast.params[0]);
+                if (self.resolveVarIdFromExpr(key_node, current_cfg)) |var_id| {
+                    state.trackEscape(var_id);
+                }
+            }
+            if (full_call.ast.params.len >= 2) {
+                const value_node = @intFromEnum(full_call.ast.params[1]);
+                if (self.resolveVarIdFromExpr(value_node, current_cfg)) |var_id| {
+                    state.trackEscape(var_id);
+                }
+            }
+        }
+    }
+
+    fn trackEscapesInExpr(self: *AnalysisEngine, state: *ProgramState, expr_node: u32, current_cfg: *const Cfg) void {
+        const src = self.source orelse return;
+        const tree = src.ast() catch return;
+        const tags = tree.nodes.items(.tag);
+        const datas = tree.nodes.items(.data);
+
+        if (expr_node >= tags.len) return;
+
+        switch (tags[expr_node]) {
+            .call, .call_comma, .call_one, .call_one_comma => {
+                self.trackEscapesFromCall(state, expr_node, current_cfg);
+            },
+            .grouped_expression, .unwrap_optional => {
+                const data = datas[expr_node].node_and_token;
+                self.trackEscapesInExpr(state, @intFromEnum(data[0]), current_cfg);
+            },
+            .slice, .slice_open, .slice_sentinel => {
+                const slice = tree.fullSlice(@enumFromInt(expr_node)) orelse return;
+                self.trackEscapesInExpr(state, @intFromEnum(slice.ast.sliced), current_cfg);
+            },
+            .array_access => {
+                const pair = datas[expr_node].node_and_node;
+                self.trackEscapesInExpr(state, @intFromEnum(pair[0]), current_cfg);
+            },
+            .field_access => {
+                const data = datas[expr_node].node_and_token;
+                self.trackEscapesInExpr(state, @intFromEnum(data[0]), current_cfg);
+            },
+            .address_of, .deref, .@"try" => {
+                const child = datas[expr_node].node;
+                self.trackEscapesInExpr(state, @intFromEnum(child), current_cfg);
+            },
+            .@"catch" => {
+                const pair = datas[expr_node].node_and_node;
+                self.trackEscapesInExpr(state, @intFromEnum(pair[0]), current_cfg);
+                self.trackEscapesInExpr(state, @intFromEnum(pair[1]), current_cfg);
+            },
+            .struct_init, .struct_init_comma, .struct_init_one, .struct_init_one_comma, .struct_init_dot, .struct_init_dot_comma, .struct_init_dot_two, .struct_init_dot_two_comma => {
+                var buf: [2]std.zig.Ast.Node.Index = undefined;
+                const struct_init = tree.fullStructInit(&buf, @enumFromInt(expr_node)) orelse return;
+                for (struct_init.ast.fields) |field| {
+                    self.trackEscapesInExpr(state, @intFromEnum(field), current_cfg);
+                }
+            },
+            .array_init, .array_init_comma, .array_init_one, .array_init_one_comma, .array_init_dot, .array_init_dot_comma, .array_init_dot_two, .array_init_dot_two_comma => {
+                var buf: [2]std.zig.Ast.Node.Index = undefined;
+                const array_init = tree.fullArrayInit(&buf, @enumFromInt(expr_node)) orelse return;
+                for (array_init.ast.elements) |elem| {
+                    self.trackEscapesInExpr(state, @intFromEnum(elem), current_cfg);
+                }
+            },
+            else => {},
+        }
+    }
+
+    fn bindPayloadAlias(self: *AnalysisEngine, state: *ProgramState, payload_token: u32, expr_node: u32, current_cfg: *const Cfg) EngineError!void {
+        const var_id = ids.varId(payload_token);
+        state.resetRegion(var_id);
+        try state.setVar(var_id, .unknown);
+        if (self.resolveVarIdFromExpr(expr_node, current_cfg)) |alias_target| {
+            if (alias_target != var_id) {
+                try state.trackAlias(var_id, alias_target);
+            }
+        }
+    }
+
+    fn bindPayloadUnknown(self: *AnalysisEngine, state: *ProgramState, payload_token: u32) EngineError!void {
+        _ = self;
+        const var_id = ids.varId(payload_token);
+        state.resetRegion(var_id);
+        try state.setVar(var_id, .unknown);
+    }
+
+    fn bindForPayloads(self: *AnalysisEngine, state: *ProgramState, payload_token: u32) EngineError!void {
+        const src = self.source orelse return;
+        const tree = src.ast() catch return;
+        const token_tags = tree.tokens.items(.tag);
+
+        var idx = payload_token;
+        if (idx < token_tags.len and token_tags[idx] == .pipe) {
+            idx += 1;
+        }
+
+        while (idx < token_tags.len) : (idx += 1) {
+            const tag = token_tags[idx];
+            if (tag == .pipe) break;
+            if (tag == .asterisk) {
+                idx += 1;
+                if (idx < token_tags.len and token_tags[idx] == .identifier) {
+                    try self.bindPayloadUnknown(state, idx);
+                }
+            } else if (tag == .identifier) {
+                try self.bindPayloadUnknown(state, idx);
+            }
+        }
+    }
+
+    fn applyPayloadBindings(self: *AnalysisEngine, cfg_node: *const CfgNode, edge_kind: EdgeKind, state: *ProgramState, current_cfg: *const Cfg) EngineError!void {
+        const ast_node = cfg_node.ir_node.ast_node orelse return;
+        const src = self.source orelse return;
+        const tree = src.ast() catch return;
+        const tags = tree.nodes.items(.tag);
+
+        if (ast_node >= tags.len) return;
+
+        switch (tags[ast_node]) {
+            .@"if", .if_simple => {
+                const full_if = tree.fullIf(@enumFromInt(ast_node)) orelse return;
+                if (edge_kind == .branch_true) {
+                    if (full_if.payload_token) |tok| {
+                        try self.bindPayloadAlias(state, tok, @intFromEnum(full_if.ast.cond_expr), current_cfg);
+                    }
+                } else if (edge_kind == .branch_false) {
+                    if (full_if.error_token) |tok| {
+                        try self.bindPayloadUnknown(state, tok);
+                    }
+                }
+            },
+            .@"while", .while_simple, .while_cont => {
+                const full_while = tree.fullWhile(@enumFromInt(ast_node)) orelse return;
+                if (edge_kind == .branch_true) {
+                    if (full_while.payload_token) |tok| {
+                        try self.bindPayloadAlias(state, tok, @intFromEnum(full_while.ast.cond_expr), current_cfg);
+                    }
+                }
+            },
+            .@"for", .for_simple => {
+                if (edge_kind != .branch_true) return;
+                const full_for = tree.fullFor(@enumFromInt(ast_node)) orelse return;
+                try self.bindForPayloads(state, full_for.payload_token);
+            },
+            else => {},
+        }
+    }
+
+    fn escapeReturnedVars(self: *AnalysisEngine, state: *ProgramState, fn_node: AstNodeId, current_cfg: *const Cfg) EngineError!void {
+        const src = self.source orelse return;
+        const tree = src.ast() catch return;
+        const tags = tree.nodes.items(.tag);
+        const fn_index = ids.astIndex(fn_node);
+        if (fn_index >= tags.len or tags[fn_index] != .fn_decl) return;
+        const fn_data = tree.nodes.items(.data)[fn_index];
+        const body_node = @intFromEnum(fn_data.node_and_node[1]);
+        if (body_node == 0) return;
+        try self.escapeReturnedVarsInNode(state, body_node, current_cfg, tree);
+    }
+
+    fn escapeReturnedVarsInNode(
+        self: *AnalysisEngine,
+        state: *ProgramState,
+        node: u32,
+        current_cfg: *const Cfg,
+        tree: *const std.zig.Ast,
+    ) EngineError!void {
+        const tags = tree.nodes.items(.tag);
+        const datas = tree.nodes.items(.data);
+
+        if (node == 0 or node >= tags.len) return;
+
+        switch (tags[node]) {
+            .@"return" => {
+                if (datas[node].opt_node.unwrap()) |ret_expr| {
+                    try self.markEscapedInExpr(state, @intFromEnum(ret_expr), current_cfg);
+                }
+            },
+            .block, .block_semicolon, .block_two, .block_two_semicolon => {
+                var statements: []const u32 = &.{};
+                var scratch_buf: [2]u32 = undefined;
+
+                switch (tags[node]) {
+                    .block, .block_semicolon => {
+                        const extra_range = datas[node].extra_range;
+                        const start = @intFromEnum(extra_range.start);
+                        const end = @intFromEnum(extra_range.end);
+                        statements = tree.extra_data[start..end];
+                    },
+                    .block_two, .block_two_semicolon => {
+                        const opt_nodes = datas[node].opt_node_and_opt_node;
+                        var count: usize = 0;
+                        if (opt_nodes[0].unwrap()) |n| {
+                            scratch_buf[count] = @intFromEnum(n);
+                            count += 1;
+                        }
+                        if (opt_nodes[1].unwrap()) |n| {
+                            scratch_buf[count] = @intFromEnum(n);
+                            count += 1;
+                        }
+                        statements = scratch_buf[0..count];
+                    },
+                    else => {},
+                }
+
+                for (statements) |stmt| {
+                    try self.escapeReturnedVarsInNode(state, stmt, current_cfg, tree);
+                }
+            },
+            .@"if", .if_simple => {
+                const full_if = tree.fullIf(@enumFromInt(node)) orelse return;
+                try self.escapeReturnedVarsInNode(state, @intFromEnum(full_if.ast.then_expr), current_cfg, tree);
+                if (full_if.ast.else_expr.unwrap()) |else_node| {
+                    try self.escapeReturnedVarsInNode(state, @intFromEnum(else_node), current_cfg, tree);
+                }
+            },
+            .@"while", .while_simple, .while_cont => {
+                const full_while = tree.fullWhile(@enumFromInt(node)) orelse return;
+                try self.escapeReturnedVarsInNode(state, @intFromEnum(full_while.ast.then_expr), current_cfg, tree);
+                if (full_while.ast.else_expr.unwrap()) |else_node| {
+                    try self.escapeReturnedVarsInNode(state, @intFromEnum(else_node), current_cfg, tree);
+                }
+                if (full_while.ast.cont_expr.unwrap()) |cont_node| {
+                    try self.escapeReturnedVarsInNode(state, @intFromEnum(cont_node), current_cfg, tree);
+                }
+            },
+            .@"for", .for_simple => {
+                const full_for = tree.fullFor(@enumFromInt(node)) orelse return;
+                try self.escapeReturnedVarsInNode(state, @intFromEnum(full_for.ast.then_expr), current_cfg, tree);
+                if (full_for.ast.else_expr.unwrap()) |else_node| {
+                    try self.escapeReturnedVarsInNode(state, @intFromEnum(else_node), current_cfg, tree);
+                }
+            },
+            .@"switch", .switch_comma => {
+                const full_switch = tree.switchFull(@enumFromInt(node));
+                for (full_switch.ast.cases) |case_node| {
+                    const full_case = tree.fullSwitchCase(case_node) orelse continue;
+                    try self.escapeReturnedVarsInNode(state, @intFromEnum(full_case.ast.target_expr), current_cfg, tree);
+                }
+            },
+            else => {},
+        }
     }
 
     fn processNode(self: *AnalysisEngine, node_index: u32, edge_kind: EdgeKind, pending_constraint: ?Constraint, current_cfg: *const Cfg) EngineError!void {
@@ -707,7 +1140,7 @@ pub const AnalysisEngine = struct {
                 // Check if this is a branch node - if so, we need to extract constraints
                 const is_branch_node = if (cfg_node) |node| node.ir_node.tag == .branch else false;
                 const branch_constraint = if (is_branch_node)
-                    self.extractBranchConstraint(cfg_node.?)
+                    self.extractBranchConstraint(cfg_node.?, current_cfg)
                 else
                     null;
 
@@ -740,6 +1173,10 @@ pub const AnalysisEngine = struct {
                                 }
                             },
                             else => {},
+                        }
+
+                        if (cfg_node) |node| {
+                            try self.applyPayloadBindings(node, edge.kind, &succ_state, current_cfg);
                         }
 
                         // Determine the constraint to apply based on the edge kind
@@ -926,7 +1363,7 @@ pub const AnalysisEngine = struct {
 
     /// Extract a constraint from a branch node's condition.
     /// Returns null if no constraint can be extracted.
-    fn extractBranchConstraint(self: *AnalysisEngine, cfg_node: *const CfgNode) ?Constraint {
+    fn extractBranchConstraint(self: *AnalysisEngine, cfg_node: *const CfgNode, current_cfg: *const Cfg) ?Constraint {
         // The branch node has ast_node pointing to the if expression
         // In a more complete implementation, we would analyze the condition expression
         // to extract constraints like "x == 5" or "x != null"
@@ -940,7 +1377,7 @@ pub const AnalysisEngine = struct {
         const ir_node = cfg_node.ir_node;
         if (ir_node.operand_node) |var_id| {
             const var_key = if (self.source != null)
-                (self.resolveVarIdFromExpr(var_id) orelse ids.varId(var_id))
+                (self.resolveVarIdFromExpr(var_id, current_cfg) orelse ids.varId(var_id))
             else
                 ids.varId(var_id);
             if (ir_node.operand2_node) |cmp_info| {
@@ -968,15 +1405,23 @@ pub const AnalysisEngine = struct {
             .var_decl => {
                 if (ir_node.ast_node) |ast_node| {
                     const var_id = self.resolveVarIdFromVarDecl(ast_node) orelse ids.varId(ast_node);
+                    new_state.resetRegion(var_id);
                     try new_state.setVar(var_id, .unknown);
                     if (self.resolveVarDeclInitNode(ast_node)) |init_node| {
-                        if (self.resolveAllocatorCall(init_node)) |call_info| {
-                            if (call_info.kind == .alloc) {
-                                try new_state.trackAllocation(var_id);
+                        if (self.resolveResourceCall(init_node)) |call_info| {
+                            switch (call_info.kind) {
+                                .alloc => try new_state.trackAllocation(var_id),
+                                .open => try new_state.trackOpen(var_id),
+                                else => {},
+                            }
+                        } else if (self.resolveVarIdFromExpr(init_node, current_cfg)) |alias_target| {
+                            if (alias_target != var_id) {
+                                try new_state.trackAlias(var_id, alias_target);
                             }
                         } else if (self.isDefinitelyNonAlloc(init_node)) {
                             try new_state.trackNonAllocation(var_id);
                         }
+                        try self.checkUseAfterFreeInExpr(&new_state, init_node, current_cfg);
                     }
                 }
             },
@@ -984,17 +1429,38 @@ pub const AnalysisEngine = struct {
                 // For assignments, use the LHS identifier node as the key
                 // operand_node contains the LHS, operand2_node contains the RHS
                 if (ir_node.operand_node) |lhs_node| {
-                    // For now, set to unknown. Future enhancement: evaluate RHS literals
-                    const var_id = self.resolveVarIdFromIdentifier(lhs_node) orelse ids.varId(lhs_node);
-                    try new_state.setVar(var_id, .unknown);
-                    if (ir_node.operand2_node) |rhs_node| {
-                        if (self.resolveAllocatorCall(rhs_node)) |call_info| {
-                            if (call_info.kind == .alloc) {
-                                try new_state.trackAllocation(var_id);
-                            }
-                        } else if (self.isDefinitelyNonAlloc(rhs_node)) {
-                            try new_state.trackNonAllocation(var_id);
+                    var lhs_is_identifier = false;
+                    if (self.source) |src| {
+                        if (src.ast() catch null) |tree| {
+                            const tags = tree.nodes.items(.tag);
+                            lhs_is_identifier = lhs_node < tags.len and tags[lhs_node] == .identifier;
                         }
+                    }
+
+                    if (lhs_is_identifier) {
+                        // For now, set to unknown. Future enhancement: evaluate RHS literals
+                        const var_id = self.resolveVarIdFromIdentifier(lhs_node, current_cfg) orelse ids.varId(lhs_node);
+                        new_state.resetRegion(var_id);
+                        try new_state.setVar(var_id, .unknown);
+                        if (ir_node.operand2_node) |rhs_node| {
+                            if (self.resolveResourceCall(rhs_node)) |call_info| {
+                                switch (call_info.kind) {
+                                    .alloc => try new_state.trackAllocation(var_id),
+                                    .open => try new_state.trackOpen(var_id),
+                                    else => {},
+                                }
+                            } else if (self.resolveVarIdFromExpr(rhs_node, current_cfg)) |alias_target| {
+                                if (alias_target != var_id) {
+                                    try new_state.trackAlias(var_id, alias_target);
+                                }
+                            } else if (self.isDefinitelyNonAlloc(rhs_node)) {
+                                try new_state.trackNonAllocation(var_id);
+                            }
+                            try self.checkUseAfterFreeInExpr(&new_state, rhs_node, current_cfg);
+                        }
+                    } else if (ir_node.operand2_node) |rhs_node| {
+                        try self.checkUseAfterFreeInExpr(&new_state, rhs_node, current_cfg);
+                        try self.markEscapedInExpr(&new_state, rhs_node, current_cfg);
                     }
                 }
             },
@@ -1008,22 +1474,183 @@ pub const AnalysisEngine = struct {
                 // The call node itself doesn't change the abstract state significantly,
                 // but the return value (if captured) would be unknown.
                 if (ir_node.ast_node) |ast_node| {
-                    if (self.resolveAllocatorCall(ast_node)) |call_info| {
-                        if (call_info.kind == .free) {
-                            if (call_info.first_arg) |arg_node| {
-                                if (self.resolveVarIdFromExpr(arg_node)) |var_id| {
-                                    const call_token = self.resolveCallToken(call_info.call_node);
-                                    try new_state.trackFree(var_id, call_token);
+                    if (self.resolveResourceCall(ast_node)) |call_info| {
+                        switch (call_info.kind) {
+                            .free => {
+                                if (call_info.target_expr) |arg_node| {
+                                    if (self.resolveVarIdFromExpr(arg_node, current_cfg)) |var_id| {
+                                        const call_token = self.resolveCallToken(call_info.call_node);
+                                        try new_state.trackFree(var_id, call_token);
+                                    }
+                                }
+                            },
+                            .close => {
+                                if (call_info.target_expr) |arg_node| {
+                                    if (self.resolveVarIdFromExpr(arg_node, current_cfg)) |var_id| {
+                                        const call_token = self.resolveCallToken(call_info.call_node);
+                                        try new_state.trackClose(var_id, call_token);
+                                    }
+                                }
+                            },
+                            else => {},
+                        }
+                        if (call_info.kind != .free and call_info.kind != .close) {
+                            try self.checkUseAfterFreeInCall(&new_state, ast_node, current_cfg);
+                        }
+                    } else {
+                        try self.checkUseAfterFreeInCall(&new_state, ast_node, current_cfg);
+                    }
+                    self.trackEscapesFromCall(&new_state, ast_node, current_cfg);
+                }
+            },
+            .defer_stmt => {
+                if (ir_node.ast_node) |ast_node| {
+                    try self.applyDeferredReleases(&new_state, ast_node, current_cfg);
+                }
+            },
+            .ret => {
+                if (ir_node.ast_node) |ast_node| {
+                    if (self.source) |src| {
+                        if (src.ast() catch null) |tree| {
+                            const data = tree.nodes.items(.data);
+                            if (ast_node < data.len) {
+                                if (data[ast_node].opt_node.unwrap()) |ret_expr| {
+                                    try self.checkUseAfterFreeInExpr(&new_state, @intFromEnum(ret_expr), current_cfg);
+                                    if (self.resolveVarIdFromExpr(@intFromEnum(ret_expr), current_cfg)) |var_id| {
+                                        new_state.trackEscape(var_id);
+                                    }
+                                    try self.markEscapedInExpr(&new_state, @intFromEnum(ret_expr), current_cfg);
                                 }
                             }
                         }
                     }
                 }
             },
+            .try_expr, .catch_expr => {
+                if (ir_node.ast_node) |ast_node| {
+                    try self.checkUseAfterFreeInExpr(&new_state, ast_node, current_cfg);
+                    self.trackEscapesInExpr(&new_state, ast_node, current_cfg);
+                }
+            },
+            .expr => {
+                if (ir_node.ast_node) |ast_node| {
+                    try self.checkUseAfterFreeInExpr(&new_state, ast_node, current_cfg);
+                    self.trackEscapesInExpr(&new_state, ast_node, current_cfg);
+                }
+            },
+            .fn_exit => {
+                if (current_cfg.fn_ast_node) |fn_node| {
+                    try self.escapeReturnedVars(&new_state, fn_node, current_cfg);
+                }
+                try new_state.trackLeaks();
+            },
             else => {},
         }
 
         return new_state;
+    }
+
+    fn applyDeferredReleases(self: *AnalysisEngine, state: *ProgramState, defer_node: u32, current_cfg: *const Cfg) EngineError!void {
+        const src = self.source orelse return;
+        const tree = src.ast() catch return;
+        const data = tree.nodes.items(.data);
+        if (defer_node >= data.len) return;
+        const body_node = @intFromEnum(data[defer_node].node);
+        try self.scanDeferredBody(state, body_node, current_cfg);
+    }
+
+    fn scanDeferredBody(self: *AnalysisEngine, state: *ProgramState, node: u32, current_cfg: *const Cfg) EngineError!void {
+        const src = self.source orelse return;
+        const tree = src.ast() catch return;
+        const tags = tree.nodes.items(.tag);
+        const datas = tree.nodes.items(.data);
+
+        if (node == 0 or node >= tags.len) return;
+
+        switch (tags[node]) {
+            .call, .call_comma, .call_one, .call_one_comma => {
+                if (self.resolveResourceCallFromExpr(tree, node)) |call_info| {
+                    const call_token = self.resolveCallToken(call_info.call_node);
+                    switch (call_info.kind) {
+                        .free => {
+                            if (call_info.target_expr) |arg_node| {
+                                if (self.resolveVarIdFromExpr(arg_node, current_cfg)) |var_id| {
+                                    try state.trackDeferredFree(var_id, call_token);
+                                }
+                            }
+                        },
+                        .close => {
+                            if (call_info.target_expr) |arg_node| {
+                                if (self.resolveVarIdFromExpr(arg_node, current_cfg)) |var_id| {
+                                    try state.trackDeferredClose(var_id, call_token);
+                                }
+                            }
+                        },
+                        else => {},
+                    }
+                }
+            },
+            .block, .block_semicolon, .block_two, .block_two_semicolon => {
+                var statements: []const u32 = &.{};
+                var scratch_buf: [2]u32 = undefined;
+
+                switch (tags[node]) {
+                    .block, .block_semicolon => {
+                        const extra_range = datas[node].extra_range;
+                        const start = @intFromEnum(extra_range.start);
+                        const end = @intFromEnum(extra_range.end);
+                        statements = tree.extra_data[start..end];
+                    },
+                    .block_two, .block_two_semicolon => {
+                        const opt_nodes = datas[node].opt_node_and_opt_node;
+                        var count: usize = 0;
+                        if (opt_nodes[0].unwrap()) |n| {
+                            scratch_buf[count] = @intFromEnum(n);
+                            count += 1;
+                        }
+                        if (opt_nodes[1].unwrap()) |n| {
+                            scratch_buf[count] = @intFromEnum(n);
+                            count += 1;
+                        }
+                        statements = scratch_buf[0..count];
+                    },
+                    else => {},
+                }
+
+                for (statements) |stmt| {
+                    try self.scanDeferredBody(state, stmt, current_cfg);
+                }
+            },
+            .@"if", .if_simple => {
+                const full_if = tree.fullIf(@enumFromInt(node)) orelse return;
+                try self.scanDeferredBody(state, @intFromEnum(full_if.ast.then_expr), current_cfg);
+                if (full_if.ast.else_expr.unwrap()) |else_node| {
+                    try self.scanDeferredBody(state, @intFromEnum(else_node), current_cfg);
+                }
+            },
+            .@"while", .while_simple, .while_cont => {
+                const full_while = tree.fullWhile(@enumFromInt(node)) orelse return;
+                try self.scanDeferredBody(state, @intFromEnum(full_while.ast.then_expr), current_cfg);
+                if (full_while.ast.else_expr.unwrap()) |else_node| {
+                    try self.scanDeferredBody(state, @intFromEnum(else_node), current_cfg);
+                }
+            },
+            .@"for", .for_simple => {
+                const full_for = tree.fullFor(@enumFromInt(node)) orelse return;
+                try self.scanDeferredBody(state, @intFromEnum(full_for.ast.then_expr), current_cfg);
+                if (full_for.ast.else_expr.unwrap()) |else_node| {
+                    try self.scanDeferredBody(state, @intFromEnum(else_node), current_cfg);
+                }
+            },
+            .@"switch", .switch_comma => {
+                const full_switch = tree.switchFull(@enumFromInt(node));
+                for (full_switch.ast.cases) |case_node| {
+                    const full_case = tree.fullSwitchCase(case_node) orelse continue;
+                    try self.scanDeferredBody(state, @intFromEnum(full_case.ast.target_expr), current_cfg);
+                }
+            },
+            else => {},
+        }
     }
 
     /// Get the count of pruned paths
