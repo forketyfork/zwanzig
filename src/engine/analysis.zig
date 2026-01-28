@@ -481,7 +481,8 @@ pub const AnalysisEngine = struct {
         }
 
         if (std.mem.eql(u8, field_name, "close")) {
-            return .{ .kind = .close, .target_expr = base_node, .call_node = call_ast_node };
+            const target_expr = first_arg orelse base_node;
+            return .{ .kind = .close, .target_expr = target_expr, .call_node = call_ast_node };
         }
         return null;
     }
@@ -1627,21 +1628,50 @@ pub const AnalysisEngine = struct {
             },
             .@"if", .if_simple => {
                 const full_if = tree.fullIf(@enumFromInt(node)) orelse return;
-                try self.scanDeferredBody(state, @intFromEnum(full_if.ast.then_expr), current_cfg);
+                if (full_if.payload_token) |tok| {
+                    try self.bindPayloadAlias(state, tok, @intFromEnum(full_if.ast.cond_expr), current_cfg);
+                    try self.scanDeferredBody(state, @intFromEnum(full_if.ast.then_expr), current_cfg);
+                    state.resetRegion(ids.varId(tok));
+                } else {
+                    try self.scanDeferredBody(state, @intFromEnum(full_if.ast.then_expr), current_cfg);
+                }
                 if (full_if.ast.else_expr.unwrap()) |else_node| {
-                    try self.scanDeferredBody(state, @intFromEnum(else_node), current_cfg);
+                    if (full_if.error_token) |tok| {
+                        try self.bindPayloadUnknown(state, tok);
+                        try self.scanDeferredBody(state, @intFromEnum(else_node), current_cfg);
+                        state.resetRegion(ids.varId(tok));
+                    } else {
+                        try self.scanDeferredBody(state, @intFromEnum(else_node), current_cfg);
+                    }
                 }
             },
             .@"while", .while_simple, .while_cont => {
                 const full_while = tree.fullWhile(@enumFromInt(node)) orelse return;
-                try self.scanDeferredBody(state, @intFromEnum(full_while.ast.then_expr), current_cfg);
+                if (full_while.payload_token) |tok| {
+                    try self.bindPayloadAlias(state, tok, @intFromEnum(full_while.ast.cond_expr), current_cfg);
+                    try self.scanDeferredBody(state, @intFromEnum(full_while.ast.then_expr), current_cfg);
+                    state.resetRegion(ids.varId(tok));
+                } else {
+                    try self.scanDeferredBody(state, @intFromEnum(full_while.ast.then_expr), current_cfg);
+                }
                 if (full_while.ast.else_expr.unwrap()) |else_node| {
-                    try self.scanDeferredBody(state, @intFromEnum(else_node), current_cfg);
+                    if (full_while.error_token) |tok| {
+                        try self.bindPayloadUnknown(state, tok);
+                        try self.scanDeferredBody(state, @intFromEnum(else_node), current_cfg);
+                        state.resetRegion(ids.varId(tok));
+                    } else {
+                        try self.scanDeferredBody(state, @intFromEnum(else_node), current_cfg);
+                    }
                 }
             },
             .@"for", .for_simple => {
                 const full_for = tree.fullFor(@enumFromInt(node)) orelse return;
-                try self.scanDeferredBody(state, @intFromEnum(full_for.ast.then_expr), current_cfg);
+                if (full_for.payload_token != 0) {
+                    try self.bindForPayloads(state, full_for.payload_token);
+                    try self.scanDeferredBody(state, @intFromEnum(full_for.ast.then_expr), current_cfg);
+                } else {
+                    try self.scanDeferredBody(state, @intFromEnum(full_for.ast.then_expr), current_cfg);
+                }
                 if (full_for.ast.else_expr.unwrap()) |else_node| {
                     try self.scanDeferredBody(state, @intFromEnum(else_node), current_cfg);
                 }
