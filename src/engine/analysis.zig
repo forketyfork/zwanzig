@@ -776,6 +776,16 @@ pub const AnalysisEngine = struct {
                     try self.markEscapedInExpr(state, @intFromEnum(field), current_cfg);
                 }
             },
+            .container_field, .container_field_init, .container_field_align => {
+                const field = tree.fullContainerField(@enumFromInt(expr_node)) orelse return;
+                if (field.ast.value_expr.unwrap()) |value_expr| {
+                    try self.markEscapedInExpr(state, @intFromEnum(value_expr), current_cfg);
+                } else if (field.ast.tuple_like) {
+                    if (field.ast.type_expr.unwrap()) |value_expr| {
+                        try self.markEscapedInExpr(state, @intFromEnum(value_expr), current_cfg);
+                    }
+                }
+            },
             .array_init, .array_init_comma, .array_init_one, .array_init_one_comma, .array_init_dot, .array_init_dot_comma, .array_init_dot_two, .array_init_dot_two_comma => {
                 var buf: [2]std.zig.Ast.Node.Index = undefined;
                 const array_init = tree.fullArrayInit(&buf, @enumFromInt(expr_node)) orelse return;
@@ -817,9 +827,7 @@ pub const AnalysisEngine = struct {
         {
             if (full_call.ast.params.len == 0) return;
             const item_node = @intFromEnum(full_call.ast.params[full_call.ast.params.len - 1]);
-            if (self.resolveVarIdFromExpr(item_node, current_cfg)) |var_id| {
-                state.trackEscape(var_id);
-            }
+            self.markEscapedInExpr(state, item_node, current_cfg) catch return;
             return;
         }
 
@@ -830,15 +838,11 @@ pub const AnalysisEngine = struct {
         {
             if (full_call.ast.params.len >= 1) {
                 const key_node = @intFromEnum(full_call.ast.params[0]);
-                if (self.resolveVarIdFromExpr(key_node, current_cfg)) |var_id| {
-                    state.trackEscape(var_id);
-                }
+                self.markEscapedInExpr(state, key_node, current_cfg) catch return;
             }
             if (full_call.ast.params.len >= 2) {
                 const value_node = @intFromEnum(full_call.ast.params[1]);
-                if (self.resolveVarIdFromExpr(value_node, current_cfg)) |var_id| {
-                    state.trackEscape(var_id);
-                }
+                self.markEscapedInExpr(state, value_node, current_cfg) catch return;
             }
         }
     }

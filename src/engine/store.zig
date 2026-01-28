@@ -230,8 +230,53 @@ pub const Store = struct {
             return;
         }
         const root = self.canonical(region);
-        _ = self.resources.remove(root);
-        _ = self.deferred.remove(root);
+        var has_alias = false;
+        var new_root: VarId = root;
+        var iter = self.aliases.iterator();
+        while (iter.next()) |entry| {
+            if (entry.value_ptr.* == root) {
+                if (!has_alias) {
+                    has_alias = true;
+                    new_root = entry.key_ptr.*;
+                } else if (ids.varIndex(entry.key_ptr.*) < ids.varIndex(new_root)) {
+                    new_root = entry.key_ptr.*;
+                }
+            }
+        }
+
+        if (!has_alias) {
+            _ = self.resources.remove(root);
+            _ = self.deferred.remove(root);
+            return;
+        }
+
+        if (self.resources.get(root)) |state| {
+            _ = self.resources.remove(root);
+            _ = self.resources.remove(new_root);
+            self.resources.put(new_root, state) catch {
+                _ = self.resources.remove(new_root);
+            };
+        } else {
+            _ = self.resources.remove(new_root);
+        }
+
+        if (self.deferred.get(root)) |action| {
+            _ = self.deferred.remove(root);
+            _ = self.deferred.remove(new_root);
+            self.deferred.put(new_root, action) catch {
+                _ = self.deferred.remove(new_root);
+            };
+        } else {
+            _ = self.deferred.remove(new_root);
+        }
+
+        var update_iter = self.aliases.iterator();
+        while (update_iter.next()) |entry| {
+            if (entry.value_ptr.* == root) {
+                entry.value_ptr.* = new_root;
+            }
+        }
+        _ = self.aliases.remove(new_root);
     }
 
     pub fn escapeRegion(self: *Store, region: VarId) void {
@@ -489,6 +534,28 @@ test "Store records use after free violations" {
 
     try testing.expectEqual(@as(usize, 1), store.violationCount());
     try testing.expectEqual(StoreViolationKind.use_after_free, store.getViolations()[0].kind);
+}
+
+test "Store preserves alias state when resetting root" {
+    const testing = std.testing;
+    const allocator = testing.allocator;
+
+    var store = Store.init(allocator);
+    defer store.deinit();
+
+    const root = ids.varId(21);
+    const alias_a = ids.varId(22);
+    const alias_b = ids.varId(23);
+
+    try store.markAllocated(root);
+    try store.aliasRegion(alias_a, root);
+    try store.aliasRegion(alias_b, root);
+
+    store.resetRegion(root);
+
+    try testing.expectEqual(ResourceState.allocated, store.getState(alias_a).?);
+    try testing.expectEqual(ResourceState.allocated, store.getState(alias_b).?);
+    try testing.expect(store.getState(root) == null);
 }
 
 test "Store records leaks for allocated resources" {
