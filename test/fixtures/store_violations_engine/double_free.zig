@@ -6,4 +6,4 @@ fn foo(allocator: std.mem.Allocator) !void {
     allocator.free(ptr);
 }
 
-// EXPECT: rule=store-violations-engine severity=error message=double-free
+// EXPECT: line=6 rule=store-violations-engine severity=error message=double-free

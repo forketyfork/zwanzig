@@ -377,12 +377,19 @@ pub const AnalysisEngine = struct {
     const AllocatorCall = struct {
         kind: AllocatorCallKind,
         first_arg: ?u32,
+        call_node: u32,
     };
 
     fn resolveAllocatorCall(self: *AnalysisEngine, expr_node: u32) ?AllocatorCall {
         const src = self.source orelse return null;
         const tree = src.ast() catch return null;
         return self.resolveAllocatorCallFromExpr(tree, expr_node);
+    }
+
+    fn isDefinitelyNonAlloc(self: *AnalysisEngine, expr_node: u32) bool {
+        const src = self.source orelse return false;
+        const tree = src.ast() catch return false;
+        return self.isDefinitelyNonAllocExpr(tree, expr_node);
     }
 
     fn resolveAllocatorCallFromExpr(self: *AnalysisEngine, tree: *const std.zig.Ast, expr_node: u32) ?AllocatorCall {
@@ -431,18 +438,26 @@ pub const AnalysisEngine = struct {
         if (field_token >= token_tags.len or token_tags[field_token] != .identifier) return null;
         const field_name = tree.tokenSlice(field_token);
 
-        if (!self.isAllocatorBase(tree, base_node)) return null;
-
         const first_arg: ?u32 = if (full_call.ast.params.len > 0)
             @intFromEnum(full_call.ast.params[0])
         else
             null;
 
-        if (std.mem.eql(u8, field_name, "alloc")) {
-            return .{ .kind = .alloc, .first_arg = first_arg };
+        if (self.isAllocatorBase(tree, base_node)) {
+            if (std.mem.eql(u8, field_name, "alloc") or std.mem.eql(u8, field_name, "dupe")) {
+                return .{ .kind = .alloc, .first_arg = first_arg, .call_node = call_ast_node };
+            }
+            if (std.mem.eql(u8, field_name, "free")) {
+                return .{ .kind = .free, .first_arg = first_arg, .call_node = call_ast_node };
+            }
         }
-        if (std.mem.eql(u8, field_name, "free")) {
-            return .{ .kind = .free, .first_arg = first_arg };
+
+        if (std.mem.eql(u8, field_name, "allocPrint")) {
+            if (first_arg) |arg_node| {
+                if (self.isAllocatorBase(tree, arg_node)) {
+                    return .{ .kind = .alloc, .first_arg = first_arg, .call_node = call_ast_node };
+                }
+            }
         }
         return null;
     }
@@ -578,6 +593,52 @@ pub const AnalysisEngine = struct {
             return @intFromEnum(init_node);
         }
         return null;
+    }
+
+    fn isDefinitelyNonAllocExpr(self: *AnalysisEngine, tree: *const std.zig.Ast, expr_node: u32) bool {
+        if (self.resolveAllocatorCallFromExpr(tree, expr_node) != null) return false;
+
+        const tags = tree.nodes.items(.tag);
+        const datas = tree.nodes.items(.data);
+
+        if (expr_node >= tags.len) return false;
+        return switch (tags[expr_node]) {
+            .slice,
+            .slice_open,
+            .slice_sentinel,
+            .address_of,
+            .array_mult,
+            .array_cat,
+            .array_init,
+            .array_init_comma,
+            .array_init_one,
+            .array_init_one_comma,
+            .array_init_dot,
+            .array_init_dot_comma,
+            .array_init_dot_two,
+            .array_init_dot_two_comma,
+            => true,
+            .grouped_expression, .unwrap_optional => blk: {
+                const data = datas[expr_node].node_and_token;
+                break :blk self.isDefinitelyNonAllocExpr(tree, @intFromEnum(data[0]));
+            },
+            .@"try" => self.isDefinitelyNonAllocExpr(tree, @intFromEnum(datas[expr_node].node)),
+            .@"catch" => blk: {
+                const pair = datas[expr_node].node_and_node;
+                const left = self.isDefinitelyNonAllocExpr(tree, @intFromEnum(pair[0]));
+                const right = self.isDefinitelyNonAllocExpr(tree, @intFromEnum(pair[1]));
+                break :blk left and right;
+            },
+            else => false,
+        };
+    }
+
+    fn resolveCallToken(self: *AnalysisEngine, call_node: u32) ?u32 {
+        const src = self.source orelse return null;
+        const tree = src.ast() catch return null;
+        const main_tokens = tree.nodes.items(.main_token);
+        if (call_node >= main_tokens.len) return null;
+        return main_tokens[call_node];
     }
 
     fn processNode(self: *AnalysisEngine, node_index: u32, edge_kind: EdgeKind, pending_constraint: ?Constraint, current_cfg: *const Cfg) EngineError!void {
@@ -866,7 +927,6 @@ pub const AnalysisEngine = struct {
     /// Extract a constraint from a branch node's condition.
     /// Returns null if no constraint can be extracted.
     fn extractBranchConstraint(self: *AnalysisEngine, cfg_node: *const CfgNode) ?Constraint {
-        _ = self;
         // The branch node has ast_node pointing to the if expression
         // In a more complete implementation, we would analyze the condition expression
         // to extract constraints like "x == 5" or "x != null"
@@ -879,7 +939,10 @@ pub const AnalysisEngine = struct {
         // more detailed information about branch conditions.
         const ir_node = cfg_node.ir_node;
         if (ir_node.operand_node) |var_id| {
-            const var_key = ids.varId(var_id);
+            const var_key = if (self.source != null)
+                (self.resolveVarIdFromExpr(var_id) orelse ids.varId(var_id))
+            else
+                ids.varId(var_id);
             if (ir_node.operand2_node) |cmp_info| {
                 // Interpret operand2_node as encoded comparison info:
                 // High 32 bits of the value represent the comparison constant
@@ -911,6 +974,8 @@ pub const AnalysisEngine = struct {
                             if (call_info.kind == .alloc) {
                                 try new_state.trackAllocation(var_id);
                             }
+                        } else if (self.isDefinitelyNonAlloc(init_node)) {
+                            try new_state.trackNonAllocation(var_id);
                         }
                     }
                 }
@@ -927,6 +992,8 @@ pub const AnalysisEngine = struct {
                             if (call_info.kind == .alloc) {
                                 try new_state.trackAllocation(var_id);
                             }
+                        } else if (self.isDefinitelyNonAlloc(rhs_node)) {
+                            try new_state.trackNonAllocation(var_id);
                         }
                     }
                 }
@@ -945,7 +1012,8 @@ pub const AnalysisEngine = struct {
                         if (call_info.kind == .free) {
                             if (call_info.first_arg) |arg_node| {
                                 if (self.resolveVarIdFromExpr(arg_node)) |var_id| {
-                                    try new_state.trackFree(var_id);
+                                    const call_token = self.resolveCallToken(call_info.call_node);
+                                    try new_state.trackFree(var_id, call_token);
                                 }
                             }
                         }

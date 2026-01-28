@@ -89,10 +89,11 @@ pub const StoreViolationsEngineChecker = struct {
     ) CheckerError!void {
         const message = switch (violation.kind) {
             .double_free => "double-free detected for resource",
-            .free_without_alloc => return,
+            .free_without_alloc => "free without tracked allocation",
         };
 
-        const loc = src.tokenLocation(ids.varIndex(violation.region)) catch |err| {
+        const token = violation.call_token orelse ids.varIndex(violation.region);
+        const loc = src.tokenLocation(token) catch |err| {
             log.warn("failed to map store violation location: {}", .{err});
             return;
         };
@@ -139,4 +140,34 @@ test "store_violations_engine reports double free" {
     try testing.expectEqual(@as(usize, 1), diagnostics.items.len);
     try testing.expectEqualStrings("store-violations-engine", diagnostics.items[0].rule_id);
     try testing.expect(std.mem.indexOf(u8, diagnostics.items[0].message, "double-free") != null);
+}
+
+test "store_violations_engine reports free without alloc" {
+    const testing = std.testing;
+    const allocator = testing.allocator;
+
+    const code: [:0]const u8 =
+        \\const std = @import("std");
+        \\fn foo(allocator: std.mem.Allocator) void {
+        \\    var buf = [_]u8{0};
+        \\    var ptr = buf[0..];
+        \\    allocator.free(ptr);
+        \\}
+    ;
+
+    var source = Source.init(allocator, "test.zig", code);
+    defer source.deinit();
+
+    var diagnostics: std.ArrayList(Diagnostic) = .empty;
+    defer {
+        for (diagnostics.items) |*diag| {
+            diag.deinit(allocator);
+        }
+        diagnostics.deinit(allocator);
+    }
+
+    try StoreViolationsEngineChecker.checker.checkAst(&source, allocator, &diagnostics, .{ .build_metadata = null, .type_context = null });
+    try testing.expectEqual(@as(usize, 1), diagnostics.items.len);
+    try testing.expectEqualStrings("store-violations-engine", diagnostics.items[0].rule_id);
+    try testing.expect(std.mem.indexOf(u8, diagnostics.items[0].message, "free without tracked allocation") != null);
 }

@@ -10,4 +10,4 @@ const Foo = struct {
     }
 };
 
-// EXPECT: rule=store-violations-engine severity=error message=double-free
+// EXPECT: line=9 rule=store-violations-engine severity=error message=double-free

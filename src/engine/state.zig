@@ -218,8 +218,14 @@ pub const ProgramState = struct {
     }
 
     /// Track a resource free for a region.
-    pub fn trackFree(self: *ProgramState, region: VarId) !void {
-        try self.store.markFreed(region);
+    pub fn trackFree(self: *ProgramState, region: VarId, call_token: ?u32) !void {
+        try self.store.markFreed(region, call_token);
+        self.invalidateCache();
+    }
+
+    /// Track a resource known to be non-allocated.
+    pub fn trackNonAllocation(self: *ProgramState, region: VarId) !void {
+        try self.store.markNonAllocated(region);
         self.invalidateCache();
     }
 
@@ -618,7 +624,7 @@ test "ProgramState store tracks allocation/free" {
     try state.trackAllocation(region);
     try testing.expectEqual(ResourceState.allocated, state.getRegionState(region).?);
 
-    try state.trackFree(region);
+    try state.trackFree(region, 1);
     try testing.expectEqual(ResourceState.freed, state.getRegionState(region).?);
     try testing.expectEqual(@as(usize, 0), state.getStoreViolations().len);
 }

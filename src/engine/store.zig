@@ -7,6 +7,7 @@ pub const ResourceState = enum {
     unknown,
     allocated,
     freed,
+    non_allocated,
     open,
     closed,
 };
@@ -19,9 +20,10 @@ pub const StoreViolationKind = enum {
 pub const StoreViolation = struct {
     region: VarId,
     kind: StoreViolationKind,
+    call_token: ?u32,
 
     pub fn eql(self: StoreViolation, other: StoreViolation) bool {
-        return self.region == other.region and self.kind == other.kind;
+        return self.region == other.region and self.kind == other.kind and self.call_token == other.call_token;
     }
 
     pub fn hash(self: StoreViolation) u64 {
@@ -29,6 +31,11 @@ pub const StoreViolation = struct {
         const region_index = ids.varIndex(self.region);
         hasher.update(std.mem.asBytes(&region_index));
         hasher.update(std.mem.asBytes(&self.kind));
+        const has_token: u8 = if (self.call_token) |_| 1 else 0;
+        hasher.update(std.mem.asBytes(&has_token));
+        if (self.call_token) |token| {
+            hasher.update(std.mem.asBytes(&token));
+        }
         return hasher.final();
     }
 };
@@ -120,18 +127,25 @@ pub const Store = struct {
         try self.resources.put(region, .allocated);
     }
 
-    pub fn markFreed(self: *Store, region: VarId) !void {
+    pub fn markNonAllocated(self: *Store, region: VarId) !void {
+        try self.resources.put(region, .non_allocated);
+    }
+
+    pub fn markFreed(self: *Store, region: VarId, call_token: ?u32) !void {
         if (self.resources.get(region)) |state| {
             switch (state) {
                 .freed => {
-                    try self.recordViolation(region, .double_free);
+                    try self.recordViolation(region, .double_free, call_token);
+                },
+                .non_allocated => {
+                    try self.recordViolation(region, .free_without_alloc, call_token);
+                },
+                .allocated => {
+                    try self.resources.put(region, .freed);
                 },
                 else => {},
             }
-        }
-
-        if (self.resources.contains(region)) {
-            try self.resources.put(region, .freed);
+            return;
         }
     }
 
@@ -143,10 +157,11 @@ pub const Store = struct {
         return self.violations.items;
     }
 
-    fn recordViolation(self: *Store, region: VarId, kind: StoreViolationKind) !void {
+    fn recordViolation(self: *Store, region: VarId, kind: StoreViolationKind, call_token: ?u32) !void {
         try self.violations.append(self.allocator, .{
             .region = region,
             .kind = kind,
+            .call_token = call_token,
         });
     }
 };
@@ -163,7 +178,7 @@ test "Store tracks allocation/free transitions" {
     try store.markAllocated(region);
     try testing.expectEqual(ResourceState.allocated, store.getState(region).?);
 
-    try store.markFreed(region);
+    try store.markFreed(region, 1);
     try testing.expectEqual(ResourceState.freed, store.getState(region).?);
     try testing.expectEqual(@as(usize, 0), store.violationCount());
 }
@@ -178,12 +193,29 @@ test "Store records double free violations" {
     const region = ids.varId(11);
 
     try store.markAllocated(region);
-    try store.markFreed(region);
-    try store.markFreed(region);
+    try store.markFreed(region, 1);
+    try store.markFreed(region, 2);
 
     try testing.expectEqual(ResourceState.freed, store.getState(region).?);
     try testing.expectEqual(@as(usize, 1), store.violationCount());
     try testing.expectEqual(StoreViolationKind.double_free, store.getViolations()[0].kind);
+}
+
+test "Store records free without alloc violations" {
+    const testing = std.testing;
+    const allocator = testing.allocator;
+
+    var store = Store.init(allocator);
+    defer store.deinit();
+
+    const region = ids.varId(13);
+
+    try store.markNonAllocated(region);
+    try store.markFreed(region, 1);
+
+    try testing.expectEqual(ResourceState.non_allocated, store.getState(region).?);
+    try testing.expectEqual(@as(usize, 1), store.violationCount());
+    try testing.expectEqual(StoreViolationKind.free_without_alloc, store.getViolations()[0].kind);
 }
 
 test "Store hash accounts for repeated violations" {
@@ -196,11 +228,11 @@ test "Store hash accounts for repeated violations" {
     const region = ids.varId(12);
 
     try store.markAllocated(region);
-    try store.markFreed(region);
-    try store.markFreed(region);
+    try store.markFreed(region, 1);
+    try store.markFreed(region, 2);
     const hash_after_double = store.computeHash();
 
-    try store.markFreed(region);
+    try store.markFreed(region, 3);
     const hash_after_triple = store.computeHash();
 
     try testing.expect(hash_after_double != hash_after_triple);
