@@ -447,6 +447,10 @@ pub const AnalysisEngine = struct {
         if (tags[identifier_node] != .identifier) return null;
         const token = main_tokens[identifier_node];
         if (token >= token_tags.len or token_tags[token] != .identifier) return null;
+        const name = tree.tokenSlice(token);
+        if (self.resolveDeclTokenForName(name, token)) |decl_token| {
+            return ids.varId(decl_token);
+        }
         return ids.varId(token);
     }
 
@@ -465,6 +469,58 @@ pub const AnalysisEngine = struct {
             },
             else => null,
         };
+    }
+
+    fn resolveDeclTokenForName(self: *AnalysisEngine, name: []const u8, ident_token: u32) ?u32 {
+        const src = self.source orelse return null;
+        const tree = src.ast() catch return null;
+        const tags = tree.nodes.items(.tag);
+        const token_tags = tree.tokens.items(.tag);
+
+        var best_token: ?u32 = null;
+
+        for (tags, 0..) |tag, i| {
+            switch (tag) {
+                .simple_var_decl,
+                .aligned_var_decl,
+                .local_var_decl,
+                .global_var_decl,
+                => {
+                    const full = tree.fullVarDecl(@enumFromInt(i)) orelse continue;
+                    const name_token = full.ast.mut_token + 1;
+                    if (name_token >= token_tags.len or token_tags[name_token] != .identifier) continue;
+                    if (name_token >= ident_token) continue;
+                    const decl_name = tree.tokenSlice(name_token);
+                    if (!std.mem.eql(u8, decl_name, name)) continue;
+                    if (best_token == null or name_token > best_token.?) {
+                        best_token = name_token;
+                    }
+                },
+                .fn_decl,
+                .fn_proto,
+                .fn_proto_multi,
+                .fn_proto_one,
+                .fn_proto_simple,
+                => {
+                    var buf: [1]std.zig.Ast.Node.Index = undefined;
+                    const full = tree.fullFnProto(&buf, @enumFromInt(i)) orelse continue;
+                    var it = full.iterate(tree);
+                    while (it.next()) |param| {
+                        const name_token = param.name_token orelse continue;
+                        if (name_token >= token_tags.len or token_tags[name_token] != .identifier) continue;
+                        if (name_token >= ident_token) continue;
+                        const decl_name = tree.tokenSlice(name_token);
+                        if (!std.mem.eql(u8, decl_name, name)) continue;
+                        if (best_token == null or name_token > best_token.?) {
+                            best_token = name_token;
+                        }
+                    }
+                },
+                else => {},
+            }
+        }
+
+        return best_token;
     }
 
     fn resolveVarDeclInitNode(self: *AnalysisEngine, var_decl_node: u32) ?u32 {
@@ -1334,14 +1390,21 @@ test "AnalysisEngine store tracks allocator alloc/free" {
         if (tag == .fn_decl) {
             fn_node = ids.astId(@intCast(i));
         }
-        if (tag == .var_decl) {
-            const full = tree.fullVarDecl(@enumFromInt(i)) orelse continue;
-            const name_token = full.ast.mut_token + 1;
-            if (name_token >= token_tags.len or token_tags[name_token] != .identifier) continue;
-            const name = tree.tokenSlice(name_token);
-            if (std.mem.eql(u8, name, "ptr")) {
-                ptr_var_id = ids.varId(name_token);
-            }
+        switch (tag) {
+            .simple_var_decl,
+            .aligned_var_decl,
+            .local_var_decl,
+            .global_var_decl,
+            => {
+                const full = tree.fullVarDecl(@enumFromInt(i)) orelse continue;
+                const name_token = full.ast.mut_token + 1;
+                if (name_token >= token_tags.len or token_tags[name_token] != .identifier) continue;
+                const name = tree.tokenSlice(name_token);
+                if (std.mem.eql(u8, name, "ptr")) {
+                    ptr_var_id = ids.varId(name_token);
+                }
+            },
+            else => {},
         }
     }
     const fn_idx = fn_node orelse return;
@@ -1358,12 +1421,14 @@ test "AnalysisEngine store tracks allocator alloc/free" {
         try engine.run();
 
         var call_node_id: ?CfgNodeId = null;
+        var call_count: usize = 0;
         for (cfg.nodes.items) |node| {
             if (node.ir_node.tag == .call) {
                 call_node_id = node.index;
-                break;
+                call_count += 1;
             }
         }
+        try testing.expect(call_count >= 1);
         const call_id = call_node_id orelse return;
 
         var found = false;
@@ -1407,14 +1472,21 @@ test "AnalysisEngine store records double free violations" {
         if (tag == .fn_decl) {
             fn_node = ids.astId(@intCast(i));
         }
-        if (tag == .var_decl) {
-            const full = tree.fullVarDecl(@enumFromInt(i)) orelse continue;
-            const name_token = full.ast.mut_token + 1;
-            if (name_token >= token_tags.len or token_tags[name_token] != .identifier) continue;
-            const name = tree.tokenSlice(name_token);
-            if (std.mem.eql(u8, name, "ptr")) {
-                ptr_var_id = ids.varId(name_token);
-            }
+        switch (tag) {
+            .simple_var_decl,
+            .aligned_var_decl,
+            .local_var_decl,
+            .global_var_decl,
+            => {
+                const full = tree.fullVarDecl(@enumFromInt(i)) orelse continue;
+                const name_token = full.ast.mut_token + 1;
+                if (name_token >= token_tags.len or token_tags[name_token] != .identifier) continue;
+                const name = tree.tokenSlice(name_token);
+                if (std.mem.eql(u8, name, "ptr")) {
+                    ptr_var_id = ids.varId(name_token);
+                }
+            },
+            else => {},
         }
     }
     const fn_idx = fn_node orelse return;
@@ -1430,18 +1502,16 @@ test "AnalysisEngine store records double free violations" {
 
         try engine.run();
 
-        var call_nodes: [2]CfgNodeId = undefined;
+        var call_node_id: ?CfgNodeId = null;
         var call_count: usize = 0;
         for (cfg.nodes.items) |node| {
             if (node.ir_node.tag == .call) {
-                if (call_count < call_nodes.len) {
-                    call_nodes[call_count] = node.index;
-                }
+                call_node_id = node.index;
                 call_count += 1;
             }
         }
-        if (call_count < 2) return;
-        const second_call = call_nodes[1];
+        try testing.expect(call_count >= 2);
+        const second_call = call_node_id orelse return;
 
         var found = false;
         for (engine.getGraph().nodes.items) |node| {
