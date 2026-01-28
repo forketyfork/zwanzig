@@ -23,5 +23,4 @@ fn spawn() !void {
     _ = pty.master;
 }
 
-// NOTE: Known false positive - fields are closed, but the resource is tracked on pty.
-// EXPECT: line=18 rule=store-violations-engine severity=error message=resource leak
+// EXPECT: none

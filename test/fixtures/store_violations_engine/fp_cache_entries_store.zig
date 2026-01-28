@@ -32,5 +32,4 @@ fn example() !void {
     _ = cache.entries.len;
 }
 
-// NOTE: Known false positive - entries escape via returned cache value.
-// EXPECT: line=18 rule=store-violations-engine severity=error message=resource leak
+// EXPECT: none

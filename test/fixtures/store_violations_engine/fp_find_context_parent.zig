@@ -40,6 +40,4 @@ fn findContext(allocator: std.mem.Allocator, start: []const u8) !?Context {
     return null;
 }
 
-// NOTE: Known false positive - loop reassigns and frees current.
-// EXPECT: line=14 rule=store-violations-engine severity=error message=resource leak
-// EXPECT: line=34 rule=store-violations-engine severity=error message=resource leak
+// EXPECT: none

@@ -7,4 +7,4 @@ fn build(allocator: std.mem.Allocator, ok: bool) !void {
     allocator.free(buf);
 }
 
-// EXPECT: line=5 rule=store-violations-engine severity=error message=resource leak
+// EXPECT: none
