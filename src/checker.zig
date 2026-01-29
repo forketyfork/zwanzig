@@ -18,6 +18,8 @@ pub const AnalysisStats = struct {
     total_runs: u64 = 0,
     runs_with_drops: u64 = 0,
     dropped_states: u64 = 0,
+    widened_nodes: u64 = 0,
+    widening_converged: u64 = 0,
 
     pub fn recordRun(self: *AnalysisStats, dropped_states: u32) void {
         self.total_runs += 1;
@@ -26,11 +28,17 @@ pub const AnalysisStats = struct {
             self.dropped_states += dropped_states;
         }
     }
+
+    pub fn recordWidening(self: *AnalysisStats, widened: u32, converged: u32) void {
+        self.widened_nodes += widened;
+        self.widening_converged += converged;
+    }
 };
 
 pub const AnalysisLimits = struct {
     max_worklist_steps: ?usize = null,
     max_states_per_point: ?u32 = null,
+    use_widening: ?bool = null,
 };
 
 /// Context passed to checkers providing access to analyzer-level configuration

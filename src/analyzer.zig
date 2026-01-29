@@ -33,6 +33,7 @@ pub const Analyzer = struct {
     analysis_stats: checker_mod.AnalysisStats = .{},
     max_worklist_steps: ?usize = null,
     max_states_per_point: ?u32 = null,
+    use_widening: ?bool = null,
     config: ?Config = null,
 
     pub fn init(allocator: std.mem.Allocator) Analyzer {
@@ -121,6 +122,10 @@ pub const Analyzer = struct {
         self.max_states_per_point = max;
     }
 
+    pub fn setUseWidening(self: *Analyzer, use_w: bool) void {
+        self.use_widening = use_w;
+    }
+
     /// Set the config for resource models and other settings.
     pub fn setConfig(self: *Analyzer, cfg: Config) void {
         self.config = cfg;
@@ -142,6 +147,13 @@ pub const Analyzer = struct {
     }
 
     pub fn logAnalysisStats(self: *const Analyzer) void {
+        if (self.analysis_stats.widened_nodes > 0 or self.analysis_stats.widening_converged > 0) {
+            log.info("widening: {d} node(s) widened, {d} converged across {d} engine run(s)", .{
+                self.analysis_stats.widened_nodes,
+                self.analysis_stats.widening_converged,
+                self.analysis_stats.total_runs,
+            });
+        }
         if (self.analysis_stats.runs_with_drops == 0) return;
         log.warn("dropped {d} state(s) due to per-point limit across {d} engine run(s) (total runs {d})", .{
             self.analysis_stats.dropped_states,
@@ -318,6 +330,7 @@ pub const Analyzer = struct {
             .analysis_limits = .{
                 .max_worklist_steps = self.max_worklist_steps,
                 .max_states_per_point = self.max_states_per_point,
+                .use_widening = self.use_widening,
             },
             .config = self.getConfig(),
         };

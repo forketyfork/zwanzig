@@ -77,6 +77,43 @@ pub const Environment = struct {
 
         return combined_hash;
     }
+
+    /// Widening operator for environments.
+    /// Used at loop headers to ensure convergence.
+    /// - Union of variables from both environments.
+    /// - For variables in both: widen the values.
+    /// - For variables in only one side: set to `unknown`.
+    pub fn widen(self: *const Environment, other: *const Environment) !Environment {
+        var result = Environment.init(self.allocator);
+        errdefer result.deinit();
+
+        // Process variables from self
+        var self_iter = self.bindings.iterator();
+        while (self_iter.next()) |entry| {
+            const var_id = entry.key_ptr.*;
+            const self_val = entry.value_ptr.*;
+
+            if (other.bindings.get(var_id)) |other_val| {
+                // Variable exists in both: widen
+                try result.bindings.put(var_id, self_val.widen(other_val));
+            } else {
+                // Variable only in self: widen to unknown
+                try result.bindings.put(var_id, .unknown);
+            }
+        }
+
+        // Process variables only in other (not in self)
+        var other_iter = other.bindings.iterator();
+        while (other_iter.next()) |entry| {
+            const var_id = entry.key_ptr.*;
+            if (!self.bindings.contains(var_id)) {
+                // Variable only in other: set to unknown
+                try result.bindings.put(var_id, .unknown);
+            }
+        }
+
+        return result;
+    }
 };
 
 test "Environment operations" {
@@ -121,4 +158,94 @@ test "Environment equality and cloning" {
 
     try env2.set(ids.varId(1), .{ .concrete_int = 20 });
     try testing.expect(!env1.eql(&env2));
+}
+
+test "Environment widen with overlapping variables" {
+    const testing = std.testing;
+    const allocator = testing.allocator;
+
+    var env1 = Environment.init(allocator);
+    defer env1.deinit();
+
+    var env2 = Environment.init(allocator);
+    defer env2.deinit();
+
+    // Same variable, same value -> preserved
+    try env1.set(ids.varId(1), .{ .concrete_int = 10 });
+    try env2.set(ids.varId(1), .{ .concrete_int = 10 });
+
+    // Same variable, different value -> widened
+    try env1.set(ids.varId(2), .{ .concrete_int = 20 });
+    try env2.set(ids.varId(2), .{ .concrete_int = 30 });
+
+    var widened = try env1.widen(&env2);
+    defer widened.deinit();
+
+    // var1 should be preserved (same value)
+    const val1 = widened.get(ids.varId(1));
+    try testing.expect(val1 != null);
+    try testing.expect(val1.?.eql(.{ .concrete_int = 10 }));
+
+    // var2 should be widened to unknown (different concrete ints)
+    const val2 = widened.get(ids.varId(2));
+    try testing.expect(val2 != null);
+    try testing.expect(val2.?.isUnknown());
+}
+
+test "Environment widen with disjoint variables" {
+    const testing = std.testing;
+    const allocator = testing.allocator;
+
+    var env1 = Environment.init(allocator);
+    defer env1.deinit();
+
+    var env2 = Environment.init(allocator);
+    defer env2.deinit();
+
+    // Variable only in env1
+    try env1.set(ids.varId(1), .{ .concrete_int = 10 });
+
+    // Variable only in env2
+    try env2.set(ids.varId(2), .{ .concrete_int = 20 });
+
+    var widened = try env1.widen(&env2);
+    defer widened.deinit();
+
+    // Both variables should be present but widened to unknown
+    try testing.expectEqual(@as(usize, 2), widened.size());
+
+    const val1 = widened.get(ids.varId(1));
+    try testing.expect(val1 != null);
+    try testing.expect(val1.?.isUnknown());
+
+    const val2 = widened.get(ids.varId(2));
+    try testing.expect(val2 != null);
+    try testing.expect(val2.?.isUnknown());
+}
+
+test "Environment widen with empty environments" {
+    const testing = std.testing;
+    const allocator = testing.allocator;
+
+    var env1 = Environment.init(allocator);
+    defer env1.deinit();
+
+    var env2 = Environment.init(allocator);
+    defer env2.deinit();
+
+    // Both empty
+    var widened1 = try env1.widen(&env2);
+    defer widened1.deinit();
+    try testing.expectEqual(@as(usize, 0), widened1.size());
+
+    // One has values, one empty
+    try env1.set(ids.varId(1), .{ .concrete_int = 10 });
+
+    var widened2 = try env1.widen(&env2);
+    defer widened2.deinit();
+
+    try testing.expectEqual(@as(usize, 1), widened2.size());
+    const val = widened2.get(ids.varId(1));
+    try testing.expect(val != null);
+    try testing.expect(val.?.isUnknown());
 }

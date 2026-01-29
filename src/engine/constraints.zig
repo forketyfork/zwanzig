@@ -330,6 +330,27 @@ pub const ConstraintManager = struct {
         return combined_hash;
     }
 
+    /// Widening operator for constraint managers.
+    /// Used at loop headers to ensure convergence.
+    /// This implements a sound but simple policy: keep only constraints that appear in both.
+    /// This is the intersection of constraints, which is sound (over-approximation).
+    pub fn widen(self: *const ConstraintManager, other: *const ConstraintManager) !ConstraintManager {
+        var result = ConstraintManager.init(self.allocator);
+        errdefer result.deinit();
+
+        // Keep only constraints that appear in both managers (intersection)
+        for (self.constraints.items) |c1| {
+            for (other.constraints.items) |c2| {
+                if (c1.eql(c2)) {
+                    try result.addConstraint(c1);
+                    break;
+                }
+            }
+        }
+
+        return result;
+    }
+
     /// Refine an abstract value based on a constraint.
     /// Returns the refined value, or null if the constraint is unsatisfiable.
     pub fn refineValue(value: AbstractValue, constraint: Constraint) ?AbstractValue {
@@ -652,4 +673,88 @@ test "isValueCompatibleWithNullCheck" {
     const null_val: AbstractValue = .null_val;
     try testing.expect(isValueCompatibleWithNullCheck(null_val, true));
     try testing.expect(!isValueCompatibleWithNullCheck(null_val, false));
+}
+
+test "ConstraintManager widen keeps intersection" {
+    const testing = std.testing;
+    const allocator = testing.allocator;
+
+    var cm1 = ConstraintManager.init(allocator);
+    defer cm1.deinit();
+
+    var cm2 = ConstraintManager.init(allocator);
+    defer cm2.deinit();
+
+    // Shared constraint
+    const shared = Constraint.intCompare(ids.varId(1), .eq, 42);
+    try cm1.addConstraint(shared);
+    try cm2.addConstraint(shared);
+
+    // Constraint only in cm1
+    try cm1.addConstraint(Constraint.intCompare(ids.varId(2), .lt, 10));
+
+    // Constraint only in cm2
+    try cm2.addConstraint(Constraint.nullCheck(ids.varId(3), true));
+
+    var widened = try cm1.widen(&cm2);
+    defer widened.deinit();
+
+    // Only the shared constraint should remain
+    try testing.expectEqual(@as(usize, 1), widened.size());
+
+    // Verify the shared constraint is present
+    var found = false;
+    for (widened.constraints.items) |c| {
+        if (c.eql(shared)) {
+            found = true;
+            break;
+        }
+    }
+    try testing.expect(found);
+}
+
+test "ConstraintManager widen with empty managers" {
+    const testing = std.testing;
+    const allocator = testing.allocator;
+
+    var cm1 = ConstraintManager.init(allocator);
+    defer cm1.deinit();
+
+    var cm2 = ConstraintManager.init(allocator);
+    defer cm2.deinit();
+
+    // Both empty
+    var widened1 = try cm1.widen(&cm2);
+    defer widened1.deinit();
+    try testing.expectEqual(@as(usize, 0), widened1.size());
+
+    // One has constraints, one empty -> result empty (intersection)
+    try cm1.addConstraint(Constraint.intCompare(ids.varId(1), .eq, 42));
+
+    var widened2 = try cm1.widen(&cm2);
+    defer widened2.deinit();
+    try testing.expectEqual(@as(usize, 0), widened2.size());
+}
+
+test "ConstraintManager widen with identical constraints" {
+    const testing = std.testing;
+    const allocator = testing.allocator;
+
+    var cm1 = ConstraintManager.init(allocator);
+    defer cm1.deinit();
+
+    var cm2 = ConstraintManager.init(allocator);
+    defer cm2.deinit();
+
+    try cm1.addConstraint(Constraint.intCompare(ids.varId(1), .eq, 42));
+    try cm1.addConstraint(Constraint.nullCheck(ids.varId(2), false));
+
+    try cm2.addConstraint(Constraint.intCompare(ids.varId(1), .eq, 42));
+    try cm2.addConstraint(Constraint.nullCheck(ids.varId(2), false));
+
+    var widened = try cm1.widen(&cm2);
+    defer widened.deinit();
+
+    // All constraints should remain
+    try testing.expectEqual(@as(usize, 2), widened.size());
 }

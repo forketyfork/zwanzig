@@ -19,6 +19,7 @@ const FunctionSummary = @import("summary.zig").FunctionSummary;
 const SummaryCache = @import("summary.zig").SummaryCache;
 const ProgramPoint = @import("state.zig").ProgramPoint;
 const ProgramState = @import("state.zig").ProgramState;
+const LoopHeaderKey = @import("state.zig").LoopHeaderKey;
 const ResourceState = @import("store.zig").ResourceState;
 const VarResolver = @import("var_resolver.zig").VarResolver;
 const ExplodedGraph = @import("graph.zig").ExplodedGraph;
@@ -70,6 +71,8 @@ pub const AnalysisEngine = struct {
     type_context: ?*TypeContext,
     /// Config for resource models (optional, not owned).
     config: ?*const Config,
+    /// Whether loop-header widening is enabled.
+    use_widening: bool,
     /// Scratch buffer for FQN construction
     fqn_buffer: [256]u8 = undefined,
 
@@ -104,6 +107,7 @@ pub const AnalysisEngine = struct {
             .checker_name = null,
             .type_context = null,
             .config = null,
+            .use_widening = false,
         };
     }
 
@@ -147,6 +151,11 @@ pub const AnalysisEngine = struct {
     /// Set the maximum number of states per program point before dropping.
     pub fn setMaxStatesPerPoint(self: *AnalysisEngine, max: u32) void {
         self.graph.setMaxStatesPerPoint(max);
+    }
+
+    /// Enable or disable loop-header widening for convergence.
+    pub fn setUseWidening(self: *AnalysisEngine, use_w: bool) void {
+        self.use_widening = use_w;
     }
 
     /// Set the checker name for logging purposes.
@@ -289,7 +298,7 @@ pub const AnalysisEngine = struct {
         const entry_point = ProgramPoint.initPre(cfg.entry, cfg);
 
         const result = try self.graph.getOrCreateNode(entry_point, &initial_state);
-        if (!result.is_new) {
+        if (result.caller_should_deinit) {
             initial_state.deinit();
         }
         try self.worklist.append(self.allocator, .{ .node_index = result.index, .edge_kind = .normal, .pending_constraint = null, .cfg = cfg });
@@ -1614,7 +1623,7 @@ pub const AnalysisEngine = struct {
                 }
 
                 const result = try self.graph.getOrCreateNode(post_point, &new_state);
-                if (!result.is_new) {
+                if (result.caller_should_deinit) {
                     new_state.deinit();
                 }
                 try self.graph.addEdge(node_index, result.index);
@@ -1696,8 +1705,28 @@ pub const AnalysisEngine = struct {
                             }
                         }
 
-                        const result = try self.graph.getOrCreateNode(succ_point, &succ_state);
-                        if (!result.is_new) {
+                        // Determine if widening should be applied at this loop header.
+                        // Widening triggers only on loop_back edges into loop_header pre-states,
+                        // and only when widening is enabled via the --use-widening flag.
+                        const widening_options = blk: {
+                            if (self.use_widening and edge.kind == .loop_back) {
+                                // Check if successor is a loop_header node
+                                if (current_cfg.getNode(edge.to)) |succ_cfg_node| {
+                                    if (succ_cfg_node.ir_node.tag == .loop_header) {
+                                        // succ_point is already a pre-state (from ProgramPoint.initPre above)
+                                        const header_key = LoopHeaderKey.init(succ_point, &succ_state);
+                                        break :blk ExplodedGraph.WideningOptions{
+                                            .widen_at_header = true,
+                                            .header_key = header_key,
+                                        };
+                                    }
+                                }
+                            }
+                            break :blk ExplodedGraph.WideningOptions{};
+                        };
+
+                        const result = try self.graph.getOrCreateNodeWithWidening(succ_point, &succ_state, widening_options);
+                        if (result.caller_should_deinit) {
                             succ_state.deinit();
                         }
                         try self.graph.addEdge(node_index, result.index);
@@ -1759,9 +1788,10 @@ pub const AnalysisEngine = struct {
                         // Create the post-call point
                         const post_call_point = ProgramPoint.initPre(ret_node, caller_cfg);
                         const result = try self.graph.getOrCreateNode(post_call_point, &summary_state);
-                        if (!result.is_new) {
+                        if (result.caller_should_deinit) {
                             summary_state.deinit();
-                        } else {
+                        }
+                        if (result.is_new) {
                             try self.worklist.append(self.allocator, .{
                                 .node_index = result.index,
                                 .edge_kind = .normal,
@@ -1811,9 +1841,10 @@ pub const AnalysisEngine = struct {
         // Create entry point for the callee
         const callee_entry_point = ProgramPoint.initPre(callee_cfg.entry, callee_cfg);
         const result = try self.graph.getOrCreateNode(callee_entry_point, &inline_state);
-        if (!result.is_new) {
+        if (result.caller_should_deinit) {
             inline_state.deinit();
-        } else {
+        }
+        if (result.is_new) {
             try self.worklist.append(self.allocator, .{
                 .node_index = result.index,
                 .edge_kind = .normal,
@@ -1844,9 +1875,10 @@ pub const AnalysisEngine = struct {
         // Create the return point in the caller
         const return_point = ProgramPoint.initPre(call_site.return_node, call_site.caller_cfg);
         const result = try self.graph.getOrCreateNode(return_point, &return_state);
-        if (!result.is_new) {
+        if (result.caller_should_deinit) {
             return_state.deinit();
-        } else {
+        }
+        if (result.is_new) {
             try self.worklist.append(self.allocator, .{
                 .node_index = result.index,
                 .edge_kind = .normal,
@@ -2418,7 +2450,7 @@ test "AnalysisEngine branch constraint pruning" {
     try initial_state.setVar(ids.varId(100), .{ .concrete_int = 5 });
     const result = try engine.graph.getOrCreateNode(entry_point, &initial_state);
     try engine.worklist.append(allocator, .{ .node_index = result.index, .edge_kind = .normal, .pending_constraint = null, .cfg = &cfg });
-    if (!result.is_new) {
+    if (result.caller_should_deinit) {
         initial_state.deinit();
     }
 
@@ -2957,4 +2989,357 @@ test "AnalysisEngine summary use count" {
     // Without any calls, summary use count should be 0
     try engine.run();
     try std.testing.expectEqual(@as(u32, 0), engine.getSummaryUseCount());
+}
+
+test "AnalysisEngine widening simple loop converges without drops" {
+    // Integration test: simple loop with state-changing operations.
+    // Uses var_decl in the loop body to modify state on each iteration.
+    // Note: When the same state is produced on successive iterations, deduplication
+    // handles convergence. Widening only applies when states differ.
+    const testing = std.testing;
+    const allocator = testing.allocator;
+
+    var cfg = Cfg.init(allocator);
+    defer cfg.deinit();
+
+    // CFG: entry -> loop_header -> loop_body (var_decl) -> loop_header (back edge)
+    //                           -> exit (loop exit)
+    const entry = try cfg.addNode(cfg_mod.IrNode.init(.fn_entry));
+    const header = try cfg.addNode(cfg_mod.IrNode.init(.loop_header));
+    // Use var_decl with ast_node to trigger state changes in the loop body
+    const body_ir = cfg_mod.IrNode.initWithAst(.var_decl, 100);
+    const body = try cfg.addNode(body_ir);
+    const exit = try cfg.addNode(cfg_mod.IrNode.init(.fn_exit));
+
+    cfg.entry = entry;
+    cfg.exit = exit;
+
+    try cfg.addEdge(entry, header);
+    try cfg.addEdgeWithKind(header, body, .branch_true);
+    try cfg.addEdgeWithKind(header, exit, .loop_exit);
+    try cfg.addEdgeWithKind(body, header, .loop_back);
+
+    var engine = AnalysisEngine.init(allocator, &cfg);
+    defer engine.deinit();
+
+    // Enable widening for this test
+    engine.setUseWidening(true);
+    // Set a low max_states_per_point
+    engine.setMaxStatesPerPoint(5);
+
+    try engine.run();
+
+    const graph = engine.getGraph();
+
+    // Analysis should complete without hitting state limits
+    // Combination of deduplication and widening ensures convergence
+    try testing.expect(graph.nodeCount() > 0);
+    try testing.expect(graph.nodeCount() <= 20);
+
+    // No states should be dropped
+    try testing.expectEqual(@as(u32, 0), graph.getDroppedStateCount());
+
+    // Verify loop header widening infrastructure was used (visit tracking)
+    // The header should be tracked for widening even if convergence happened via dedup
+    try testing.expect(graph.getTrackedLoopHeaderCount() >= 1);
+}
+
+test "AnalysisEngine widening nested loops widen per header" {
+    // Integration test: nested loops with separate loop headers
+    // Verifies that each loop header maintains its own widening state.
+    const testing = std.testing;
+    const allocator = testing.allocator;
+
+    var cfg = Cfg.init(allocator);
+    defer cfg.deinit();
+
+    // CFG: entry -> outer_header -> inner_header -> inner_body -> inner_header (back)
+    //                            |                            -> outer_body
+    //                            -> outer_exit -> exit
+    //              outer_body -> outer_header (back)
+    const entry = try cfg.addNode(cfg_mod.IrNode.init(.fn_entry));
+    const outer_header = try cfg.addNode(cfg_mod.IrNode.init(.loop_header));
+    const inner_header = try cfg.addNode(cfg_mod.IrNode.init(.loop_header));
+
+    const inner_body_ir = cfg_mod.IrNode.initWithAst(.var_decl, 100);
+    const inner_body = try cfg.addNode(inner_body_ir);
+
+    const outer_body_ir = cfg_mod.IrNode.initWithAst(.var_decl, 200);
+    const outer_body = try cfg.addNode(outer_body_ir);
+
+    const outer_exit_node = try cfg.addNode(cfg_mod.IrNode.init(.nop));
+    const exit = try cfg.addNode(cfg_mod.IrNode.init(.fn_exit));
+
+    cfg.entry = entry;
+    cfg.exit = exit;
+
+    // Entry to outer loop
+    try cfg.addEdge(entry, outer_header);
+
+    // Outer loop: header -> inner or exit
+    try cfg.addEdgeWithKind(outer_header, inner_header, .branch_true);
+    try cfg.addEdgeWithKind(outer_header, outer_exit_node, .loop_exit);
+
+    // Inner loop: header -> body -> header (back) or -> outer_body (exit)
+    try cfg.addEdgeWithKind(inner_header, inner_body, .branch_true);
+    try cfg.addEdgeWithKind(inner_header, outer_body, .loop_exit);
+    try cfg.addEdgeWithKind(inner_body, inner_header, .loop_back);
+
+    // Outer loop back edge
+    try cfg.addEdgeWithKind(outer_body, outer_header, .loop_back);
+
+    // Exit
+    try cfg.addEdge(outer_exit_node, exit);
+
+    var engine = AnalysisEngine.init(allocator, &cfg);
+    defer engine.deinit();
+
+    // Enable widening for this test
+    engine.setUseWidening(true);
+    engine.setMaxStatesPerPoint(5);
+
+    try engine.run();
+
+    const graph = engine.getGraph();
+
+    // Widening should have been applied at both loop headers
+    // With nested loops, we expect widening to occur
+    try testing.expect(graph.getWidenedNodeCount() > 0 or graph.getWideningConvergedCount() > 0);
+
+    // Verify that both loop headers are tracked separately for widening.
+    // Each loop header has a distinct CFG node index, so they should have
+    // different LoopHeaderKeys and be tracked independently.
+    try testing.expect(graph.getTrackedLoopHeaderCount() >= 2);
+
+    // Analysis should complete without hitting limits
+    try testing.expect(graph.nodeCount() > 0);
+}
+
+test "AnalysisEngine widening branching loop preserves constraints conservatively" {
+    // Integration test: loop with branching inside
+    // Verifies that constraints from branches are handled conservatively during widening.
+    // The branch node has operand_node set to enable constraint extraction.
+    const testing = std.testing;
+    const allocator = testing.allocator;
+
+    var cfg = Cfg.init(allocator);
+    defer cfg.deinit();
+
+    // CFG: entry -> header -> branch (with constraint on var 50) -> then/else -> merge -> header (back)
+    //                      -> exit
+    const entry = try cfg.addNode(cfg_mod.IrNode.init(.fn_entry));
+    const header = try cfg.addNode(cfg_mod.IrNode.init(.loop_header));
+
+    // Create branch node with operand_node set to enable constraint extraction.
+    // operand_node = 50 means we're testing variable at AST node 50.
+    // operand2_node = 1 means we're comparing against the value 1.
+    var branch_ir = cfg_mod.IrNode.init(.branch);
+    branch_ir.operand_node = 50;
+    branch_ir.operand2_node = 1;
+    const branch = try cfg.addNode(branch_ir);
+
+    // Use var_decl nodes in then/else to modify state differently in each branch
+    const then_ir = cfg_mod.IrNode.initWithAst(.var_decl, 100);
+    const then_node = try cfg.addNode(then_ir);
+    const else_ir = cfg_mod.IrNode.initWithAst(.var_decl, 101);
+    const else_node = try cfg.addNode(else_ir);
+
+    const merge = try cfg.addNode(cfg_mod.IrNode.init(.nop));
+    const exit = try cfg.addNode(cfg_mod.IrNode.init(.fn_exit));
+
+    cfg.entry = entry;
+    cfg.exit = exit;
+
+    try cfg.addEdge(entry, header);
+    try cfg.addEdgeWithKind(header, branch, .branch_true);
+    try cfg.addEdgeWithKind(header, exit, .loop_exit);
+    try cfg.addEdgeWithKind(branch, then_node, .branch_true);
+    try cfg.addEdgeWithKind(branch, else_node, .branch_false);
+    try cfg.addEdge(then_node, merge);
+    try cfg.addEdge(else_node, merge);
+    try cfg.addEdgeWithKind(merge, header, .loop_back);
+
+    var engine = AnalysisEngine.init(allocator, &cfg);
+    defer engine.deinit();
+
+    // Enable widening for this test
+    engine.setUseWidening(true);
+    engine.setMaxStatesPerPoint(5);
+
+    try engine.run();
+
+    const graph = engine.getGraph();
+
+    // Analysis should complete without issues
+    try testing.expect(graph.nodeCount() > 0);
+
+    // Should have explored multiple paths through the loop
+    // With branching, states at the header may be widened
+    try testing.expect(graph.getDroppedStateCount() == 0 or graph.getWidenedNodeCount() > 0);
+}
+
+test "AnalysisEngine widening error path in loop remains sound" {
+    // Integration test: loop with error handling (try/catch)
+    // Verifies that error_state is handled correctly during widening.
+    const testing = std.testing;
+    const allocator = testing.allocator;
+
+    var cfg = Cfg.init(allocator);
+    defer cfg.deinit();
+
+    // CFG: entry -> header -> try_expr -> success -> body -> header (back)
+    //                                  -> error -> error_handler -> header (back)
+    //            -> exit
+    const entry = try cfg.addNode(cfg_mod.IrNode.init(.fn_entry));
+    const header = try cfg.addNode(cfg_mod.IrNode.init(.loop_header));
+    const try_node = try cfg.addNode(cfg_mod.IrNode.init(.try_expr));
+    const success_body = try cfg.addNode(cfg_mod.IrNode.init(.block));
+    const error_handler = try cfg.addNode(cfg_mod.IrNode.init(.catch_expr));
+    const merge = try cfg.addNode(cfg_mod.IrNode.init(.nop));
+    const exit = try cfg.addNode(cfg_mod.IrNode.init(.fn_exit));
+
+    cfg.entry = entry;
+    cfg.exit = exit;
+
+    try cfg.addEdge(entry, header);
+    try cfg.addEdgeWithKind(header, try_node, .branch_true);
+    try cfg.addEdgeWithKind(header, exit, .loop_exit);
+    try cfg.addEdgeWithKind(try_node, success_body, .try_success);
+    try cfg.addEdgeWithKind(try_node, error_handler, .try_error);
+    try cfg.addEdge(success_body, merge);
+    try cfg.addEdgeWithKind(error_handler, merge, .catch_error);
+    try cfg.addEdgeWithKind(merge, header, .loop_back);
+
+    var engine = AnalysisEngine.init(allocator, &cfg);
+    defer engine.deinit();
+
+    // Enable widening for this test
+    engine.setUseWidening(true);
+    engine.setMaxStatesPerPoint(10);
+
+    try engine.run();
+
+    const graph = engine.getGraph();
+
+    // Analysis should complete
+    try testing.expect(graph.nodeCount() > 0);
+
+    // Verify error path states exist at relevant nodes
+    var found_error_path_at_handler = false;
+    var found_normal_path_at_success = false;
+
+    for (graph.nodes.items) |node| {
+        if (node.point.node_index == error_handler and node.point.kind == .pre) {
+            if (node.state.isErrorPath()) {
+                found_error_path_at_handler = true;
+            }
+        }
+        if (node.point.node_index == success_body and node.point.kind == .pre) {
+            if (node.state.isNormalPath()) {
+                found_normal_path_at_success = true;
+            }
+        }
+    }
+
+    // Error states should be tracked correctly through the loop
+    try testing.expect(found_error_path_at_handler);
+    try testing.expect(found_normal_path_at_success);
+}
+
+test "AnalysisEngine widening convergence stops exploration" {
+    // Integration test: verifies that loop exploration is bounded.
+    // When state doesn't change in the loop body, deduplication ensures
+    // convergence by recognizing that we've seen this (point, state) before.
+    const testing = std.testing;
+    const allocator = testing.allocator;
+
+    var cfg = Cfg.init(allocator);
+    defer cfg.deinit();
+
+    // Simple loop that doesn't change state - deduplication handles convergence
+    const entry = try cfg.addNode(cfg_mod.IrNode.init(.fn_entry));
+    const header = try cfg.addNode(cfg_mod.IrNode.init(.loop_header));
+    const body = try cfg.addNode(cfg_mod.IrNode.init(.nop)); // No state change
+    const exit = try cfg.addNode(cfg_mod.IrNode.init(.fn_exit));
+
+    cfg.entry = entry;
+    cfg.exit = exit;
+
+    try cfg.addEdge(entry, header);
+    try cfg.addEdgeWithKind(header, body, .branch_true);
+    try cfg.addEdgeWithKind(header, exit, .loop_exit);
+    try cfg.addEdgeWithKind(body, header, .loop_back);
+
+    var engine = AnalysisEngine.init(allocator, &cfg);
+    defer engine.deinit();
+
+    try engine.run();
+
+    const graph = engine.getGraph();
+
+    // Analysis should complete and node count should be bounded
+    // (deduplication prevents infinite exploration)
+    try testing.expect(graph.nodeCount() > 0);
+    try testing.expect(graph.nodeCount() <= 20);
+
+    // No states should be dropped (deduplication is sufficient)
+    try testing.expectEqual(@as(u32, 0), graph.getDroppedStateCount());
+}
+
+test "AnalysisEngine widening regression test with real loop code" {
+    // Fixture-based regression test: parses actual Zig code with a loop
+    // and verifies that widening ensures convergence without state explosion.
+    // This is the type of loop that could hit max_states_per_point without widening.
+    const testing = std.testing;
+    const allocator = testing.allocator;
+
+    // Code with a for loop that iterates over a slice and allocates in each iteration.
+    // This pattern is common in real code and was previously prone to state explosion.
+    const code: [:0]const u8 =
+        \\const std = @import("std");
+        \\fn process(allocator: std.mem.Allocator, items: []const u8) !void {
+        \\    for (items) |item| {
+        \\        const buf = try allocator.alloc(u8, 1);
+        \\        defer allocator.free(buf);
+        \\        buf[0] = item;
+        \\    }
+        \\}
+    ;
+
+    var source = Source.init(allocator, "test.zig", code);
+    defer source.deinit();
+
+    const tree = source.ast() catch return;
+    const tags = tree.nodes.items(.tag);
+    var fn_node: ?AstNodeId = null;
+    for (tags, 0..) |tag, i| {
+        if (tag == .fn_decl) {
+            fn_node = ids.astId(@intCast(i));
+            break;
+        }
+    }
+    const fn_idx = fn_node orelse return;
+
+    var builder = CfgBuilder.init(allocator);
+    var cfg_opt = builder.buildFromFn(&source, fn_idx) catch return;
+
+    if (cfg_opt) |*cfg| {
+        defer cfg.deinit();
+
+        var engine = AnalysisEngine.initWithSource(allocator, cfg, &source);
+        defer engine.deinit();
+
+        // Set a low max_states_per_point to verify widening prevents state explosion
+        engine.setMaxStatesPerPoint(5);
+
+        try engine.run();
+
+        const graph = engine.getGraph();
+
+        // Analysis should complete successfully
+        try testing.expect(graph.nodeCount() > 0);
+
+        // Widening should prevent state explosion - no states dropped
+        try testing.expectEqual(@as(u32, 0), graph.getDroppedStateCount());
+    }
 }

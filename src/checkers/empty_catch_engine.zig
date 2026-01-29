@@ -178,12 +178,16 @@ pub const EmptyCatchEngineChecker = struct {
             if (context.analysis_limits.max_states_per_point) |max| {
                 engine.setMaxStatesPerPoint(max);
             }
+            if (context.analysis_limits.use_widening) |use_w| {
+                engine.setUseWidening(use_w);
+            }
             engine.run() catch |err| switch (err) {
                 error.OutOfMemory => return error.OutOfMemory,
                 error.AnalysisLimitExceeded => {},
             };
             if (context.analysis_stats) |stats| {
                 stats.recordRun(engine.getGraph().getDroppedStateCount());
+                stats.recordWidening(engine.getGraph().getWidenedNodeCount(), engine.getGraph().getWideningConvergedCount());
             }
 
             // Examine CFG nodes for catch_expr with empty handlers

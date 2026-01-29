@@ -135,6 +135,55 @@ pub const AbstractValue = union(enum) {
             },
         };
     }
+
+    /// Widening operator for abstract values.
+    /// Used at loop headers to ensure convergence by over-approximating.
+    /// Unlike merge, widen is not symmetric: `self` is the previous state at the loop header,
+    /// `other` is the new incoming state from a back-edge.
+    ///
+    /// Widening rules:
+    /// - If either is `unknown`, result is `unknown`.
+    /// - `null_val` vs `non_null` -> `unknown`.
+    /// - `concrete_int` vs `concrete_int` -> same if equal; else widen to `unknown`.
+    /// - `int_range` widening: if bounds expand, widen to `unknown` (simple policy for convergence).
+    pub fn widen(self: AbstractValue, other: AbstractValue) AbstractValue {
+        if (self.eql(other)) return self;
+
+        return switch (self) {
+            .unknown => .unknown,
+            .null_val => switch (other) {
+                .null_val => .null_val,
+                else => .unknown,
+            },
+            .non_null => switch (other) {
+                .non_null => .non_null,
+                else => .unknown,
+            },
+            .concrete_int => |v1| switch (other) {
+                .concrete_int => |v2| if (v1 == v2) self else .unknown,
+                .int_range => .unknown,
+                else => .unknown,
+            },
+            .int_range => |r1| switch (other) {
+                .int_range => |r2| blk: {
+                    // If bounds expand in any direction, widen to unknown
+                    if (r2.min < r1.min or r2.max > r1.max) {
+                        break :blk .unknown;
+                    }
+                    // Bounds stayed the same or contracted, keep the merged range
+                    break :blk .{ .int_range = r1.merge(r2) };
+                },
+                .concrete_int => |v| blk: {
+                    // If the concrete value expands the range, widen to unknown
+                    if (v < r1.min or v > r1.max) {
+                        break :blk .unknown;
+                    }
+                    break :blk self;
+                },
+                else => .unknown,
+            },
+        };
+    }
 };
 
 test "AbstractValue basic operations" {
@@ -212,4 +261,60 @@ test "AbstractValue merge operations" {
     const null_val2: AbstractValue = .null_val;
     const merged_same_nulls = null_val.merge(null_val2);
     try testing.expect(merged_same_nulls.isNull());
+}
+
+test "AbstractValue widen operations" {
+    const testing = std.testing;
+    const IntRange = AbstractValue.IntRange;
+
+    // Widening identical values returns the same value
+    const concrete1: AbstractValue = .{ .concrete_int = 10 };
+    try testing.expect(concrete1.widen(concrete1).eql(concrete1));
+
+    // Widening different concrete_ints widens to unknown
+    const concrete2: AbstractValue = .{ .concrete_int = 20 };
+    try testing.expect(concrete1.widen(concrete2).isUnknown());
+
+    // Widening unknown with anything returns unknown
+    const unknown: AbstractValue = .unknown;
+    try testing.expect(unknown.widen(concrete1).isUnknown());
+    try testing.expect(concrete1.widen(unknown).isUnknown());
+
+    // Widening null_val with non_null widens to unknown
+    const null_val: AbstractValue = .null_val;
+    const non_null: AbstractValue = .non_null;
+    try testing.expect(null_val.widen(non_null).isUnknown());
+    try testing.expect(non_null.widen(null_val).isUnknown());
+
+    // Widening identical null/non_null returns the same value
+    try testing.expect(null_val.widen(.null_val).isNull());
+    try testing.expect(non_null.widen(.non_null).isNonNull());
+
+    // Widening int_range: if new range expands bounds, widen to unknown
+    const range1: AbstractValue = .{ .int_range = IntRange.init(0, 10) };
+    const range2: AbstractValue = .{ .int_range = IntRange.init(-5, 10) }; // expands min
+    const range3: AbstractValue = .{ .int_range = IntRange.init(0, 15) }; // expands max
+    const range4: AbstractValue = .{ .int_range = IntRange.init(2, 8) }; // contracts
+    const range5: AbstractValue = .{ .int_range = IntRange.init(0, 10) }; // same
+
+    try testing.expect(range1.widen(range2).isUnknown());
+    try testing.expect(range1.widen(range3).isUnknown());
+
+    // Contracted or same range should preserve the range
+    const widened4 = range1.widen(range4);
+    try testing.expect(widened4.eql(range1));
+
+    const widened5 = range1.widen(range5);
+    try testing.expect(widened5.eql(range1));
+
+    // Widening int_range with concrete_int that expands bounds widens to unknown
+    const range_small: AbstractValue = .{ .int_range = IntRange.init(5, 15) };
+    const concrete_outside: AbstractValue = .{ .concrete_int = 20 };
+    const concrete_inside: AbstractValue = .{ .concrete_int = 10 };
+
+    try testing.expect(range_small.widen(concrete_outside).isUnknown());
+    try testing.expect(range_small.widen(concrete_inside).eql(range_small));
+
+    // Widening concrete_int with int_range widens to unknown
+    try testing.expect(concrete1.widen(range1).isUnknown());
 }

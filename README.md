@@ -513,12 +513,21 @@ zwanzig --config path/to/custom.json src/
 zwanzig --max-steps 300000 --max-states-per-point 100 src/
 ```
 
+**Enable loop-header widening:**
+
+```bash
+zwanzig --use-widening src/
+```
+
+Widening improves convergence of the analysis engine on loops by applying sound approximations at loop headers. When enabled, the analyzer applies widening on loop back-edges, which can reduce state explosion while preserving soundness. The per-point state cap (`--max-states-per-point`) remains as a safety net when widening is enabled.
+
 **Config file format:**
 
 - `enabled_rules`: Array of rule names to run (allowlist mode)
 - `disabled_rules`: Array of rule names to skip (blocklist mode)
 - `max_worklist_steps`: Maximum worklist steps per engine run (positive integer)
 - `max_states_per_point`: Maximum unique states per CFG point (positive integer)
+- `use_widening`: Enable loop-header widening for convergence (boolean)
 - `resource_models`: Array of custom resource model definitions (see below)
 - `enabled_rules` and `disabled_rules` are mutually exclusive - only one can be present
 
