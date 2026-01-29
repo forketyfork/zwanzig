@@ -320,6 +320,12 @@ pub const ExplodedGraph = struct {
     pub fn getWideningConvergedCount(self: *const ExplodedGraph) u32 {
         return self.widening_converged;
     }
+
+    /// Get the count of distinct loop headers being tracked for widening.
+    /// Each loop header in a unique calling context is counted separately.
+    pub fn getTrackedLoopHeaderCount(self: *const ExplodedGraph) u32 {
+        return @intCast(self.loop_header_states.count());
+    }
 };
 
 test "ExplodedGraph node creation and deduplication" {
