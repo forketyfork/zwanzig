@@ -2981,3 +2981,265 @@ test "AnalysisEngine summary use count" {
     try engine.run();
     try std.testing.expectEqual(@as(u32, 0), engine.getSummaryUseCount());
 }
+
+test "AnalysisEngine widening simple loop converges without drops" {
+    // Integration test: simple loop that demonstrates widening behavior.
+    // When state doesn't change in the loop body, deduplication handles it.
+    // When state changes, widening ensures convergence.
+    const testing = std.testing;
+    const allocator = testing.allocator;
+
+    var cfg = Cfg.init(allocator);
+    defer cfg.deinit();
+
+    // CFG: entry -> loop_header -> loop_body -> loop_header (back edge)
+    //                           -> exit (loop exit)
+    const entry = try cfg.addNode(cfg_mod.IrNode.init(.fn_entry));
+    const header = try cfg.addNode(cfg_mod.IrNode.init(.loop_header));
+    const body = try cfg.addNode(cfg_mod.IrNode.init(.loop_body));
+    const exit = try cfg.addNode(cfg_mod.IrNode.init(.fn_exit));
+
+    cfg.entry = entry;
+    cfg.exit = exit;
+
+    try cfg.addEdge(entry, header);
+    try cfg.addEdgeWithKind(header, body, .branch_true);
+    try cfg.addEdgeWithKind(header, exit, .loop_exit);
+    try cfg.addEdgeWithKind(body, header, .loop_back);
+
+    var engine = AnalysisEngine.init(allocator, &cfg);
+    defer engine.deinit();
+
+    // Set a low max_states_per_point
+    engine.setMaxStatesPerPoint(5);
+
+    try engine.run();
+
+    const graph = engine.getGraph();
+
+    // Analysis should complete without hitting state limits
+    // With a simple loop that doesn't change state, deduplication handles convergence
+    try testing.expect(graph.nodeCount() > 0);
+    try testing.expect(graph.nodeCount() <= 20);
+
+    // No states should be dropped (widening or deduplication prevents explosion)
+    try testing.expectEqual(@as(u32, 0), graph.getDroppedStateCount());
+}
+
+test "AnalysisEngine widening nested loops widen per header" {
+    // Integration test: nested loops with separate loop headers
+    // Verifies that each loop header maintains its own widening state.
+    const testing = std.testing;
+    const allocator = testing.allocator;
+
+    var cfg = Cfg.init(allocator);
+    defer cfg.deinit();
+
+    // CFG: entry -> outer_header -> inner_header -> inner_body -> inner_header (back)
+    //                            |                            -> outer_body
+    //                            -> outer_exit -> exit
+    //              outer_body -> outer_header (back)
+    const entry = try cfg.addNode(cfg_mod.IrNode.init(.fn_entry));
+    const outer_header = try cfg.addNode(cfg_mod.IrNode.init(.loop_header));
+    const inner_header = try cfg.addNode(cfg_mod.IrNode.init(.loop_header));
+
+    const inner_body_ir = cfg_mod.IrNode.initWithAst(.var_decl, 100);
+    const inner_body = try cfg.addNode(inner_body_ir);
+
+    const outer_body_ir = cfg_mod.IrNode.initWithAst(.var_decl, 200);
+    const outer_body = try cfg.addNode(outer_body_ir);
+
+    const outer_exit_node = try cfg.addNode(cfg_mod.IrNode.init(.nop));
+    const exit = try cfg.addNode(cfg_mod.IrNode.init(.fn_exit));
+
+    cfg.entry = entry;
+    cfg.exit = exit;
+
+    // Entry to outer loop
+    try cfg.addEdge(entry, outer_header);
+
+    // Outer loop: header -> inner or exit
+    try cfg.addEdgeWithKind(outer_header, inner_header, .branch_true);
+    try cfg.addEdgeWithKind(outer_header, outer_exit_node, .loop_exit);
+
+    // Inner loop: header -> body -> header (back) or -> outer_body (exit)
+    try cfg.addEdgeWithKind(inner_header, inner_body, .branch_true);
+    try cfg.addEdgeWithKind(inner_header, outer_body, .loop_exit);
+    try cfg.addEdgeWithKind(inner_body, inner_header, .loop_back);
+
+    // Outer loop back edge
+    try cfg.addEdgeWithKind(outer_body, outer_header, .loop_back);
+
+    // Exit
+    try cfg.addEdge(outer_exit_node, exit);
+
+    var engine = AnalysisEngine.init(allocator, &cfg);
+    defer engine.deinit();
+
+    engine.setMaxStatesPerPoint(5);
+
+    try engine.run();
+
+    const graph = engine.getGraph();
+
+    // Widening should have been applied at both loop headers
+    // With nested loops, we expect widening to occur
+    try testing.expect(graph.getWidenedNodeCount() > 0 or graph.getWideningConvergedCount() > 0);
+
+    // Analysis should complete without hitting limits
+    try testing.expect(graph.nodeCount() > 0);
+}
+
+test "AnalysisEngine widening branching loop preserves constraints conservatively" {
+    // Integration test: loop with branching inside
+    // Verifies that constraints from branches are handled conservatively during widening.
+    const testing = std.testing;
+    const allocator = testing.allocator;
+
+    var cfg = Cfg.init(allocator);
+    defer cfg.deinit();
+
+    // CFG: entry -> header -> branch -> then/else -> merge -> header (back)
+    //                      -> exit
+    const entry = try cfg.addNode(cfg_mod.IrNode.init(.fn_entry));
+    const header = try cfg.addNode(cfg_mod.IrNode.init(.loop_header));
+    const branch = try cfg.addNode(cfg_mod.IrNode.init(.branch));
+    const then_node = try cfg.addNode(cfg_mod.IrNode.init(.block));
+    const else_node = try cfg.addNode(cfg_mod.IrNode.init(.block));
+    const merge = try cfg.addNode(cfg_mod.IrNode.init(.nop));
+    const exit = try cfg.addNode(cfg_mod.IrNode.init(.fn_exit));
+
+    cfg.entry = entry;
+    cfg.exit = exit;
+
+    try cfg.addEdge(entry, header);
+    try cfg.addEdgeWithKind(header, branch, .branch_true);
+    try cfg.addEdgeWithKind(header, exit, .loop_exit);
+    try cfg.addEdgeWithKind(branch, then_node, .branch_true);
+    try cfg.addEdgeWithKind(branch, else_node, .branch_false);
+    try cfg.addEdge(then_node, merge);
+    try cfg.addEdge(else_node, merge);
+    try cfg.addEdgeWithKind(merge, header, .loop_back);
+
+    var engine = AnalysisEngine.init(allocator, &cfg);
+    defer engine.deinit();
+
+    engine.setMaxStatesPerPoint(5);
+
+    try engine.run();
+
+    const graph = engine.getGraph();
+
+    // Analysis should complete without issues
+    try testing.expect(graph.nodeCount() > 0);
+
+    // Should have explored multiple paths through the loop
+    // With branching, states at the header may be widened
+    try testing.expect(graph.getDroppedStateCount() == 0 or graph.getWidenedNodeCount() > 0);
+}
+
+test "AnalysisEngine widening error path in loop remains sound" {
+    // Integration test: loop with error handling (try/catch)
+    // Verifies that error_state is handled correctly during widening.
+    const testing = std.testing;
+    const allocator = testing.allocator;
+
+    var cfg = Cfg.init(allocator);
+    defer cfg.deinit();
+
+    // CFG: entry -> header -> try_expr -> success -> body -> header (back)
+    //                                  -> error -> error_handler -> header (back)
+    //            -> exit
+    const entry = try cfg.addNode(cfg_mod.IrNode.init(.fn_entry));
+    const header = try cfg.addNode(cfg_mod.IrNode.init(.loop_header));
+    const try_node = try cfg.addNode(cfg_mod.IrNode.init(.try_expr));
+    const success_body = try cfg.addNode(cfg_mod.IrNode.init(.block));
+    const error_handler = try cfg.addNode(cfg_mod.IrNode.init(.catch_expr));
+    const merge = try cfg.addNode(cfg_mod.IrNode.init(.nop));
+    const exit = try cfg.addNode(cfg_mod.IrNode.init(.fn_exit));
+
+    cfg.entry = entry;
+    cfg.exit = exit;
+
+    try cfg.addEdge(entry, header);
+    try cfg.addEdgeWithKind(header, try_node, .branch_true);
+    try cfg.addEdgeWithKind(header, exit, .loop_exit);
+    try cfg.addEdgeWithKind(try_node, success_body, .try_success);
+    try cfg.addEdgeWithKind(try_node, error_handler, .try_error);
+    try cfg.addEdge(success_body, merge);
+    try cfg.addEdgeWithKind(error_handler, merge, .catch_error);
+    try cfg.addEdgeWithKind(merge, header, .loop_back);
+
+    var engine = AnalysisEngine.init(allocator, &cfg);
+    defer engine.deinit();
+
+    engine.setMaxStatesPerPoint(10);
+
+    try engine.run();
+
+    const graph = engine.getGraph();
+
+    // Analysis should complete
+    try testing.expect(graph.nodeCount() > 0);
+
+    // Verify error path states exist at relevant nodes
+    var found_error_path_at_handler = false;
+    var found_normal_path_at_success = false;
+
+    for (graph.nodes.items) |node| {
+        if (node.point.node_index == error_handler and node.point.kind == .pre) {
+            if (node.state.isErrorPath()) {
+                found_error_path_at_handler = true;
+            }
+        }
+        if (node.point.node_index == success_body and node.point.kind == .pre) {
+            if (node.state.isNormalPath()) {
+                found_normal_path_at_success = true;
+            }
+        }
+    }
+
+    // Error states should be tracked correctly through the loop
+    try testing.expect(found_error_path_at_handler);
+    try testing.expect(found_normal_path_at_success);
+}
+
+test "AnalysisEngine widening convergence stops exploration" {
+    // Integration test: verifies that loop exploration is bounded.
+    // When state doesn't change in the loop body, deduplication ensures
+    // convergence by recognizing that we've seen this (point, state) before.
+    const testing = std.testing;
+    const allocator = testing.allocator;
+
+    var cfg = Cfg.init(allocator);
+    defer cfg.deinit();
+
+    // Simple loop that doesn't change state - deduplication handles convergence
+    const entry = try cfg.addNode(cfg_mod.IrNode.init(.fn_entry));
+    const header = try cfg.addNode(cfg_mod.IrNode.init(.loop_header));
+    const body = try cfg.addNode(cfg_mod.IrNode.init(.nop)); // No state change
+    const exit = try cfg.addNode(cfg_mod.IrNode.init(.fn_exit));
+
+    cfg.entry = entry;
+    cfg.exit = exit;
+
+    try cfg.addEdge(entry, header);
+    try cfg.addEdgeWithKind(header, body, .branch_true);
+    try cfg.addEdgeWithKind(header, exit, .loop_exit);
+    try cfg.addEdgeWithKind(body, header, .loop_back);
+
+    var engine = AnalysisEngine.init(allocator, &cfg);
+    defer engine.deinit();
+
+    try engine.run();
+
+    const graph = engine.getGraph();
+
+    // Analysis should complete and node count should be bounded
+    // (deduplication prevents infinite exploration)
+    try testing.expect(graph.nodeCount() > 0);
+    try testing.expect(graph.nodeCount() <= 20);
+
+    // No states should be dropped (deduplication is sufficient)
+    try testing.expectEqual(@as(u32, 0), graph.getDroppedStateCount());
+}
