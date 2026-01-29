@@ -353,6 +353,23 @@ fn baz() i32 {
 }
 ```
 
+### store-violations-engine
+
+Detects allocator/resource misuse based on the store model, including double-free, free-without-alloc, close-without-open, use-after-free/close, and leak violations.
+
+**Error-Path Leak Policy:** Leak checks run only on normal (non-error) return paths. When a function returns an error (detected by literal error values like `return error.OutOfMemory` or by type-based analysis of error union returns), leak reports are suppressed on that path. This prevents false positives in code that follows the Zig idiom of cleaning up in `errdefer` blocks.
+
+Resources stored in aggregates are treated as escaping with the aggregate.
+
+**Bad:**
+```zig
+fn foo(allocator: std.mem.Allocator) !void {
+    var ptr = try allocator.alloc(u8, 1);
+    allocator.free(ptr);
+    allocator.free(ptr); // double-free
+}
+```
+
 ## Building
 
 ```bash
@@ -462,7 +479,9 @@ Create `.zwanzig.json` for persistent settings. It's loaded automatically from t
 
 ```json
 {
-  "enabled_rules": ["empty-catch-engine", "dupe-import", "todo"]
+  "enabled_rules": ["empty-catch-engine", "dupe-import", "todo"],
+  "max_worklist_steps": 200000,
+  "max_states_per_point": 50
 }
 ```
 
@@ -470,7 +489,9 @@ Or to disable specific rules:
 
 ```json
 {
-  "disabled_rules": ["todo", "unused-decl"]
+  "disabled_rules": ["todo", "unused-decl"],
+  "max_worklist_steps": 200000,
+  "max_states_per_point": 50
 }
 ```
 
@@ -486,11 +507,69 @@ Or to disable specific rules:
 zwanzig --config path/to/custom.json src/
 ```
 
+**Override limits via CLI:**
+
+```bash
+zwanzig --max-steps 300000 --max-states-per-point 100 src/
+```
+
 **Config file format:**
 
 - `enabled_rules`: Array of rule names to run (allowlist mode)
 - `disabled_rules`: Array of rule names to skip (blocklist mode)
-- These fields are mutually exclusive - only one can be present
+- `max_worklist_steps`: Maximum worklist steps per engine run (positive integer)
+- `max_states_per_point`: Maximum unique states per CFG point (positive integer)
+- `resource_models`: Array of custom resource model definitions (see below)
+- `enabled_rules` and `disabled_rules` are mutually exclusive - only one can be present
+
+Sample config: `docs/zwanzig.sample.json`
+
+### Custom Resource Models
+
+The `resource_models` configuration allows defining custom resource acquisition/release patterns for the `store-violations-engine` checker. This is useful for project-specific APIs or third-party libraries.
+
+**Example `.zwanzig.json` with resource models:**
+
+```json
+{
+  "resource_models": [
+    {
+      "kind": "open",
+      "method_name": "acquire",
+      "return_type": "MyResource"
+    },
+    {
+      "kind": "close",
+      "method_name": "release",
+      "receiver_type": "MyResource"
+    },
+    {
+      "kind": "alloc",
+      "fqn": "my_pool.allocate"
+    },
+    {
+      "kind": "free",
+      "fqn": "my_pool.deallocate"
+    }
+  ]
+}
+```
+
+**Resource model fields:**
+
+| Field | Description |
+|-------|-------------|
+| `kind` | Resource operation type: `alloc`, `free`, `open`, or `close` |
+| `method_name` | Method name to match (e.g., `"acquire"`) |
+| `receiver_type` | Type of the receiver object (e.g., `"MyResource"`) |
+| `return_type` | Return type of the function (e.g., `"FileHandle"`) |
+| `fqn` | Fully-qualified name pattern (e.g., `"my_module.create"`) |
+
+**Match precedence:**
+
+1. Config-defined models (checked first, in order)
+2. Built-in patterns (`alloc`/`free`, `create`/`destroy`, `open`/`close`)
+3. Type-based detection (return types like `File`, `Dir`, etc.)
 
 ### Inline Suppression
 

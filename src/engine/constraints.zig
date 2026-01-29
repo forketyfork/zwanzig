@@ -140,24 +140,46 @@ pub const ConstraintManager = struct {
     /// List of active constraints on this path
     constraints: std.ArrayList(Constraint),
     allocator: std.mem.Allocator,
+    /// Per-variable constraint lists for incremental contradiction checks
+    per_var_constraints: std.AutoHashMap(VarId, VarConstraintLists),
+    /// Whether a contradiction has been detected
+    has_contradiction: bool,
+
+    const VarConstraintLists = struct {
+        int_constraints: std.ArrayList(Constraint) = .empty,
+        null_constraints: std.ArrayList(Constraint) = .empty,
+
+        fn deinit(self: *VarConstraintLists, allocator: std.mem.Allocator) void {
+            self.int_constraints.deinit(allocator);
+            self.null_constraints.deinit(allocator);
+        }
+    };
 
     pub fn init(allocator: std.mem.Allocator) ConstraintManager {
         return .{
             .constraints = .empty,
             .allocator = allocator,
+            .per_var_constraints = std.AutoHashMap(VarId, VarConstraintLists).init(allocator),
+            .has_contradiction = false,
         };
     }
 
     pub fn deinit(self: *ConstraintManager) void {
         self.constraints.deinit(self.allocator);
+        var iter = self.per_var_constraints.valueIterator();
+        while (iter.next()) |lists| {
+            lists.deinit(self.allocator);
+        }
+        self.per_var_constraints.deinit();
     }
 
     pub fn clone(self: *const ConstraintManager) !ConstraintManager {
         var new_cm = ConstraintManager.init(self.allocator);
         errdefer new_cm.deinit();
         for (self.constraints.items) |c| {
-            try new_cm.constraints.append(self.allocator, c);
+            try new_cm.addConstraint(c);
         }
+        new_cm.has_contradiction = self.has_contradiction;
         return new_cm;
     }
 
@@ -173,12 +195,16 @@ pub const ConstraintManager = struct {
         for (self.constraints.items) |c| {
             if (c.eql(constraint)) return;
         }
+        try self.updateContradictionState(constraint);
         try self.constraints.append(self.allocator, constraint);
     }
 
     /// Check if the current constraint set is satisfiable.
     /// Returns false if there's a definite contradiction.
     pub fn isSatisfiable(self: *const ConstraintManager, env: *const Environment) bool {
+        if (self.has_contradiction) {
+            return false;
+        }
         // Check each constraint against the environment
         for (self.constraints.items) |constraint| {
             if (!self.isConstraintSatisfiable(constraint, env)) {
@@ -186,16 +212,48 @@ pub const ConstraintManager = struct {
             }
         }
 
-        // Check for contradictions between constraints
-        for (self.constraints.items, 0..) |c1, i| {
-            for (self.constraints.items[i + 1 ..]) |c2| {
-                if (self.areContradictory(c1, c2)) {
-                    return false;
-                }
-            }
-        }
-
         return true;
+    }
+
+    fn updateContradictionState(self: *ConstraintManager, constraint: Constraint) !void {
+        if (self.has_contradiction) return;
+        switch (constraint) {
+            .int_compare => |ic| {
+                const entry = try self.per_var_constraints.getOrPut(ic.var_id);
+                if (!entry.found_existing) {
+                    entry.value_ptr.* = .{};
+                }
+                var contradiction = false;
+                for (entry.value_ptr.int_constraints.items) |existing| {
+                    if (self.areContradictory(existing, constraint)) {
+                        contradiction = true;
+                        break;
+                    }
+                }
+                try entry.value_ptr.int_constraints.append(self.allocator, constraint);
+                if (contradiction) {
+                    self.has_contradiction = true;
+                }
+            },
+            .null_check => |nc| {
+                const entry = try self.per_var_constraints.getOrPut(nc.var_id);
+                if (!entry.found_existing) {
+                    entry.value_ptr.* = .{};
+                }
+                var contradiction = false;
+                for (entry.value_ptr.null_constraints.items) |existing| {
+                    if (self.areContradictory(existing, constraint)) {
+                        contradiction = true;
+                        break;
+                    }
+                }
+                try entry.value_ptr.null_constraints.append(self.allocator, constraint);
+                if (contradiction) {
+                    self.has_contradiction = true;
+                }
+            },
+            .var_compare => {},
+        }
     }
 
     fn isConstraintSatisfiable(self: *const ConstraintManager, constraint: Constraint, env: *const Environment) bool {

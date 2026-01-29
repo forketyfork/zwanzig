@@ -2,6 +2,7 @@ pub const source = @import("source.zig");
 pub const diagnostic = @import("diagnostic.zig");
 pub const rule = @import("rule.zig");
 pub const checker = @import("checker.zig");
+pub const config = @import("config.zig");
 
 pub const Source = source.Source;
 pub const Diagnostic = diagnostic.Diagnostic;
@@ -23,4 +24,5 @@ pub const rules = struct {
 
 pub const checkers = struct {
     pub const unreachable_code_checker = @import("checkers/unreachable_code_checker.zig");
+    pub const store_violations_engine = @import("checkers/store_violations_engine.zig");
 };

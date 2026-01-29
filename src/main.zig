@@ -16,6 +16,7 @@ const file_discovery = @import("file_discovery.zig");
 const EmptyCatchEngineChecker = @import("checkers/empty_catch_engine.zig").EmptyCatchEngineChecker;
 const SwallowedErrorChecker = @import("checkers/swallowed_error.zig").SwallowedErrorChecker;
 const UnreachableCodeChecker = @import("checkers/unreachable_code_checker.zig").UnreachableCodeChecker;
+const StoreViolationsEngineChecker = @import("checkers/store_violations_engine.zig").StoreViolationsEngineChecker;
 const build_metadata = @import("build_metadata.zig");
 const BuildMetadata = build_metadata.BuildMetadata;
 const TargetConfig = build_metadata.TargetConfig;
@@ -36,6 +37,7 @@ test {
     _ = @import("checkers/empty_catch_engine.zig");
     _ = @import("checkers/swallowed_error.zig");
     _ = @import("checkers/unreachable_code_checker.zig");
+    _ = @import("checkers/store_violations_engine.zig");
     _ = @import("build_metadata.zig");
     _ = @import("config.zig");
     _ = @import("cache.zig");
@@ -55,6 +57,8 @@ pub const CliArgs = struct {
     config_path: ?[]const u8,
     output_format: OutputFormat,
     use_cache: bool,
+    max_worklist_steps: ?usize,
+    max_states_per_point: ?u32,
 };
 
 pub const CliError = error{
@@ -63,6 +67,7 @@ pub const CliError = error{
     OutOfMemory,
     InvalidTargetTriple,
     InvalidOutputFormat,
+    InvalidNumericValue,
 };
 
 pub fn parseArgs(allocator: std.mem.Allocator, args: []const []const u8) CliError!CliArgs {
@@ -79,6 +84,8 @@ pub fn parseArgs(allocator: std.mem.Allocator, args: []const []const u8) CliErro
     var config_path: ?[]const u8 = null;
     var output_format: OutputFormat = .text;
     var use_cache: bool = false;
+    var max_worklist_steps: ?usize = null;
+    var max_states_per_point: ?u32 = null;
     var build_meta: ?BuildMetadata = null;
     errdefer {
         if (build_meta) |*meta| {
@@ -128,6 +135,22 @@ pub fn parseArgs(allocator: std.mem.Allocator, args: []const []const u8) CliErro
             output_format = outputFormatFromString(args[i]) orelse return CliError.InvalidOutputFormat;
         } else if (std.mem.eql(u8, arg, "--cache")) {
             use_cache = true;
+        } else if (std.mem.eql(u8, arg, "--max-steps")) {
+            if (i + 1 >= args.len or std.mem.startsWith(u8, args[i + 1], "--")) {
+                return CliError.MissingFlagValue;
+            }
+            i += 1;
+            const parsed = std.fmt.parseInt(usize, args[i], 10) catch return CliError.InvalidNumericValue;
+            if (parsed == 0) return CliError.InvalidNumericValue;
+            max_worklist_steps = parsed;
+        } else if (std.mem.eql(u8, arg, "--max-states-per-point")) {
+            if (i + 1 >= args.len or std.mem.startsWith(u8, args[i + 1], "--")) {
+                return CliError.MissingFlagValue;
+            }
+            i += 1;
+            const parsed = std.fmt.parseInt(u32, args[i], 10) catch return CliError.InvalidNumericValue;
+            if (parsed == 0) return CliError.InvalidNumericValue;
+            max_states_per_point = parsed;
         } else if (std.mem.startsWith(u8, arg, "--")) {
             continue;
         } else {
@@ -162,36 +185,65 @@ pub fn parseArgs(allocator: std.mem.Allocator, args: []const []const u8) CliErro
         .config_path = config_path,
         .output_format = output_format,
         .use_cache = use_cache,
+        .max_worklist_steps = max_worklist_steps,
+        .max_states_per_point = max_states_per_point,
     };
 }
 
-fn mergeConfig(allocator: std.mem.Allocator, cli_args: CliArgs) !RuleFilter {
+const MergedConfig = struct {
+    rule_filter: RuleFilter,
+    max_worklist_steps: ?usize,
+    max_states_per_point: ?u32,
+    resource_models: []const config.ResourceModel = &.{},
+};
+
+fn mergeConfig(allocator: std.mem.Allocator, cli_args: CliArgs) !MergedConfig {
     const config_path = cli_args.config_path orelse ".zwanzig.json";
 
-    const loaded_config = config.loadConfig(allocator, config_path) catch |err| {
+    var loaded_config = config.loadConfig(allocator, config_path) catch |err| {
         if (err == config.ConfigError.FileNotFound and cli_args.config_path == null) {
-            return cli_args.rule_filter;
+            return .{
+                .rule_filter = cli_args.rule_filter,
+                .max_worklist_steps = cli_args.max_worklist_steps,
+                .max_states_per_point = cli_args.max_states_per_point,
+            };
         }
         return err;
     };
-    errdefer {
-        var mutable_config = loaded_config;
-        mutable_config.deinit(allocator);
-    }
+    const max_worklist_steps = cli_args.max_worklist_steps orelse loaded_config.max_worklist_steps;
+    const max_states_per_point = cli_args.max_states_per_point orelse loaded_config.max_states_per_point;
+    const resource_models = loaded_config.resource_models;
 
     switch (cli_args.rule_filter) {
         .none => {
-            return loaded_config.rule_filter;
+            return .{
+                .rule_filter = loaded_config.rule_filter,
+                .max_worklist_steps = max_worklist_steps,
+                .max_states_per_point = max_states_per_point,
+                .resource_models = resource_models,
+            };
         },
         .allowlist => {
-            var mutable_config = loaded_config;
-            mutable_config.deinit(allocator);
-            return cli_args.rule_filter;
+            // Free only the rule_filter part, keep resource_models
+            loaded_config.resource_models = &.{}; // Prevent deinit from freeing
+            loaded_config.deinit(allocator);
+            return .{
+                .rule_filter = cli_args.rule_filter,
+                .max_worklist_steps = max_worklist_steps,
+                .max_states_per_point = max_states_per_point,
+                .resource_models = resource_models,
+            };
         },
         .blocklist => {
-            var mutable_config = loaded_config;
-            mutable_config.deinit(allocator);
-            return cli_args.rule_filter;
+            // Free only the rule_filter part, keep resource_models
+            loaded_config.resource_models = &.{}; // Prevent deinit from freeing
+            loaded_config.deinit(allocator);
+            return .{
+                .rule_filter = cli_args.rule_filter,
+                .max_worklist_steps = max_worklist_steps,
+                .max_states_per_point = max_states_per_point,
+                .resource_models = resource_models,
+            };
         },
     }
 }
@@ -234,6 +286,9 @@ pub fn main() !void {
             CliError.InvalidOutputFormat => {
                 try stderr.writeAll("Error: Invalid output format (use 'text', 'json', or 'sarif')\n");
             },
+            CliError.InvalidNumericValue => {
+                try stderr.writeAll("Error: Invalid numeric value for limit\n");
+            },
         }
         std.process.exit(1);
     };
@@ -246,7 +301,7 @@ pub fn main() !void {
         }
     }
 
-    const final_rule_filter = mergeConfig(allocator, cli_args) catch |err| {
+    const final_config = mergeConfig(allocator, cli_args) catch |err| {
         const stderr = std.fs.File.stderr().deprecatedWriter();
         switch (err) {
             config.ConfigError.InvalidJson => {
@@ -268,7 +323,7 @@ pub fn main() !void {
         std.process.exit(1);
     };
     defer {
-        switch (final_rule_filter) {
+        switch (final_config.rule_filter) {
             .allowlist => |list| {
                 const should_free = switch (cli_args.rule_filter) {
                     .allowlist => |cli_list| list.ptr != cli_list.ptr,
@@ -294,6 +349,16 @@ pub fn main() !void {
                 }
             },
             .none => {},
+        }
+        // Free resource model strings
+        for (final_config.resource_models) |model| {
+            if (model.method_name) |name| allocator.free(name);
+            if (model.receiver_type) |ty| allocator.free(ty);
+            if (model.return_type) |ty| allocator.free(ty);
+            if (model.fqn) |name| allocator.free(name);
+        }
+        if (final_config.resource_models.len > 0) {
+            allocator.free(final_config.resource_models);
         }
     }
 
@@ -339,8 +404,22 @@ pub fn main() !void {
     try analyzer.registerChecker(&EmptyCatchEngineChecker.checker);
     try analyzer.registerChecker(&SwallowedErrorChecker.checker);
     try analyzer.registerChecker(&UnreachableCodeChecker.checker);
+    try analyzer.registerChecker(&StoreViolationsEngineChecker.checker);
 
-    analyzer.setRuleFilter(final_rule_filter);
+    analyzer.setRuleFilter(final_config.rule_filter);
+    if (final_config.max_worklist_steps) |steps| {
+        analyzer.setMaxWorklistSteps(steps);
+    }
+    if (final_config.max_states_per_point) |max| {
+        analyzer.setMaxStatesPerPoint(max);
+    }
+    // Pass resource models to the analyzer for config-driven detection
+    if (final_config.resource_models.len > 0) {
+        analyzer.setConfig(.{
+            .rule_filter = .none, // Rule filter is handled separately
+            .resource_models = final_config.resource_models,
+        });
+    }
 
     if (cli_args.build_metadata) |metadata| {
         try analyzer.setBuildMetadata(metadata);
@@ -355,6 +434,7 @@ pub fn main() !void {
         try analyzer.analyzeFile(file_path);
     }
     log.info("analysis complete", .{});
+    analyzer.logAnalysisStats();
 
     try analyzer.printResults(cli_args.output_format);
 
@@ -376,6 +456,8 @@ fn printUsage() !void {
     try stdout.writeAll("  --target <triple> Specify target triple (e.g., x86_64-linux-gnu)\n");
     try stdout.writeAll("  --config <path>   Path to config file (default: .zwanzig.json)\n");
     try stdout.writeAll("  --format <format> Output format: 'text', 'json', or 'sarif' (default: text)\n");
+    try stdout.writeAll("  --max-steps <n>   Max worklist steps per engine run\n");
+    try stdout.writeAll("  --max-states-per-point <n> Max unique states per CFG point\n");
     try stdout.writeAll("  --cache           Enable incremental caching\n");
     try stdout.writeAll("\n  Note: --do and --skip are mutually exclusive and override config file.\n");
     try stdout.writeAll("\nArguments:\n");
@@ -700,11 +782,13 @@ test "mergeConfig: CLI overrides config allowlist" {
         .config_path = config_path,
         .output_format = .text,
         .use_cache = false,
+        .max_worklist_steps = null,
+        .max_states_per_point = null,
     };
 
     const result = try mergeConfig(allocator, cli_args);
 
-    switch (result) {
+    switch (result.rule_filter) {
         .allowlist => |list| {
             try std.testing.expectEqual(@as(usize, 1), list.len);
             try std.testing.expectEqualStrings("dupe-import", list[0]);
@@ -739,10 +823,12 @@ test "mergeConfig: uses config when no CLI filter" {
         .config_path = config_path,
         .output_format = .text,
         .use_cache = false,
+        .max_worklist_steps = null,
+        .max_states_per_point = null,
     };
 
     const result = try mergeConfig(allocator, cli_args);
-    defer switch (result) {
+    defer switch (result.rule_filter) {
         .allowlist => |list| {
             for (list) |rule_name| {
                 allocator.free(rule_name);
@@ -758,7 +844,7 @@ test "mergeConfig: uses config when no CLI filter" {
         .none => {},
     };
 
-    switch (result) {
+    switch (result.rule_filter) {
         .blocklist => |list| {
             try std.testing.expectEqual(@as(usize, 1), list.len);
             try std.testing.expectEqualStrings("todo", list[0]);
@@ -777,16 +863,18 @@ test "mergeConfig: no config file and no CLI filter" {
         .config_path = null,
         .output_format = .text,
         .use_cache = false,
+        .max_worklist_steps = null,
+        .max_states_per_point = null,
     };
 
     const result = try mergeConfig(allocator, cli_args);
-    defer switch (result) {
+    defer switch (result.rule_filter) {
         .allowlist => |list| allocator.free(list),
         .blocklist => |list| allocator.free(list),
         .none => {},
     };
 
-    try std.testing.expectEqual(RuleFilter.none, result);
+    try std.testing.expectEqual(RuleFilter.none, result.rule_filter);
 }
 
 test "parseArgs: --format text" {

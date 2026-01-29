@@ -27,7 +27,7 @@ Type information is used by:
 
 ## Remaining Steps
 
-## Step 2: Region/Store Model (Heap + Resources)
+## ✅ Step 2: Region/Store Model (Heap + Resources) (COMPLETED)
 
 ### Status Quo
 - ProgramState in `src/engine/state.zig` tracks environment (locals) and constraints
@@ -180,26 +180,23 @@ Model comptime boundaries and target-specific constraints for platform-aware ana
 - Test: comptime block does not produce runtime diagnostics
 - `just lint` passes
 
-## Step 9: Expanded Checker Suite
+## Step 9: Expanded Checker Suite (OOB Slice)
 
 ### Status Quo
 - Checkers cover error-handling patterns: `empty-catch`, `swallowed-error`
-- No checkers for resource leaks, double free, or OOB slice access
-- Store/region model from Step 2 is available but unused
+- `store-violations-engine` checker (from Step 2) already detects: resource leaks, double-free, free-without-alloc, use-after-free, close-without-open
+- No checker for OOB slice access (requires slice length tracking from Step 3)
 
 ### Objectives
-Deliver practical, high-value checkers aligned with Zig usage patterns.
+Add out-of-bounds slice access detection using richer abstract domains.
 
 ### Tech Notes
-- Add `resource-leak` checker using store model (detect allocated-but-not-freed)
-- Add `double-free` checker (detect freed-then-freed-again)
-- Add `oob-slice` checker using slice length tracking
-- Use typed IR to reduce false positives (e.g., only check actual allocator calls)
+- Add `oob-slice` checker using slice length tracking from Step 3
+- Track slice lengths through `slice[0..n]` operations
+- Detect `slice[i]` where `i >= slice.len` is provable
 
 ### Acceptance Criteria
 - `just test` passes with new checker tests
-- Test: `resource-leak` detects `allocator.alloc()` without corresponding `free()`
-- Test: `double-free` detects two `free()` calls on same pointer
 - Test: `oob-slice` detects `slice[n]` where n >= slice.len
 - `just lint` passes
 

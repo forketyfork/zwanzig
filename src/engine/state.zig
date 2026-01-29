@@ -6,8 +6,12 @@ const AbstractValue = @import("value.zig").AbstractValue;
 const Constraint = @import("constraints.zig").Constraint;
 const ConstraintManager = @import("constraints.zig").ConstraintManager;
 const Environment = @import("env.zig").Environment;
+const store_mod = @import("store.zig");
 const VarId = ids.VarId;
 const CfgNodeId = ids.CfgNodeId;
+const ResourceState = store_mod.ResourceState;
+const Store = store_mod.Store;
+const StoreViolation = store_mod.StoreViolation;
 
 /// Represents a position in the analysis - a specific point in the CFG.
 /// ProgramPoint identifies a CFG node plus whether we are at the pre-state
@@ -90,6 +94,8 @@ pub const ProgramState = struct {
     env: Environment,
     /// Constraint manager for path conditions
     constraints: ConstraintManager,
+    /// Store tracking heap/resource regions
+    store: Store,
     /// Error state tracking (normal, error_active, error_handled)
     error_state: ErrorState,
     /// Cached hash for efficient deduplication
@@ -105,6 +111,7 @@ pub const ProgramState = struct {
         return .{
             .env = Environment.init(allocator),
             .constraints = ConstraintManager.init(allocator),
+            .store = Store.init(allocator),
             .error_state = .normal,
             .cached_hash = null,
             .inline_depth = 0,
@@ -116,6 +123,7 @@ pub const ProgramState = struct {
     pub fn deinit(self: *ProgramState) void {
         self.env.deinit();
         self.constraints.deinit();
+        self.store.deinit();
         self.call_stack.deinit(self.env.allocator);
     }
 
@@ -123,6 +131,7 @@ pub const ProgramState = struct {
         if (self.inline_depth != other.inline_depth) return false;
         if (!self.env.eql(&other.env)) return false;
         if (!self.constraints.eql(&other.constraints)) return false;
+        if (!self.store.eql(&other.store)) return false;
         if (self.error_state != other.error_state) return false;
         // Compare call stacks to distinguish different calling contexts
         if (self.call_stack.items.len != other.call_stack.items.len) return false;
@@ -144,6 +153,8 @@ pub const ProgramState = struct {
         hasher.update(std.mem.asBytes(&env_hash));
         const constraints_hash = self.constraints.computeHash();
         hasher.update(std.mem.asBytes(&constraints_hash));
+        const store_hash = self.store.computeHash();
+        hasher.update(std.mem.asBytes(&store_hash));
         hasher.update(std.mem.asBytes(&self.error_state));
         hasher.update(std.mem.asBytes(&self.inline_depth));
         // Include call stack in hash to distinguish different calling contexts
@@ -169,9 +180,12 @@ pub const ProgramState = struct {
         errdefer new_env.deinit();
         var new_constraints = try self.constraints.clone();
         errdefer new_constraints.deinit();
+        var new_store = try self.store.clone(allocator);
+        errdefer new_store.deinit();
         return .{
             .env = new_env,
             .constraints = new_constraints,
+            .store = new_store,
             .error_state = self.error_state,
             .cached_hash = self.cached_hash,
             .inline_depth = self.inline_depth,
@@ -195,6 +209,111 @@ pub const ProgramState = struct {
 
     pub fn envSize(self: *const ProgramState) usize {
         return self.env.size();
+    }
+
+    /// Track a resource allocation for a region.
+    pub fn trackAllocation(self: *ProgramState, region: VarId) !void {
+        try self.store.markAllocated(region);
+        self.invalidateCache();
+    }
+
+    /// Track a resource open for a region.
+    pub fn trackOpen(self: *ProgramState, region: VarId) !void {
+        try self.store.markOpened(region);
+        self.invalidateCache();
+    }
+
+    /// Track a resource free for a region.
+    pub fn trackFree(self: *ProgramState, region: VarId, call_token: ?u32) !void {
+        try self.store.markFreed(region, call_token);
+        self.invalidateCache();
+    }
+
+    /// Track a resource close for a region.
+    pub fn trackClose(self: *ProgramState, region: VarId, call_token: ?u32) !void {
+        try self.store.markClosed(region, call_token);
+        self.invalidateCache();
+    }
+
+    /// Track a resource known to be non-allocated.
+    pub fn trackNonAllocation(self: *ProgramState, region: VarId) !void {
+        try self.store.markNonAllocated(region);
+        self.invalidateCache();
+    }
+
+    pub fn resetRegion(self: *ProgramState, region: VarId) void {
+        self.store.resetRegion(region);
+        self.invalidateCache();
+    }
+
+    pub fn trackEscape(self: *ProgramState, region: VarId) void {
+        self.store.escapeRegion(region);
+        self.invalidateCache();
+    }
+
+    pub fn trackEscapeOwned(self: *ProgramState, region: VarId) std.mem.Allocator.Error!void {
+        try self.store.escapeOwned(region);
+        self.invalidateCache();
+    }
+
+    pub fn trackEscapeByName(self: *ProgramState, tree: *const std.zig.Ast, name: []const u8) !void {
+        try self.store.escapeByName(tree, name);
+        self.invalidateCache();
+    }
+
+    /// Track a resource use for a region.
+    pub fn trackUse(self: *ProgramState, region: VarId, call_token: ?u32) !void {
+        try self.store.markUsed(region, call_token);
+        self.invalidateCache();
+    }
+
+    /// Track a deferred free for a region.
+    pub fn trackDeferredFree(self: *ProgramState, region: VarId, call_token: ?u32) !void {
+        try self.store.markDeferredFree(region, call_token);
+        self.invalidateCache();
+    }
+
+    /// Track a deferred close for a region.
+    pub fn trackDeferredClose(self: *ProgramState, region: VarId, call_token: ?u32) !void {
+        try self.store.markDeferredClose(region, call_token);
+        self.invalidateCache();
+    }
+
+    pub fn trackErrdeferredFree(self: *ProgramState, region: VarId) !void {
+        try self.store.markErrdeferredFree(region);
+        self.invalidateCache();
+    }
+
+    pub fn trackErrdeferredClose(self: *ProgramState, region: VarId) !void {
+        try self.store.markErrdeferredClose(region);
+        self.invalidateCache();
+    }
+
+    pub fn trackOwnership(self: *ProgramState, resource: VarId, container: VarId) !void {
+        try self.store.recordOwnership(resource, container);
+        self.invalidateCache();
+    }
+
+    /// Track a region aliasing another region.
+    pub fn trackAlias(self: *ProgramState, alias: VarId, target: VarId) !void {
+        try self.store.aliasRegion(alias, target);
+        self.invalidateCache();
+    }
+
+    /// Track resource leaks in the current state.
+    pub fn trackLeaks(self: *ProgramState) !void {
+        try self.store.recordLeaks(self.isErrorPath());
+        self.invalidateCache();
+    }
+
+    /// Get the resource state for a region, if known.
+    pub fn getRegionState(self: *const ProgramState, region: VarId) ?ResourceState {
+        return self.store.getState(region);
+    }
+
+    /// Get store violations recorded in this state.
+    pub fn getStoreViolations(self: *const ProgramState) []const StoreViolation {
+        return self.store.getViolations();
     }
 
     /// Add a constraint to this state and refine variable values accordingly.
@@ -567,5 +686,54 @@ test "ProgramState hash includes inline depth" {
     try testing.expectEqual(state1.computeHash(), state2.computeHash());
 
     state2.incrementInlineDepth();
+    try testing.expect(state1.computeHash() != state2.computeHash());
+}
+
+test "ProgramState store tracks allocation/free" {
+    const testing = std.testing;
+    const allocator = testing.allocator;
+
+    var state = ProgramState.init(allocator);
+    defer state.deinit();
+
+    const region = ids.varId(42);
+
+    try state.trackAllocation(region);
+    try testing.expectEqual(ResourceState.allocated, state.getRegionState(region).?);
+
+    try state.trackFree(region, 1);
+    try testing.expectEqual(ResourceState.freed, state.getRegionState(region).?);
+    try testing.expectEqual(@as(usize, 0), state.getStoreViolations().len);
+}
+
+test "ProgramState equality includes store" {
+    const testing = std.testing;
+    const allocator = testing.allocator;
+
+    var state1 = ProgramState.init(allocator);
+    defer state1.deinit();
+
+    var state2 = ProgramState.init(allocator);
+    defer state2.deinit();
+
+    try testing.expect(state1.eql(&state2));
+
+    try state2.trackAllocation(ids.varId(5));
+    try testing.expect(!state1.eql(&state2));
+}
+
+test "ProgramState hash includes store" {
+    const testing = std.testing;
+    const allocator = testing.allocator;
+
+    var state1 = ProgramState.init(allocator);
+    defer state1.deinit();
+
+    var state2 = ProgramState.init(allocator);
+    defer state2.deinit();
+
+    try testing.expectEqual(state1.computeHash(), state2.computeHash());
+
+    try state2.trackAllocation(ids.varId(9));
     try testing.expect(state1.computeHash() != state2.computeHash());
 }

@@ -81,6 +81,11 @@ Tests are embedded in source files using Zig's `test` blocks. Run individual fil
 zig test src/source.zig
 ```
 
+To run a single fixture (useful when `just test` stops at the first failure):
+```bash
+zig build run -- test/fixtures/store_violations_engine/fixture_name.zig
+```
+
 ## Code Style
 
 - Zig standard formatting via `zig fmt`
