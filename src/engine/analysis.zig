@@ -19,6 +19,7 @@ const FunctionSummary = @import("summary.zig").FunctionSummary;
 const SummaryCache = @import("summary.zig").SummaryCache;
 const ProgramPoint = @import("state.zig").ProgramPoint;
 const ProgramState = @import("state.zig").ProgramState;
+const LoopHeaderKey = @import("state.zig").LoopHeaderKey;
 const ResourceState = @import("store.zig").ResourceState;
 const VarResolver = @import("var_resolver.zig").VarResolver;
 const ExplodedGraph = @import("graph.zig").ExplodedGraph;
@@ -1696,7 +1697,26 @@ pub const AnalysisEngine = struct {
                             }
                         }
 
-                        const result = try self.graph.getOrCreateNode(succ_point, &succ_state);
+                        // Determine if widening should be applied at this loop header.
+                        // Widening triggers only on loop_back edges into loop_header pre-states.
+                        const widening_options = blk: {
+                            if (edge.kind == .loop_back) {
+                                // Check if successor is a loop_header node
+                                if (current_cfg.getNode(edge.to)) |succ_cfg_node| {
+                                    if (succ_cfg_node.ir_node.tag == .loop_header) {
+                                        // succ_point is already a pre-state (from ProgramPoint.initPre above)
+                                        const header_key = LoopHeaderKey.init(succ_point, &succ_state);
+                                        break :blk ExplodedGraph.WideningOptions{
+                                            .widen_at_header = true,
+                                            .header_key = header_key,
+                                        };
+                                    }
+                                }
+                            }
+                            break :blk ExplodedGraph.WideningOptions{};
+                        };
+
+                        const result = try self.graph.getOrCreateNodeWithWidening(succ_point, &succ_state, widening_options);
                         if (result.caller_should_deinit) {
                             succ_state.deinit();
                         }
