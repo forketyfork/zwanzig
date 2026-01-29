@@ -1051,6 +1051,7 @@ pub const AnalysisEngine = struct {
         const tree = src.ast() catch return;
         const tags = tree.nodes.items(.tag);
         const datas = tree.nodes.items(.data);
+        const main_tokens = tree.nodes.items(.main_token);
         const token_tags = tree.tokens.items(.tag);
 
         if (call_node >= tags.len) return;
@@ -1062,17 +1063,31 @@ pub const AnalysisEngine = struct {
         } orelse return;
 
         const callee_node: u32 = @intFromEnum(full_call.ast.fn_expr);
-        if (callee_node >= tags.len or tags[callee_node] != .field_access) return;
+        if (callee_node >= tags.len) return;
 
-        const field_access_data = datas[callee_node].node_and_token;
-        const field_token = field_access_data[1];
-        if (field_token >= token_tags.len or token_tags[field_token] != .identifier) return;
-        const field_name = tree.tokenSlice(field_token);
+        const fn_name = blk: {
+            switch (tags[callee_node]) {
+                .field_access => {
+                    const field_access_data = datas[callee_node].node_and_token;
+                    const field_token = field_access_data[1];
+                    if (field_token >= token_tags.len or token_tags[field_token] != .identifier) break :blk null;
+                    break :blk tree.tokenSlice(field_token);
+                },
+                .identifier => {
+                    const fn_token = main_tokens[callee_node];
+                    if (fn_token >= token_tags.len or token_tags[fn_token] != .identifier) break :blk null;
+                    break :blk tree.tokenSlice(fn_token);
+                },
+                else => break :blk null,
+            }
+        } orelse return;
 
-        if (std.mem.eql(u8, field_name, "append") or
-            std.mem.eql(u8, field_name, "appendAssumeCapacity") or
-            std.mem.eql(u8, field_name, "appendSlice") or
-            std.mem.eql(u8, field_name, "appendSliceAssumeCapacity"))
+        if (std.mem.eql(u8, fn_name, "append") or
+            std.mem.eql(u8, fn_name, "appendAssumeCapacity") or
+            std.mem.eql(u8, fn_name, "appendSlice") or
+            std.mem.eql(u8, fn_name, "appendSliceAssumeCapacity") or
+            std.mem.eql(u8, fn_name, "insert") or
+            std.mem.eql(u8, fn_name, "insertAssumeCapacity"))
         {
             if (full_call.ast.params.len == 0) return;
             const item_node = @intFromEnum(full_call.ast.params[full_call.ast.params.len - 1]);
@@ -1080,10 +1095,10 @@ pub const AnalysisEngine = struct {
             return;
         }
 
-        if (std.mem.eql(u8, field_name, "put") or
-            std.mem.eql(u8, field_name, "putNoClobber") or
-            std.mem.eql(u8, field_name, "putAssumeCapacity") or
-            std.mem.eql(u8, field_name, "putNoClobberAssumeCapacity"))
+        if (std.mem.eql(u8, fn_name, "put") or
+            std.mem.eql(u8, fn_name, "putNoClobber") or
+            std.mem.eql(u8, fn_name, "putAssumeCapacity") or
+            std.mem.eql(u8, fn_name, "putNoClobberAssumeCapacity"))
         {
             if (full_call.ast.params.len >= 1) {
                 const key_node = @intFromEnum(full_call.ast.params[0]);
@@ -1092,6 +1107,92 @@ pub const AnalysisEngine = struct {
             if (full_call.ast.params.len >= 2) {
                 const value_node = @intFromEnum(full_call.ast.params[1]);
                 self.markEscapedInExpr(state, value_node, current_cfg) catch return;
+            }
+            return;
+        }
+
+        if (std.mem.startsWith(u8, fn_name, "init") or
+            std.mem.startsWith(u8, fn_name, "setup") or
+            std.mem.startsWith(u8, fn_name, "set") or
+            std.mem.startsWith(u8, fn_name, "store") or
+            std.mem.startsWith(u8, fn_name, "register") or
+            std.mem.startsWith(u8, fn_name, "add") or
+            std.mem.startsWith(u8, fn_name, "push"))
+        {
+            for (full_call.ast.params) |param| {
+                const param_node = @intFromEnum(param);
+                self.markEscapedInExpr(state, param_node, current_cfg) catch return;
+            }
+        }
+    }
+
+    /// Record ownership when passing resources to functions that take a pointer as first argument.
+    /// This handles patterns like `initCache(cache, entries, ...)` where entries becomes owned by cache.
+    fn recordOwnershipFromCall(self: *AnalysisEngine, state: *ProgramState, call_node: u32, current_cfg: *const Cfg) EngineError!void {
+        const src = self.source orelse return;
+        const tree = src.ast() catch return;
+        const tags = tree.nodes.items(.tag);
+        const datas = tree.nodes.items(.data);
+        const main_tokens = tree.nodes.items(.main_token);
+        const token_tags = tree.tokens.items(.tag);
+
+        if (call_node >= tags.len) return;
+
+        var call_buf: [1]std.zig.Ast.Node.Index = undefined;
+        const full_call = switch (tags[call_node]) {
+            .call, .call_comma, .call_one, .call_one_comma => tree.fullCall(&call_buf, @enumFromInt(call_node)),
+            else => null,
+        } orelse return;
+
+        if (full_call.ast.params.len < 2) return;
+
+        const first_arg_node = @intFromEnum(full_call.ast.params[0]);
+        const first_arg_var = self.resolveVarIdFromExpr(first_arg_node, current_cfg) orelse return;
+
+        const first_arg_is_ptr = blk: {
+            if (self.type_context) |type_ctx| {
+                const token = ids.varIndex(first_arg_var);
+                if (token < token_tags.len and token_tags[token] == .identifier) {
+                    const name = tree.tokenSlice(token);
+                    if (type_ctx.getDeclType(name)) |type_info| {
+                        if (type_info.kind == .pointer) break :blk true;
+                    }
+                }
+            }
+            if (first_arg_node < tags.len and tags[first_arg_node] == .address_of) {
+                break :blk true;
+            }
+            if (state.getRegionState(first_arg_var)) |rs| {
+                if (rs == .allocated) break :blk true;
+            }
+            break :blk false;
+        };
+
+        const callee_is_init_fn = blk: {
+            const callee_node: u32 = @intFromEnum(full_call.ast.fn_expr);
+            if (callee_node >= tags.len) break :blk false;
+            const fn_name_token = switch (tags[callee_node]) {
+                .identifier => main_tokens[callee_node],
+                .field_access => datas[callee_node].node_and_token[1],
+                else => break :blk false,
+            };
+            if (fn_name_token >= token_tags.len or token_tags[fn_name_token] != .identifier) break :blk false;
+            const fn_name = tree.tokenSlice(fn_name_token);
+            break :blk std.mem.startsWith(u8, fn_name, "init");
+        };
+
+        for (full_call.ast.params[1..]) |param| {
+            const param_node = @intFromEnum(param);
+            if (self.resolveVarIdFromExpr(param_node, current_cfg)) |param_var| {
+                if (state.getRegionState(param_var)) |rs| {
+                    if (rs == .allocated or rs == .open) {
+                        if (first_arg_is_ptr or callee_is_init_fn) {
+                            try state.trackOwnership(param_var, first_arg_var);
+                            try state.trackEscapeOwned(param_var);
+                            state.trackEscape(param_var);
+                        }
+                    }
+                }
             }
         }
     }
@@ -1244,6 +1345,8 @@ pub const AnalysisEngine = struct {
         const tree = src.ast() catch return;
         const tags = tree.nodes.items(.tag);
         const datas = tree.nodes.items(.data);
+        const main_tokens = tree.nodes.items(.main_token);
+        const token_tags = tree.tokens.items(.tag);
 
         if (lhs_node >= tags.len or tags[lhs_node] != .field_access) return;
 
@@ -1252,6 +1355,38 @@ pub const AnalysisEngine = struct {
         const container_var = self.resolveVarIdFromExpr(base_node, current_cfg) orelse return;
         const resource_var = self.resolveVarIdFromExpr(rhs_node, current_cfg) orelse return;
         try state.trackOwnership(resource_var, container_var);
+
+        const base_escapes = blk: {
+            if (base_node < tags.len and tags[base_node] == .identifier) {
+                const token = main_tokens[base_node];
+                if (token < token_tags.len and token_tags[token] == .identifier) {
+                    const name = tree.tokenSlice(token);
+                    if (std.mem.eql(u8, name, "self")) {
+                        break :blk true;
+                    }
+                }
+            }
+            if (self.type_context) |type_ctx| {
+                const token = ids.varIndex(container_var);
+                if (token < token_tags.len and token_tags[token] == .identifier) {
+                    const var_name = tree.tokenSlice(token);
+                    if (type_ctx.getDeclType(var_name)) |type_info| {
+                        if (type_info.kind == .pointer) {
+                            break :blk true;
+                        }
+                    }
+                }
+            }
+            if (state.getRegionState(container_var) == null) {
+                break :blk true;
+            }
+            break :blk false;
+        };
+
+        if (base_escapes) {
+            try state.trackEscapeOwned(resource_var);
+            state.trackEscape(resource_var);
+        }
     }
 
     fn bindPayloadAlias(self: *AnalysisEngine, state: *ProgramState, payload_token: u32, expr_node: u32, current_cfg: *const Cfg) EngineError!void {
@@ -1448,6 +1583,12 @@ pub const AnalysisEngine = struct {
                 // Check if this is a call node that should be inlined
                 if (cfg_node) |node| {
                     if (node.ir_node.tag == .call) {
+                        // Track escapes BEFORE inlining, since inlining will skip normal processing
+                        if (node.ir_node.ast_node) |ast_node| {
+                            self.trackEscapesFromCall(&state_copy, ast_node, current_cfg);
+                            try self.recordOwnershipFromCall(&state_copy, ast_node, current_cfg);
+                        }
+
                         const inline_result = try self.handleCallNode(node_index, node, &state_copy, current_cfg);
                         if (inline_result.inlined) {
                             // Call was inlined, don't process normally
@@ -1860,6 +2001,7 @@ pub const AnalysisEngine = struct {
                         try self.checkUseAfterFreeInCall(&new_state, ast_node, current_cfg);
                     }
                     self.trackEscapesFromCall(&new_state, ast_node, current_cfg);
+                    try self.recordOwnershipFromCall(&new_state, ast_node, current_cfg);
                 }
             },
             .defer_stmt => {

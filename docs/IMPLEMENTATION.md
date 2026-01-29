@@ -1560,6 +1560,55 @@ fn isErrorSwallowed(cfg: *const Cfg, catch_node_idx: u32, engine: *const Analysi
 
 The `StoreViolationsEngineChecker` (`src/checkers/store_violations_engine.zig`) reports allocator/resource misuse detected by the store model, including double-free, free-without-alloc, close-without-open, use-after-free/close, and leak violations. It runs the analysis engine per function and scans the resulting `ProgramState` store violations to emit diagnostics.
 
+#### Ownership Escape Heuristics
+
+The store model tracks when allocated resources "escape" (i.e., ownership is transferred elsewhere), so they are not falsely reported as leaks. Two key heuristics are used:
+
+**1. Field Assignment Escape**
+
+When a resource is assigned to a field of a long-lived owner, it is marked as escaped:
+
+```zig
+// Resource escapes via field assignment
+cache.entries = entries;  // entries is marked escaped
+```
+
+The `recordOwnershipFromFieldAssign` function detects this pattern when:
+- The LHS is a field access expression (e.g., `obj.field`)
+- The base is `self` (method receiver)
+- The base is a pointer type (e.g., `*Cache`)
+- The base is not a locally-tracked allocation
+
+**2. Container Method Escape**
+
+Resources passed to container insertion methods are marked as escaped:
+
+```zig
+// Resource escapes via container insertion
+list.append(allocator, data);    // data is marked escaped
+list.insert(allocator, 0, item); // item is marked escaped
+map.put(key, value);             // key and value are marked escaped
+```
+
+The `trackEscapesFromCall` function recognizes these container methods:
+- `append`, `appendAssumeCapacity`, `appendSlice`, `appendSliceAssumeCapacity`
+- `insert`, `insertAssumeCapacity`
+- `put`, `putNoClobber`, `putAssumeCapacity`, `putNoClobberAssumeCapacity`
+
+**3. Init-like Function Escape**
+
+Resources passed to functions with names starting with common initialization prefixes are marked as escaped:
+
+```zig
+// Resource escapes via init function
+initCache(cache, entries, ...);  // all params are marked escaped
+setupComponent(ptr, data);       // all params are marked escaped
+```
+
+Recognized prefixes: `init`, `setup`, `set`, `store`, `register`, `add`, `push`.
+
+**Important:** Escape tracking is performed **before** function inlining to ensure resources are properly marked even when the callee is inlined into the caller.
+
 #### Error-Path Leak Policy
 
 Leak violations are only reported on normal (non-error) return paths. When an error is returned, leak reports are suppressed because the caller is expected to handle cleanup via `errdefer` or similar mechanisms.
