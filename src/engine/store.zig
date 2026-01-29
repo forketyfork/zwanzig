@@ -595,6 +595,124 @@ pub const Store = struct {
         _ = self.errdeferred.remove(alias);
         _ = self.owners.remove(alias);
     }
+
+    /// Widening operator for stores.
+    /// Used at loop headers to ensure convergence.
+    /// - Resources: keep only if both agree, else set to `unknown`.
+    /// - Aliases/owners/deferred/errdeferred: keep only if both agree, else drop.
+    /// - Violations: union with dedup (never lose observed violations).
+    pub fn widen(self: *const Store, other: *const Store, allocator: std.mem.Allocator) !Store {
+        var result = Store.init(allocator);
+        errdefer result.deinit();
+
+        // Resources: keep if both agree, else set to unknown
+        var self_res_iter = self.resources.iterator();
+        while (self_res_iter.next()) |entry| {
+            const region = entry.key_ptr.*;
+            const self_state = entry.value_ptr.*;
+
+            if (other.resources.get(region)) |other_state| {
+                if (self_state == other_state) {
+                    try result.resources.put(region, self_state);
+                } else {
+                    try result.resources.put(region, .unknown);
+                }
+            } else {
+                // Region only in self: set to unknown
+                try result.resources.put(region, .unknown);
+            }
+        }
+
+        // Add resources only in other as unknown
+        var other_res_iter = other.resources.iterator();
+        while (other_res_iter.next()) |entry| {
+            const region = entry.key_ptr.*;
+            if (!self.resources.contains(region)) {
+                try result.resources.put(region, .unknown);
+            }
+        }
+
+        // Aliases: keep only if both agree
+        var self_alias_iter = self.aliases.iterator();
+        while (self_alias_iter.next()) |entry| {
+            const alias = entry.key_ptr.*;
+            const self_target = entry.value_ptr.*;
+
+            if (other.aliases.get(alias)) |other_target| {
+                if (self_target == other_target) {
+                    try result.aliases.put(alias, self_target);
+                }
+            }
+        }
+
+        // Deferred: keep only if both agree
+        var self_def_iter = self.deferred.iterator();
+        while (self_def_iter.next()) |entry| {
+            const region = entry.key_ptr.*;
+            const self_action = entry.value_ptr.*;
+
+            if (other.deferred.get(region)) |other_action| {
+                if (self_action == other_action) {
+                    try result.deferred.put(region, self_action);
+                }
+            }
+        }
+
+        // Errdeferred: keep only if both agree
+        var self_errdef_iter = self.errdeferred.iterator();
+        while (self_errdef_iter.next()) |entry| {
+            const region = entry.key_ptr.*;
+            const self_action = entry.value_ptr.*;
+
+            if (other.errdeferred.get(region)) |other_action| {
+                if (self_action == other_action) {
+                    try result.errdeferred.put(region, self_action);
+                }
+            }
+        }
+
+        // Owners: keep only if both agree
+        var self_owners_iter = self.owners.iterator();
+        while (self_owners_iter.next()) |entry| {
+            const resource = entry.key_ptr.*;
+            const self_owner = entry.value_ptr.*;
+
+            if (other.owners.get(resource)) |other_owner| {
+                if (self_owner == other_owner) {
+                    try result.owners.put(resource, self_owner);
+                }
+            }
+        }
+
+        // Violations: union with dedup (never lose observed violations)
+        for (self.violations.items) |violation| {
+            var found = false;
+            for (result.violations.items) |existing| {
+                if (existing.eql(violation)) {
+                    found = true;
+                    break;
+                }
+            }
+            if (!found) {
+                try result.violations.append(allocator, violation);
+            }
+        }
+
+        for (other.violations.items) |violation| {
+            var found = false;
+            for (result.violations.items) |existing| {
+                if (existing.eql(violation)) {
+                    found = true;
+                    break;
+                }
+            }
+            if (!found) {
+                try result.violations.append(allocator, violation);
+            }
+        }
+
+        return result;
+    }
 };
 
 test "Store tracks allocation/free transitions" {
@@ -739,4 +857,130 @@ test "Store hash accounts for repeated violations" {
     const hash_after_triple = store.computeHash();
 
     try testing.expect(hash_after_double != hash_after_triple);
+}
+
+test "Store widen resources agreement" {
+    const testing = std.testing;
+    const allocator = testing.allocator;
+
+    var store1 = Store.init(allocator);
+    defer store1.deinit();
+
+    var store2 = Store.init(allocator);
+    defer store2.deinit();
+
+    const region1 = ids.varId(30);
+    const region2 = ids.varId(31);
+    const region3 = ids.varId(32);
+
+    // Same state in both
+    try store1.markAllocated(region1);
+    try store2.markAllocated(region1);
+
+    // Different states
+    try store1.markAllocated(region2);
+    try store2.markFreed(region2, 1);
+
+    // Only in store1
+    try store1.markOpened(region3);
+
+    var widened = try store1.widen(&store2, allocator);
+    defer widened.deinit();
+
+    // region1: both agree -> allocated
+    try testing.expectEqual(ResourceState.allocated, widened.getState(region1).?);
+
+    // region2: disagree -> unknown
+    try testing.expectEqual(ResourceState.unknown, widened.getState(region2).?);
+
+    // region3: only in store1 -> unknown
+    try testing.expectEqual(ResourceState.unknown, widened.getState(region3).?);
+}
+
+test "Store widen violations union" {
+    const testing = std.testing;
+    const allocator = testing.allocator;
+
+    var store1 = Store.init(allocator);
+    defer store1.deinit();
+
+    var store2 = Store.init(allocator);
+    defer store2.deinit();
+
+    const region1 = ids.varId(40);
+    const region2 = ids.varId(41);
+
+    // Violation in store1
+    try store1.markAllocated(region1);
+    try store1.markFreed(region1, 1);
+    try store1.markFreed(region1, 2); // double_free
+
+    // Different violation in store2
+    try store2.markAllocated(region2);
+    try store2.markFreed(region2, 3);
+    try store2.markUsed(region2, 4); // use_after_free
+
+    try testing.expectEqual(@as(usize, 1), store1.violationCount());
+    try testing.expectEqual(@as(usize, 1), store2.violationCount());
+
+    var widened = try store1.widen(&store2, allocator);
+    defer widened.deinit();
+
+    // Both violations should be present
+    try testing.expectEqual(@as(usize, 2), widened.violationCount());
+}
+
+test "Store widen aliases keep only agreement" {
+    const testing = std.testing;
+    const allocator = testing.allocator;
+
+    var store1 = Store.init(allocator);
+    defer store1.deinit();
+
+    var store2 = Store.init(allocator);
+    defer store2.deinit();
+
+    const root1 = ids.varId(50);
+    const root2 = ids.varId(51);
+    const alias1 = ids.varId(52);
+    const alias2 = ids.varId(53);
+
+    // Same alias in both
+    try store1.markAllocated(root1);
+    try store2.markAllocated(root1);
+    try store1.aliasRegion(alias1, root1);
+    try store2.aliasRegion(alias1, root1);
+
+    // Different alias targets
+    try store1.markAllocated(root2);
+    try store2.markAllocated(root2);
+    try store1.aliasRegion(alias2, root1);
+    try store2.aliasRegion(alias2, root2);
+
+    var widened = try store1.widen(&store2, allocator);
+    defer widened.deinit();
+
+    // alias1 should be preserved (same target)
+    try testing.expectEqual(root1, widened.aliases.get(alias1).?);
+
+    // alias2 should be dropped (different targets)
+    try testing.expect(widened.aliases.get(alias2) == null);
+}
+
+test "Store widen empty stores" {
+    const testing = std.testing;
+    const allocator = testing.allocator;
+
+    var store1 = Store.init(allocator);
+    defer store1.deinit();
+
+    var store2 = Store.init(allocator);
+    defer store2.deinit();
+
+    var widened = try store1.widen(&store2, allocator);
+    defer widened.deinit();
+
+    try testing.expectEqual(@as(usize, 0), widened.resources.count());
+    try testing.expectEqual(@as(usize, 0), widened.aliases.count());
+    try testing.expectEqual(@as(usize, 0), widened.violationCount());
 }
