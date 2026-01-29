@@ -5,6 +5,10 @@ const Checker = checker_mod.Checker;
 const CheckerError = checker_mod.CheckerError;
 const Diagnostic = checker_mod.Diagnostic;
 const Source = @import("../source.zig").Source;
+const TypeContext = @import("../type_context.zig").TypeContext;
+const config_mod = @import("../config.zig");
+const Config = config_mod.Config;
+const ResourceModel = config_mod.ResourceModel;
 const ids = @import("../ids.zig");
 const cfg_mod = @import("../cfg.zig");
 const CfgBuilder = cfg_mod.CfgBuilder;
@@ -49,11 +53,19 @@ pub const StoreViolationsEngineChecker = struct {
         if (cfg_opt) |*cfg| {
             defer cfg.deinit();
 
+            // Create a TypeContext for type-aware analysis
+            var type_ctx = TypeContext.init(allocator, src);
+            defer type_ctx.deinit();
+
             var engine = AnalysisEngine.initWithSource(allocator, cfg, src);
             defer engine.deinit();
             engine.setCheckerName("store-violations-engine");
+            engine.setTypeContext(&type_ctx);
             if (context.build_metadata) |metadata| {
                 engine.setBuildMetadata(metadata);
+            }
+            if (context.config) |config| {
+                engine.setConfig(config);
             }
             if (context.analysis_limits.max_worklist_steps) |steps| {
                 engine.setMaxWorklistSteps(steps);
@@ -241,6 +253,102 @@ test "store_violations_engine reports leak" {
     }
 
     try StoreViolationsEngineChecker.checker.checkAst(&source, allocator, &diagnostics, .{ .build_metadata = null, .type_context = null });
+    try testing.expectEqual(@as(usize, 1), diagnostics.items.len);
+    try testing.expectEqualStrings("store-violations-engine", diagnostics.items[0].rule_id);
+    try testing.expect(std.mem.indexOf(u8, diagnostics.items[0].message, "resource leak") != null);
+}
+
+test "store_violations_engine detects config-driven resource model" {
+    const testing = std.testing;
+    const allocator = testing.allocator;
+    const code: [:0]const u8 =
+        \\const std = @import("std");
+        \\const MyPool = struct {
+        \\    fn acquire(_: *MyPool) i32 { return 42; }
+        \\};
+        \\fn foo() void {
+        \\    var pool = MyPool{};
+        \\    var res = pool.acquire();
+        \\    // Missing pool.release(res) - should detect as leak based on config model
+        \\    _ = res;
+        \\}
+    ;
+
+    var source = Source.init(allocator, "test.zig", code);
+    defer source.deinit();
+
+    var diagnostics: std.ArrayList(Diagnostic) = .empty;
+    defer {
+        for (diagnostics.items) |*diag| {
+            diag.deinit(allocator);
+        }
+        diagnostics.deinit(allocator);
+    }
+
+    // Create a config with a custom resource model that treats "acquire" as an open
+    const cfg = Config{
+        .rule_filter = .none,
+        .resource_models = &.{
+            ResourceModel{ .kind = .open, .method_name = "acquire", .receiver_type = "MyPool" },
+        },
+    };
+
+    const context = checker_mod.CheckerContext{
+        .build_metadata = null,
+        .type_context = null,
+        .config = &cfg,
+    };
+    try StoreViolationsEngineChecker.checker.checkAst(&source, allocator, &diagnostics, context);
+
+    // Should detect a leak because acquire() is recognized as an open based on config
+    try testing.expectEqual(@as(usize, 1), diagnostics.items.len);
+    try testing.expectEqualStrings("store-violations-engine", diagnostics.items[0].rule_id);
+    try testing.expect(std.mem.indexOf(u8, diagnostics.items[0].message, "resource leak") != null);
+}
+
+test "store_violations_engine detects config-driven fqn model with field access chain" {
+    const testing = std.testing;
+    const allocator = testing.allocator;
+    const code: [:0]const u8 =
+        \\const std = @import("std");
+        \\const MyPool = struct {
+        \\    fn acquire(_: *MyPool) i32 { return 42; }
+        \\};
+        \\const Context = struct {
+        \\    pool: MyPool,
+        \\};
+        \\fn foo() void {
+        \\    var ctx = Context{ .pool = MyPool{} };
+        \\    const res = ctx.pool.acquire();
+        \\    _ = res;
+        \\}
+    ;
+
+    var source = Source.init(allocator, "test.zig", code);
+    defer source.deinit();
+
+    var diagnostics: std.ArrayList(Diagnostic) = .empty;
+    defer {
+        for (diagnostics.items) |*diag| {
+            diag.deinit(allocator);
+        }
+        diagnostics.deinit(allocator);
+    }
+
+    const cfg = Config{
+        .rule_filter = .none,
+        .resource_models = &.{
+            ResourceModel{ .kind = .open, .fqn = "ctx.pool.acquire" },
+        },
+    };
+
+    const context = checker_mod.CheckerContext{
+        .build_metadata = null,
+        .type_context = null,
+        .config = &cfg,
+    };
+    try StoreViolationsEngineChecker.checker.checkAst(&source, allocator, &diagnostics, context);
+
     try testing.expectEqual(@as(usize, 1), diagnostics.items.len);
     try testing.expectEqualStrings("store-violations-engine", diagnostics.items[0].rule_id);
     try testing.expect(std.mem.indexOf(u8, diagnostics.items[0].message, "resource leak") != null);

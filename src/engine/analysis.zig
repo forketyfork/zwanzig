@@ -8,6 +8,8 @@ const EdgeKind = cfg_mod.EdgeKind;
 const CfgBuilder = cfg_mod.CfgBuilder;
 const Source = @import("../source.zig").Source;
 const BuildMetadata = @import("../build_metadata.zig").BuildMetadata;
+const TypeContext = @import("../type_context.zig").TypeContext;
+const Config = @import("../config.zig").Config;
 const base = @import("base.zig");
 const EngineError = base.EngineError;
 const default_max_inline_depth = base.default_max_inline_depth;
@@ -64,6 +66,12 @@ pub const AnalysisEngine = struct {
     /// This is an unowned slice; callers must ensure the underlying data
     /// remains valid for at least as long as this AnalysisEngine instance.
     checker_name: ?[]const u8,
+    /// Type context for type-aware analysis (optional, not owned).
+    type_context: ?*TypeContext,
+    /// Config for resource models (optional, not owned).
+    config: ?*const Config,
+    /// Scratch buffer for FQN construction
+    fqn_buffer: [256]u8 = undefined,
 
     const WorklistItem = struct {
         /// Index of the exploded graph node to process
@@ -94,6 +102,8 @@ pub const AnalysisEngine = struct {
             .summary_use_count = 0,
             .build_metadata = null,
             .checker_name = null,
+            .type_context = null,
+            .config = null,
         };
     }
 
@@ -142,6 +152,16 @@ pub const AnalysisEngine = struct {
     /// Set the checker name for logging purposes.
     pub fn setCheckerName(self: *AnalysisEngine, name: []const u8) void {
         self.checker_name = name;
+    }
+
+    /// Set the type context for type-aware analysis.
+    pub fn setTypeContext(self: *AnalysisEngine, type_ctx: *TypeContext) void {
+        self.type_context = type_ctx;
+    }
+
+    /// Set the config for resource models.
+    pub fn setConfig(self: *AnalysisEngine, config: *const Config) void {
+        self.config = config;
     }
 
     /// Enable or disable the use of function summaries.
@@ -464,6 +484,36 @@ pub const AnalysisEngine = struct {
         else
             null;
 
+        // Priority 1: Config-driven resource models
+        if (self.config) |config| {
+            // Get return type info if available
+            var return_type_str: ?[]const u8 = null;
+            if (self.type_context) |type_ctx| {
+                if (type_ctx.getExpressionType(call_ast_node)) |ti| {
+                    return_type_str = ti.type_str;
+                }
+            }
+
+            // Extract receiver type from the base expression
+            const receiver_type = self.getReceiverTypeName(tree, base_node);
+
+            // Construct FQN from receiver.method
+            const fqn = self.constructFqn(tree, base_node, field_name);
+
+            // Match against config resource models
+            if (config.matchResourceModel(field_name, receiver_type, return_type_str, fqn)) |model_kind| {
+                const kind: ResourceCallKind = switch (model_kind) {
+                    .alloc => .alloc,
+                    .free => .free,
+                    .open => .open,
+                    .close => .close,
+                };
+                const target_expr: ?u32 = if (kind == .free or kind == .close) (first_arg orelse base_node) else null;
+                return .{ .kind = kind, .target_expr = target_expr, .call_node = call_ast_node };
+            }
+        }
+
+        // Priority 2: Built-in heuristics (allocator methods)
         if (self.isAllocatorBase(tree, base_node)) {
             if (std.mem.eql(u8, field_name, "alloc") or std.mem.eql(u8, field_name, "dupe")) {
                 return .{ .kind = .alloc, .target_expr = null, .call_node = call_ast_node };
@@ -481,6 +531,7 @@ pub const AnalysisEngine = struct {
             }
         }
 
+        // Priority 3: Name-based open detection with known base types
         if ((std.mem.eql(u8, field_name, "open") or
             std.mem.eql(u8, field_name, "openFile") or
             std.mem.eql(u8, field_name, "openDir") or
@@ -491,11 +542,36 @@ pub const AnalysisEngine = struct {
             return .{ .kind = .open, .target_expr = null, .call_node = call_ast_node };
         }
 
+        // Priority 4: Type-based open detection - return type is a known file/fd type
+        if (self.isResourceReturningCall(call_ast_node)) {
+            return .{ .kind = .open, .target_expr = null, .call_node = call_ast_node };
+        }
+
         if (std.mem.eql(u8, field_name, "close")) {
             const target_expr = first_arg orelse base_node;
             return .{ .kind = .close, .target_expr = target_expr, .call_node = call_ast_node };
         }
         return null;
+    }
+
+    /// Check if a call expression returns a known resource type (file, fd, etc.).
+    /// Used for type-based open detection.
+    fn isResourceReturningCall(self: *AnalysisEngine, call_ast_node: u32) bool {
+        const type_ctx = self.type_context orelse return false;
+        const type_info = type_ctx.getExpressionType(call_ast_node) orelse return false;
+
+        // Check if the return type is a known resource type
+        if (type_info.type_str) |type_str| {
+            // Known file types
+            if (std.mem.eql(u8, type_str, "std.fs.File") or
+                std.mem.eql(u8, type_str, "std.posix.fd_t") or
+                std.mem.eql(u8, type_str, "std.fs.Dir") or
+                std.mem.eql(u8, type_str, "std.fs.IterableDir"))
+            {
+                return true;
+            }
+        }
+        return false;
     }
 
     fn isAllocatorBase(self: *AnalysisEngine, tree: *const std.zig.Ast, base_node: u32) bool {
@@ -554,6 +630,102 @@ pub const AnalysisEngine = struct {
             },
             else => return false,
         }
+    }
+
+    /// Get the type name of the receiver expression (for receiver_type matching).
+    /// For an expression like `myPool.open()`, this returns the type of `myPool`.
+    fn getReceiverTypeName(self: *AnalysisEngine, tree: *const std.zig.Ast, base_node: u32) ?[]const u8 {
+        const tags = tree.nodes.items(.tag);
+
+        if (base_node >= tags.len) return null;
+
+        // If the base is an identifier, try to get its type from TypeContext
+        if (tags[base_node] == .identifier) {
+            if (self.type_context) |type_ctx| {
+                if (type_ctx.getExpressionType(base_node)) |ti| {
+                    return ti.type_str;
+                }
+            }
+        }
+
+        // For field access, try to get the final field type
+        if (tags[base_node] == .field_access) {
+            if (self.type_context) |type_ctx| {
+                if (type_ctx.getExpressionType(base_node)) |ti| {
+                    return ti.type_str;
+                }
+            }
+        }
+
+        return null;
+    }
+
+    /// Construct a fully qualified name from a method call.
+    /// For `my.pool.open()`, this returns "my.pool.open".
+    /// Uses a static buffer, so the result is only valid until the next call.
+    fn constructFqn(self: *AnalysisEngine, tree: *const std.zig.Ast, base_node: u32, method_name: []const u8) ?[]const u8 {
+        const tags = tree.nodes.items(.tag);
+        const datas = tree.nodes.items(.data);
+        const main_tokens = tree.nodes.items(.main_token);
+        const token_tags = tree.tokens.items(.tag);
+
+        var parts: [16][]const u8 = undefined;
+        var count: usize = 0;
+        var node = base_node;
+
+        while (true) {
+            if (node >= tags.len) return null;
+
+            switch (tags[node]) {
+                .identifier => {
+                    const ident_token = main_tokens[node];
+                    if (ident_token >= token_tags.len or token_tags[ident_token] != .identifier) return null;
+                    if (count >= parts.len) return null;
+                    parts[count] = tree.tokenSlice(ident_token);
+                    count += 1;
+                    break;
+                },
+                .field_access => {
+                    const field_access = datas[node].node_and_token;
+                    const field_token = field_access[1];
+                    if (field_token >= token_tags.len or token_tags[field_token] != .identifier) return null;
+                    if (count >= parts.len) return null;
+                    parts[count] = tree.tokenSlice(field_token);
+                    count += 1;
+                    node = @intFromEnum(field_access[0]);
+                },
+                else => return null,
+            }
+        }
+
+        var pos: usize = 0;
+        var idx: usize = count;
+        while (idx > 0) : (idx -= 1) {
+            if (!self.appendFqnPart(parts[idx - 1], &pos)) return null;
+            if (idx > 1) {
+                if (!self.appendFqnSeparator(&pos)) return null;
+            }
+        }
+
+        if (!self.appendFqnSeparator(&pos)) return null;
+        if (!self.appendFqnPart(method_name, &pos)) return null;
+
+        return self.fqn_buffer[0..pos];
+    }
+
+    fn appendFqnPart(self: *AnalysisEngine, part: []const u8, pos: *usize) bool {
+        if (part.len == 0) return false;
+        if (pos.* + part.len > self.fqn_buffer.len) return false;
+        std.mem.copyForwards(u8, self.fqn_buffer[pos.* .. pos.* + part.len], part);
+        pos.* += part.len;
+        return true;
+    }
+
+    fn appendFqnSeparator(self: *AnalysisEngine, pos: *usize) bool {
+        if (pos.* >= self.fqn_buffer.len) return false;
+        self.fqn_buffer[pos.*] = '.';
+        pos.* += 1;
+        return true;
     }
 
     fn resolveVarIdFromVarDecl(self: *AnalysisEngine, var_decl_node: u32) ?ids.VarId {
@@ -1678,9 +1850,18 @@ pub const AnalysisEngine = struct {
                                 if (data[ast_node].opt_node.unwrap()) |ret_expr| {
                                     const ret_expr_idx = @intFromEnum(ret_expr);
                                     try self.checkUseAfterFreeInExpr(&new_state, ret_expr_idx, current_cfg);
+
+                                    // Fast path: literal error value (e.g., return error.Foo)
                                     if (ret_expr_idx < tags.len and tags[ret_expr_idx] == .error_value) {
                                         new_state.setErrorState(.error_active);
+                                    } else if (self.type_context) |type_ctx| {
+                                        // Type-based check: return expression is an error union
+                                        // This handles cases like `return err;` or `return someFn();`
+                                        if (type_ctx.isExpressionErrorUnion(ret_expr_idx)) {
+                                            new_state.setErrorState(.error_active);
+                                        }
                                     }
+
                                     if (self.resolveVarIdFromExpr(ret_expr_idx, current_cfg)) |var_id| {
                                         try new_state.trackEscapeOwned(var_id);
                                         new_state.trackEscape(var_id);

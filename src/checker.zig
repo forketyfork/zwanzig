@@ -11,6 +11,8 @@ const BuildMetadata = @import("build_metadata.zig").BuildMetadata;
 const type_context_mod = @import("type_context.zig");
 pub const TypeContext = type_context_mod.TypeContext;
 pub const TypeInfo = type_context_mod.TypeInfo;
+const config_mod = @import("config.zig");
+pub const Config = config_mod.Config;
 
 pub const AnalysisStats = struct {
     total_runs: u64 = 0,
@@ -37,6 +39,7 @@ pub const AnalysisLimits = struct {
 /// The context provides:
 /// - Build metadata (target info, build flags)
 /// - Type context for ZIR-based type queries (when available)
+/// - Config for resource models and other analyzer settings
 ///
 /// Checkers can use the type context to make type-aware decisions,
 /// reducing false positives and enabling more precise analysis.
@@ -47,6 +50,8 @@ pub const CheckerContext = struct {
     type_context: ?*TypeContext = null,
     analysis_stats: ?*AnalysisStats = null,
     analysis_limits: AnalysisLimits = .{},
+    /// Config for resource models and other analyzer settings.
+    config: ?*const Config = null,
 
     /// Check if type information is available.
     pub fn hasTypeInfo(self: *const CheckerContext) bool {

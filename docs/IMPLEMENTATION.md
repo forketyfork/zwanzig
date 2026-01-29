@@ -986,6 +986,42 @@ if (ctx.isDeclOptional("maybe_val")) { /* ... */ }
 if (ctx.isDeclPointer("ptr")) { /* ... */ }
 ```
 
+#### Expression Type Queries
+
+TypeContext provides methods for querying types of expressions and calls at specific AST nodes:
+
+```zig
+// Query expression type by AST node index
+if (ctx.getExpressionType(ast_node)) |ti| {
+    // Use type information
+}
+
+// Check if an expression returns an error union
+if (ctx.isExpressionErrorUnion(ast_node)) {
+    // Expression may return an error
+}
+
+// Get the return type of the containing function
+if (ctx.getContainingFunctionReturnType(ast_node)) |ti| {
+    if (ti.kind == .error_union) {
+        // Function returns error union
+    }
+}
+
+// Get expression type for a call node
+if (ctx.getExpressionType(call_node)) |ti| {
+    // ti.kind indicates the type category (e.g., .error_union)
+    // ti.type_str contains the type name if known (e.g., "std.fs.File")
+}
+```
+
+Expression type queries handle:
+- **Call expressions**: Resolves the callee's return type
+- **Try expressions**: Returns unknown (inner type not tracked)
+- **Catch expressions**: Returns the RHS (catch body/fallback) type
+- **Error values**: Returns error union type
+- **Identifiers**: Looks up declared type (including local error variables)
+
 ### Source Type API
 
 The `Source` struct (`src/source.zig`) provides direct access to type information via lazy-loaded ZirBridge:
@@ -1523,6 +1559,43 @@ fn isErrorSwallowed(cfg: *const Cfg, catch_node_idx: u32, engine: *const Analysi
 ### StoreViolationsEngineChecker
 
 The `StoreViolationsEngineChecker` (`src/checkers/store_violations_engine.zig`) reports allocator/resource misuse detected by the store model, including double-free, free-without-alloc, close-without-open, use-after-free/close, and leak violations. It runs the analysis engine per function and scans the resulting `ProgramState` store violations to emit diagnostics.
+
+#### Error-Path Leak Policy
+
+Leak violations are only reported on normal (non-error) return paths. When an error is returned, leak reports are suppressed because the caller is expected to handle cleanup via `errdefer` or similar mechanisms.
+
+The engine detects error returns in two ways:
+
+1. **Literal error values**: Direct `return error.SomeError` expressions are immediately recognized
+2. **Type-based detection**: Expressions that return error union types are detected via `TypeContext`
+
+Type-based detection handles cases like:
+- `return mayFail()` where `mayFail()` returns `!T`
+- `return err` where `err` is an error variable
+- Chained error propagation through helper functions
+
+#### Type-Based Resource Detection
+
+The store model identifies resource operations (alloc/free, open/close) using a priority-based detection system:
+
+1. **Config-defined models** (highest priority): Custom patterns from `.zwanzig.json` `resource_models`
+2. **Built-in name patterns**: Standard patterns like `alloc`/`free`, `create`/`destroy`, `open`/`close`
+3. **Type-based detection**: Methods returning known resource types (e.g., `File`, `Dir`, `Socket`)
+
+Type-based detection uses `TypeContext.getExpressionType()` to extract the return type from call expressions. For known file methods (e.g., `openFile`, `createFile`), the `type_str` field contains the resource type name, enabling detection of resource-returning functions.
+
+#### Configuration Integration
+
+The checker accepts an optional `Config` pointer via `AnalysisEngine.setConfig()`. When set, the engine checks config-defined resource models before falling back to built-in heuristics.
+
+```zig
+// In checker code
+var engine = AnalysisEngine.initWithSource(allocator, cfg, src);
+engine.setTypeContext(&type_ctx);
+if (context.config) |config| {
+    engine.setConfig(config);
+}
+```
 
 ### Registration
 

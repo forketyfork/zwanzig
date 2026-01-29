@@ -194,12 +194,13 @@ const MergedConfig = struct {
     rule_filter: RuleFilter,
     max_worklist_steps: ?usize,
     max_states_per_point: ?u32,
+    resource_models: []const config.ResourceModel = &.{},
 };
 
 fn mergeConfig(allocator: std.mem.Allocator, cli_args: CliArgs) !MergedConfig {
     const config_path = cli_args.config_path orelse ".zwanzig.json";
 
-    const loaded_config = config.loadConfig(allocator, config_path) catch |err| {
+    var loaded_config = config.loadConfig(allocator, config_path) catch |err| {
         if (err == config.ConfigError.FileNotFound and cli_args.config_path == null) {
             return .{
                 .rule_filter = cli_args.rule_filter,
@@ -211,6 +212,7 @@ fn mergeConfig(allocator: std.mem.Allocator, cli_args: CliArgs) !MergedConfig {
     };
     const max_worklist_steps = cli_args.max_worklist_steps orelse loaded_config.max_worklist_steps;
     const max_states_per_point = cli_args.max_states_per_point orelse loaded_config.max_states_per_point;
+    const resource_models = loaded_config.resource_models;
 
     switch (cli_args.rule_filter) {
         .none => {
@@ -218,24 +220,29 @@ fn mergeConfig(allocator: std.mem.Allocator, cli_args: CliArgs) !MergedConfig {
                 .rule_filter = loaded_config.rule_filter,
                 .max_worklist_steps = max_worklist_steps,
                 .max_states_per_point = max_states_per_point,
+                .resource_models = resource_models,
             };
         },
         .allowlist => {
-            var mutable_config = loaded_config;
-            mutable_config.deinit(allocator);
+            // Free only the rule_filter part, keep resource_models
+            loaded_config.resource_models = &.{}; // Prevent deinit from freeing
+            loaded_config.deinit(allocator);
             return .{
                 .rule_filter = cli_args.rule_filter,
                 .max_worklist_steps = max_worklist_steps,
                 .max_states_per_point = max_states_per_point,
+                .resource_models = resource_models,
             };
         },
         .blocklist => {
-            var mutable_config = loaded_config;
-            mutable_config.deinit(allocator);
+            // Free only the rule_filter part, keep resource_models
+            loaded_config.resource_models = &.{}; // Prevent deinit from freeing
+            loaded_config.deinit(allocator);
             return .{
                 .rule_filter = cli_args.rule_filter,
                 .max_worklist_steps = max_worklist_steps,
                 .max_states_per_point = max_states_per_point,
+                .resource_models = resource_models,
             };
         },
     }
@@ -343,6 +350,16 @@ pub fn main() !void {
             },
             .none => {},
         }
+        // Free resource model strings
+        for (final_config.resource_models) |model| {
+            if (model.method_name) |name| allocator.free(name);
+            if (model.receiver_type) |ty| allocator.free(ty);
+            if (model.return_type) |ty| allocator.free(ty);
+            if (model.fqn) |name| allocator.free(name);
+        }
+        if (final_config.resource_models.len > 0) {
+            allocator.free(final_config.resource_models);
+        }
     }
 
     const files = file_discovery.discoverFiles(allocator, cli_args.paths) catch |err| {
@@ -395,6 +412,13 @@ pub fn main() !void {
     }
     if (final_config.max_states_per_point) |max| {
         analyzer.setMaxStatesPerPoint(max);
+    }
+    // Pass resource models to the analyzer for config-driven detection
+    if (final_config.resource_models.len > 0) {
+        analyzer.setConfig(.{
+            .rule_filter = .none, // Rule filter is handled separately
+            .resource_models = final_config.resource_models,
+        });
     }
 
     if (cli_args.build_metadata) |metadata| {

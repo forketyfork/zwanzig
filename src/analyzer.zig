@@ -7,6 +7,7 @@ const checker_mod = @import("checker.zig");
 const Checker = checker_mod.Checker;
 const CheckerManagerWithRules = checker_mod.CheckerManagerWithRules;
 const TypeContext = checker_mod.TypeContext;
+const Config = checker_mod.Config;
 const ZirBridge = @import("zir_bridge.zig").ZirBridge;
 const BuildMetadata = @import("build_metadata.zig").BuildMetadata;
 const cache_mod = @import("cache.zig");
@@ -32,6 +33,7 @@ pub const Analyzer = struct {
     analysis_stats: checker_mod.AnalysisStats = .{},
     max_worklist_steps: ?usize = null,
     max_states_per_point: ?u32 = null,
+    config: ?Config = null,
 
     pub fn init(allocator: std.mem.Allocator) Analyzer {
         return Analyzer{
@@ -117,6 +119,19 @@ pub const Analyzer = struct {
 
     pub fn setMaxStatesPerPoint(self: *Analyzer, max: u32) void {
         self.max_states_per_point = max;
+    }
+
+    /// Set the config for resource models and other settings.
+    pub fn setConfig(self: *Analyzer, cfg: Config) void {
+        self.config = cfg;
+    }
+
+    /// Get the config if set.
+    pub fn getConfig(self: *const Analyzer) ?*const Config {
+        if (self.config) |*cfg| {
+            return cfg;
+        }
+        return null;
     }
 
     pub fn getBuildMetadata(self: *const Analyzer) ?*const BuildMetadata {
@@ -304,6 +319,7 @@ pub const Analyzer = struct {
                 .max_worklist_steps = self.max_worklist_steps,
                 .max_states_per_point = self.max_states_per_point,
             },
+            .config = self.getConfig(),
         };
 
         // Run native checkers

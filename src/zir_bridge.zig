@@ -176,6 +176,14 @@ pub const FnInfo = struct {
     }
 };
 
+/// Information about a call expression's return type.
+pub const CallExprTypeInfo = struct {
+    /// The return type of the called function
+    return_type: TypeInfo,
+    /// Whether the called function could be resolved
+    resolved: bool,
+};
+
 /// Bridge for loading typed IR from Zig source via ZIR.
 /// This provides typed information that complements the AST-based analysis.
 pub const ZirBridge = struct {
@@ -362,7 +370,11 @@ pub const ZirBridge = struct {
         if (node_tag == .identifier) {
             if (main_token < token_tags.len and token_tags[main_token] == .identifier) {
                 const type_name = extractIdentifier(source, token_starts[main_token]);
-                return parseBuiltinType(type_name, zir);
+                const builtin = parseBuiltinType(type_name, zir);
+                if (builtin.kind == .unknown) {
+                    return .{ .kind = .unknown, .type_str = type_name };
+                }
+                return builtin;
             }
         }
 
@@ -1024,6 +1036,119 @@ pub const ZirBridge = struct {
             }
         }
         return null;
+    }
+
+    /// Get the return type of a function declaration by AST node index.
+    /// Returns null if the node is not a function or the return type cannot be determined.
+    pub fn getFunctionReturnType(self: *const ZirBridge, fn_ast_node: u32) ?TypeInfo {
+        const tree = self.ast orelse return null;
+        const zir = self.zir orelse return null;
+        const source_content = self.source.?.getContent();
+        const tags = tree.nodes.items(.tag);
+        const main_tokens = tree.nodes.items(.main_token);
+        const token_tags = tree.tokens.items(.tag);
+
+        if (fn_ast_node >= tags.len) return null;
+        if (tags[fn_ast_node] != .fn_decl) return null;
+
+        // Use fullFnProto to safely extract the function prototype
+        var params_buf: [1]Ast.Node.Index = undefined;
+        const fn_proto = tree.fullFnProto(&params_buf, @enumFromInt(fn_ast_node)) orelse return null;
+
+        // Get the return type expression
+        const ret_type_node = fn_proto.ast.return_type;
+        if (ret_type_node == .none) {
+            // Check if the return type is inferred (void)
+            return TypeInfo.initVoid();
+        }
+
+        const ret_node_idx: u32 = @intFromEnum(ret_type_node);
+
+        // Check if this is an error union by looking for a bang token before the return type
+        const ret_main_tok = main_tokens[ret_node_idx];
+        if (ret_main_tok > 0 and token_tags[ret_main_tok - 1] == .bang) {
+            // This is an error union return type
+            // Extract the success type to include in type_str
+            if (extractTypeFromAstNode(tree, zir, ret_node_idx, source_content)) |inner_type| {
+                if (inner_type.type_str) |inner_str| {
+                    return .{ .kind = .error_union, .type_str = inner_str };
+                }
+            }
+            return TypeInfo.initErrorUnion();
+        }
+
+        return extractTypeFromAstNode(tree, zir, ret_node_idx, source_content);
+    }
+
+    /// Get type information for an AST node representing a type expression.
+    /// Returns null if the node cannot be resolved.
+    pub fn getTypeFromAstNode(self: *const ZirBridge, ast_node: u32) ?TypeInfo {
+        const tree = self.ast orelse return null;
+        const zir = self.zir orelse return null;
+        const source_content = self.source.?.getContent();
+        if (ast_node >= tree.nodes.items(.tag).len) return null;
+        return extractTypeFromAstNode(tree, zir, ast_node, source_content);
+    }
+
+    /// Extract type information from an AST node representing a type expression.
+    fn extractTypeFromAstNode(tree: *const Ast, zir: Zir, type_node: u32, source: []const u8) ?TypeInfo {
+        const tags = tree.nodes.items(.tag);
+        const data = tree.nodes.items(.data);
+        const token_tags = tree.tokens.items(.tag);
+        const token_starts = tree.tokens.items(.start);
+        const main_tokens = tree.nodes.items(.main_token);
+
+        if (type_node >= tags.len) return null;
+
+        switch (tags[type_node]) {
+            .identifier => {
+                // Simple type like u32, i64, void, MyResource, etc.
+                const token = main_tokens[type_node];
+                if (token >= token_tags.len or token_tags[token] != .identifier) return null;
+                const type_name = extractIdentifier(source, token_starts[token]);
+                const builtin = parseBuiltinType(type_name, zir);
+                // If not a builtin type, preserve the type name as type_str
+                if (builtin.kind == .unknown) {
+                    return .{ .kind = .unknown, .type_str = type_name };
+                }
+                return builtin;
+            },
+            .error_union => {
+                // Error union type: T!E or anyerror!T
+                return TypeInfo.initErrorUnion();
+            },
+            .optional_type => {
+                // Optional type: ?T
+                return TypeInfo.initOptional();
+            },
+            .ptr_type_aligned, .ptr_type_sentinel, .ptr_type_bit_range, .ptr_type => {
+                // Pointer type: *T, [*]T, etc.
+                return TypeInfo.initPointer();
+            },
+            .slice_open, .slice, .slice_sentinel => {
+                // Slice type: []T
+                return .{ .kind = .slice };
+            },
+            .field_access => {
+                // Qualified type like std.fs.File
+                const field_token = data[type_node].node_and_token[1];
+                if (field_token >= token_tags.len or token_tags[field_token] != .identifier) return null;
+                const field_name = extractIdentifier(source, token_starts[field_token]);
+
+                // Check for known types
+                if (std.mem.eql(u8, field_name, "File")) {
+                    return .{ .kind = .@"struct", .type_str = "std.fs.File" };
+                }
+                if (std.mem.eql(u8, field_name, "fd_t")) {
+                    return .{ .kind = .int, .type_str = "std.posix.fd_t" };
+                }
+                if (std.mem.eql(u8, field_name, "Allocator")) {
+                    return .{ .kind = .@"struct", .type_str = "std.mem.Allocator" };
+                }
+                return TypeInfo.initUnknown();
+            },
+            else => return TypeInfo.initUnknown(),
+        }
     }
 
     /// Check if ZIR was successfully generated.
