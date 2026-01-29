@@ -72,17 +72,11 @@ jobs:
           done
         working-directory: zwanzig
 
-      - name: Run Zwanzig analysis (SARIF)
-        if: always()
-        run: |
-          nix develop --accept-flake-config --command bash -c 'zig build run -- --format sarif src > ../results.sarif || true'
-        working-directory: zwanzig
-
       - name: Upload SARIF results
         if: always()
         uses: github/codeql-action/upload-sarif@v3
         with:
-          sarif_file: results.sarif
+          sarif_file: zwanzig/results.sarif
 
   build:
     name: build

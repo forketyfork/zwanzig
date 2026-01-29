@@ -27,7 +27,12 @@ lint:
     shellcheck scripts/*.sh
 
     zig fmt --check src/
-    zig build run -- --use-widening src/**/*.zig
+
+    if [ -n "${CI:-}" ]; then
+        zig build run -- --use-widening --format sarif src/**/*.zig > results.sarif || true
+    else
+        zig build run -- --use-widening src/**/*.zig
+    fi
 
 validate:
     ./validate.sh
