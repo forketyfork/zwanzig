@@ -7,6 +7,7 @@ const Rule = src.Rule;
 const checker_mod = src.checker;
 const Checker = checker_mod.Checker;
 const CheckerContext = checker_mod.CheckerContext;
+const config_mod = src.config;
 
 /// Expected diagnostic parsed from fixture comments.
 /// All fields are optional - only specified fields will be checked.
@@ -207,6 +208,27 @@ pub fn runFixture(
     }
 }
 
+fn parseInlineConfig(allocator: std.mem.Allocator, content: []const u8) !?config_mod.Config {
+    var lines = std.mem.splitScalar(u8, content, '\n');
+    var found = false;
+    var config_text: ?[]const u8 = null;
+
+    while (lines.next()) |line| {
+        const trimmed = std.mem.trim(u8, line, " \t\r");
+        if (std.mem.startsWith(u8, trimmed, "// CONFIG:")) {
+            if (found) return error.InvalidConfigFormat;
+            const rest = std.mem.trim(u8, trimmed["// CONFIG:".len..], " \t");
+            config_text = rest;
+            found = true;
+        }
+    }
+
+    if (config_text) |text| {
+        return try config_mod.parseConfig(allocator, text);
+    }
+    return null;
+}
+
 /// Run a checker against a fixture file and verify expectations.
 pub fn runCheckerFixture(
     allocator: std.mem.Allocator,
@@ -216,6 +238,9 @@ pub fn runCheckerFixture(
 ) !void {
     var expectations = try parseExpectations(allocator, fixture_content);
     defer expectations.deinit();
+
+    var config_opt = try parseInlineConfig(allocator, fixture_content);
+    defer if (config_opt) |*cfg| cfg.deinit(allocator);
 
     var source = Source.init(allocator, fixture_path, fixture_content);
     defer source.deinit();
@@ -231,6 +256,7 @@ pub fn runCheckerFixture(
     const context = CheckerContext{
         .build_metadata = null,
         .type_context = null,
+        .config = if (config_opt) |*cfg| cfg else null,
     };
     try checker.checkAst(&source, allocator, &diagnostics, context);
 

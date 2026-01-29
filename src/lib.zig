@@ -2,6 +2,7 @@ pub const source = @import("source.zig");
 pub const diagnostic = @import("diagnostic.zig");
 pub const rule = @import("rule.zig");
 pub const checker = @import("checker.zig");
+pub const config = @import("config.zig");
 
 pub const Source = source.Source;
 pub const Diagnostic = diagnostic.Diagnostic;

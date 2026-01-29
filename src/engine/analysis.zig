@@ -531,20 +531,23 @@ pub const AnalysisEngine = struct {
             }
         }
 
-        // Priority 3: Name-based open detection with known base types
-        if ((std.mem.eql(u8, field_name, "open") or
-            std.mem.eql(u8, field_name, "openFile") or
-            std.mem.eql(u8, field_name, "openDir") or
-            std.mem.eql(u8, field_name, "openIterableDir") or
-            std.mem.eql(u8, field_name, "createFile")) and
-            self.isKnownOpenBase(tree, base_node))
-        {
+        // Priority 3: Type-based open detection with strict type info.
+        const type_status = self.classifyResourceReturningCall(call_ast_node);
+        if (type_status == .resource) {
             return .{ .kind = .open, .target_expr = null, .call_node = call_ast_node };
         }
 
-        // Priority 4: Type-based open detection - return type is a known file/fd type
-        if (self.isResourceReturningCall(call_ast_node)) {
-            return .{ .kind = .open, .target_expr = null, .call_node = call_ast_node };
+        // Priority 4: Name-based open detection with known base types (only when type info is missing).
+        if (type_status == .unknown) {
+            if ((std.mem.eql(u8, field_name, "open") or
+                std.mem.eql(u8, field_name, "openFile") or
+                std.mem.eql(u8, field_name, "openDir") or
+                std.mem.eql(u8, field_name, "openIterableDir") or
+                std.mem.eql(u8, field_name, "createFile")) and
+                self.isKnownOpenBase(tree, base_node))
+            {
+                return .{ .kind = .open, .target_expr = null, .call_node = call_ast_node };
+            }
         }
 
         if (std.mem.eql(u8, field_name, "close")) {
@@ -554,24 +557,53 @@ pub const AnalysisEngine = struct {
         return null;
     }
 
-    /// Check if a call expression returns a known resource type (file, fd, etc.).
-    /// Used for type-based open detection.
-    fn isResourceReturningCall(self: *AnalysisEngine, call_ast_node: u32) bool {
-        const type_ctx = self.type_context orelse return false;
-        const type_info = type_ctx.getExpressionType(call_ast_node) orelse return false;
+    const ResourceReturnStatus = enum {
+        unknown,
+        resource,
+        non_resource,
+    };
 
-        // Check if the return type is a known resource type
-        if (type_info.type_str) |type_str| {
-            // Known file types
-            if (std.mem.eql(u8, type_str, "std.fs.File") or
-                std.mem.eql(u8, type_str, "std.posix.fd_t") or
-                std.mem.eql(u8, type_str, "std.fs.Dir") or
-                std.mem.eql(u8, type_str, "std.fs.IterableDir"))
-            {
-                return true;
+    /// Classify whether a call returns a known resource type.
+    /// Uses strict type information and avoids name-only heuristics.
+    fn classifyResourceReturningCall(self: *AnalysisEngine, call_ast_node: u32) ResourceReturnStatus {
+        const type_ctx = self.type_context orelse return .unknown;
+        if (type_ctx.getExpressionTypeStrict(call_ast_node)) |strict_info| {
+            if (strict_info.type_str) |type_str| {
+                if (std.mem.eql(u8, type_str, "std.fs.File") or
+                    std.mem.eql(u8, type_str, "std.posix.fd_t") or
+                    std.mem.eql(u8, type_str, "std.fs.Dir") or
+                    std.mem.eql(u8, type_str, "std.fs.IterableDir"))
+                {
+                    return .resource;
+                }
+                return .non_resource;
+            }
+
+            return switch (strict_info.kind) {
+                .int,
+                .uint,
+                .float,
+                .bool_type,
+                .void_type,
+                .error_union,
+                => .non_resource,
+                else => .unknown,
+            };
+        }
+
+        if (type_ctx.getExpressionType(call_ast_node)) |loose_info| {
+            if (loose_info.type_str) |type_str| {
+                if (std.mem.eql(u8, type_str, "std.fs.File") or
+                    std.mem.eql(u8, type_str, "std.posix.fd_t") or
+                    std.mem.eql(u8, type_str, "std.fs.Dir") or
+                    std.mem.eql(u8, type_str, "std.fs.IterableDir"))
+                {
+                    return .resource;
+                }
             }
         }
-        return false;
+
+        return .unknown;
     }
 
     fn isAllocatorBase(self: *AnalysisEngine, tree: *const std.zig.Ast, base_node: u32) bool {
@@ -1857,8 +1889,10 @@ pub const AnalysisEngine = struct {
                                     } else if (self.type_context) |type_ctx| {
                                         // Type-based check: return expression is an error union
                                         // This handles cases like `return err;` or `return someFn();`
-                                        if (type_ctx.isExpressionErrorUnion(ret_expr_idx)) {
-                                            new_state.setErrorState(.error_active);
+                                        if (type_ctx.getExpressionTypeStrict(ret_expr_idx)) |ti| {
+                                            if (ti.kind == .error_union) {
+                                                new_state.setErrorState(.error_active);
+                                            }
                                         }
                                     }
 

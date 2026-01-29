@@ -133,9 +133,20 @@ pub const TypeContext = struct {
     /// Get type information for an expression node (call, return, etc.).
     /// This extends getNodeType to handle expression nodes that aren't declarations.
     pub fn getExpressionType(self: *TypeContext, ast_node: u32) ?TypeInfo {
-        // Check cache first
-        if (self.node_type_cache.get(ast_node)) |cached| {
-            return cached;
+        return self.getExpressionTypeInternal(ast_node, true, true);
+    }
+
+    /// Strict expression type query that avoids name-only heuristics.
+    /// Use this when the result should only be driven by resolved type information.
+    pub fn getExpressionTypeStrict(self: *TypeContext, ast_node: u32) ?TypeInfo {
+        return self.getExpressionTypeInternal(ast_node, false, false);
+    }
+
+    fn getExpressionTypeInternal(self: *TypeContext, ast_node: u32, use_known_methods: bool, use_cache: bool) ?TypeInfo {
+        if (use_cache) {
+            if (self.node_type_cache.get(ast_node)) |cached| {
+                return cached;
+            }
         }
 
         const tree = self.source.ast() catch return null;
@@ -144,27 +155,29 @@ pub const TypeContext = struct {
         if (ast_node >= tags.len) return null;
 
         const type_info: ?TypeInfo = switch (tags[ast_node]) {
-            .call, .call_comma, .call_one, .call_one_comma => self.getCallExpressionType(tree, ast_node),
+            .call, .call_comma, .call_one, .call_one_comma => self.getCallExpressionType(tree, ast_node, use_known_methods),
             .@"try" => self.getTryExpressionType(tree, ast_node),
             .@"catch" => self.getCatchExpressionType(tree, ast_node),
             .error_value => TypeInfo.initErrorUnion(),
             .identifier => self.getIdentifierType(tree, ast_node),
+            .field_access => self.getFieldAccessType(tree, ast_node, use_known_methods, use_cache),
             else => null,
         };
 
-        // Cache the result if found
-        if (type_info) |ti| {
-            self.node_type_cache.put(ast_node, ti) catch |err| {
-                std.debug.assert(err == error.OutOfMemory);
-            };
-            return ti;
+        if (use_cache) {
+            if (type_info) |ti| {
+                self.node_type_cache.put(ast_node, ti) catch |err| {
+                    std.debug.assert(err == error.OutOfMemory);
+                };
+                return ti;
+            }
         }
 
-        return null;
+        return type_info;
     }
 
     /// Get the return type of a call expression.
-    fn getCallExpressionType(self: *TypeContext, tree: *const std.zig.Ast, call_node: u32) ?TypeInfo {
+    fn getCallExpressionType(self: *TypeContext, tree: *const std.zig.Ast, call_node: u32, use_known_methods: bool) ?TypeInfo {
         const tags = tree.nodes.items(.tag);
 
         // Get the callee (function being called)
@@ -184,7 +197,7 @@ pub const TypeContext = struct {
 
         // If the callee is a field access (method call), try to determine type from the field name
         if (tags[callee_node] == .field_access) {
-            return self.getMethodReturnType(tree, callee_node);
+            return self.getMethodReturnType(tree, callee_node, use_known_methods);
         }
 
         return null;
@@ -214,7 +227,7 @@ pub const TypeContext = struct {
     /// Get the return type of a method call from field access.
     /// First tries known standard library methods, then falls back to looking up
     /// the method as a function declaration in the current file.
-    fn getMethodReturnType(self: *TypeContext, tree: *const std.zig.Ast, field_node: u32) ?TypeInfo {
+    fn getMethodReturnType(self: *TypeContext, tree: *const std.zig.Ast, field_node: u32, use_known_methods: bool) ?TypeInfo {
         const datas = tree.nodes.items(.data);
         const token_tags = tree.tokens.items(.tag);
         const token_starts = tree.tokens.items(.start);
@@ -225,14 +238,139 @@ pub const TypeContext = struct {
 
         const method_name = extractIdentifier(source, token_starts[field_token]);
 
-        // First check hardcoded known methods, then fall back to function lookup
-        if (self.getKnownMethodReturnType(method_name)) |ti| {
-            return ti;
+        if (use_known_methods) {
+            // First check hardcoded known methods, then fall back to function lookup
+            if (self.getKnownMethodReturnType(method_name)) |ti| {
+                return ti;
+            }
         }
 
         // Fall back: scan for any matching function declaration (including container methods)
         if (self.findAnyFunctionReturnType(tree, method_name)) |ti| {
             return ti;
+        }
+
+        return null;
+    }
+
+    fn getFieldAccessType(self: *TypeContext, tree: *const std.zig.Ast, field_node: u32, use_known_methods: bool, use_cache: bool) ?TypeInfo {
+        const datas = tree.nodes.items(.data);
+        const token_tags = tree.tokens.items(.tag);
+        const token_starts = tree.tokens.items(.start);
+        const source = self.source.getContent();
+
+        const field_access = datas[field_node].node_and_token;
+        const base_node = @intFromEnum(field_access[0]);
+        const field_token = field_access[1];
+        if (field_token >= token_tags.len or token_tags[field_token] != .identifier) return null;
+
+        const field_name = extractIdentifier(source, token_starts[field_token]);
+        const base_type = self.getExpressionTypeInternal(base_node, use_known_methods, use_cache) orelse return null;
+        const base_type_name = base_type.type_str orelse return null;
+
+        const container_node = self.findContainerDeclForType(tree, base_type_name) orelse return null;
+        return self.getContainerFieldType(tree, container_node, field_name, use_known_methods, use_cache);
+    }
+
+    fn findContainerDeclForType(self: *TypeContext, tree: *const std.zig.Ast, type_name: []const u8) ?u32 {
+        _ = self;
+        const tags = tree.nodes.items(.tag);
+        const token_tags = tree.tokens.items(.tag);
+
+        for (0..tags.len) |i| {
+            const node_idx: u32 = @intCast(i);
+            if (tags[node_idx] == .simple_var_decl or
+                tags[node_idx] == .aligned_var_decl or
+                tags[node_idx] == .local_var_decl)
+            {
+                const full_decl = tree.fullVarDecl(@enumFromInt(node_idx)) orelse continue;
+                const name_token = full_decl.ast.mut_token + 1;
+                if (name_token >= token_tags.len or token_tags[name_token] != .identifier) continue;
+                const decl_name = tree.tokenSlice(name_token);
+                if (!std.mem.eql(u8, decl_name, type_name)) continue;
+
+                if (full_decl.ast.init_node.unwrap()) |init_node_idx| {
+                    const init_node: u32 = @intFromEnum(init_node_idx);
+                    if (init_node >= tags.len) continue;
+                    switch (tags[init_node]) {
+                        .container_decl,
+                        .container_decl_trailing,
+                        .container_decl_two,
+                        .container_decl_two_trailing,
+                        .container_decl_arg,
+                        .container_decl_arg_trailing,
+                        => return init_node,
+                        else => {},
+                    }
+                }
+            }
+        }
+
+        return null;
+    }
+
+    fn getContainerFieldType(
+        self: *TypeContext,
+        tree: *const std.zig.Ast,
+        container_node: u32,
+        field_name: []const u8,
+        use_known_methods: bool,
+        use_cache: bool,
+    ) ?TypeInfo {
+        const tags = tree.nodes.items(.tag);
+        const token_tags = tree.tokens.items(.tag);
+
+        var buf: [2]std.zig.Ast.Node.Index = undefined;
+        const container = tree.fullContainerDecl(&buf, @enumFromInt(container_node)) orelse return null;
+
+        for (container.ast.members) |member| {
+            const member_idx: usize = @intCast(@intFromEnum(member));
+            if (member_idx >= tags.len) continue;
+            switch (tags[member_idx]) {
+                .container_field => {
+                    const field = tree.containerField(member);
+                    if (field.ast.tuple_like) continue;
+                    const name_token = field.ast.main_token;
+                    if (name_token >= token_tags.len or token_tags[name_token] != .identifier) continue;
+                    const name = tree.tokenSlice(name_token);
+                    if (!std.mem.eql(u8, name, field_name)) continue;
+                    if (field.ast.type_expr.unwrap()) |type_node| {
+                        return self.getTypeFromAstNode(tree, @intFromEnum(type_node));
+                    }
+                    if (field.ast.value_expr.unwrap()) |value_node| {
+                        return self.getExpressionTypeInternal(@intFromEnum(value_node), use_known_methods, use_cache);
+                    }
+                },
+                .container_field_init => {
+                    const field = tree.containerFieldInit(member);
+                    if (field.ast.tuple_like) continue;
+                    const name_token = field.ast.main_token;
+                    if (name_token >= token_tags.len or token_tags[name_token] != .identifier) continue;
+                    const name = tree.tokenSlice(name_token);
+                    if (!std.mem.eql(u8, name, field_name)) continue;
+                    if (field.ast.type_expr.unwrap()) |type_node| {
+                        return self.getTypeFromAstNode(tree, @intFromEnum(type_node));
+                    }
+                    if (field.ast.value_expr.unwrap()) |value_node| {
+                        return self.getExpressionTypeInternal(@intFromEnum(value_node), use_known_methods, use_cache);
+                    }
+                },
+                .container_field_align => {
+                    const field = tree.containerFieldAlign(member);
+                    if (field.ast.tuple_like) continue;
+                    const name_token = field.ast.main_token;
+                    if (name_token >= token_tags.len or token_tags[name_token] != .identifier) continue;
+                    const name = tree.tokenSlice(name_token);
+                    if (!std.mem.eql(u8, name, field_name)) continue;
+                    if (field.ast.type_expr.unwrap()) |type_node| {
+                        return self.getTypeFromAstNode(tree, @intFromEnum(type_node));
+                    }
+                    if (field.ast.value_expr.unwrap()) |value_node| {
+                        return self.getExpressionTypeInternal(@intFromEnum(value_node), use_known_methods, use_cache);
+                    }
+                },
+                else => {},
+            }
         }
 
         return null;

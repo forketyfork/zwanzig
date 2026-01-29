@@ -68,6 +68,12 @@ pub const Config = struct {
     /// - fqn: Optional fully qualified name (e.g., "mymodule.createResource")
     pub fn matchResourceModel(self: *const Config, method_name: []const u8, receiver_type: ?[]const u8, return_type: ?[]const u8, fqn: ?[]const u8) ?ResourceModelKind {
         for (self.resource_models) |model| {
+            const has_match = model.fqn != null or
+                model.method_name != null or
+                model.receiver_type != null or
+                model.return_type != null;
+            if (!has_match) continue;
+
             // Check FQN match first (if model has fqn, it takes precedence)
             if (model.fqn) |expected_fqn| {
                 if (fqn) |actual_fqn| {
