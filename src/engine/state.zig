@@ -466,6 +466,55 @@ pub const ProgramState = struct {
         }
         return hasher.final();
     }
+
+    /// Widening operator for program states.
+    /// Used at loop headers to ensure convergence by over-approximating.
+    /// This should only be called on states with the same loop-header key
+    /// (same ProgramPoint + same calling context).
+    ///
+    /// Widening rules:
+    /// - Environment: widened using `Environment.widen`.
+    /// - Constraints: widened using `ConstraintManager.widen` (intersection).
+    /// - Store: widened using `Store.widen`.
+    /// - Error state: if equal, keep; if different, set to `.error_active` (conservative).
+    /// - Inline depth and call stack: preserved from `self` (same context assumption).
+    /// - Cached hash: cleared after widening.
+    pub fn widen(self: *const ProgramState, other: *const ProgramState) !ProgramState {
+        const allocator = self.env.allocator;
+
+        var new_env = try self.env.widen(&other.env);
+        errdefer new_env.deinit();
+
+        var new_constraints = try self.constraints.widen(&other.constraints);
+        errdefer new_constraints.deinit();
+
+        var new_store = try self.store.widen(&other.store, allocator);
+        errdefer new_store.deinit();
+
+        // Error state join: if different, set to .error_active (conservative)
+        const new_error_state = if (self.error_state == other.error_state)
+            self.error_state
+        else
+            .error_active;
+
+        // Clone call stack from self (same context assumption)
+        var new_call_stack: std.ArrayList(CallSite) = .empty;
+        errdefer new_call_stack.deinit(allocator);
+        for (self.call_stack.items) |cs| {
+            try new_call_stack.append(allocator, cs);
+        }
+
+        return .{
+            .env = new_env,
+            .constraints = new_constraints,
+            .store = new_store,
+            .error_state = new_error_state,
+            .cached_hash = null, // Clear cached hash after widening
+            .inline_depth = self.inline_depth, // Preserve from self (same context)
+            .call_stack = new_call_stack,
+            .build_metadata = self.build_metadata,
+        };
+    }
 };
 
 test "ProgramPoint basic operations" {
@@ -918,4 +967,203 @@ test "LoopHeaderKey HashContext works with HashMap" {
 
     try testing.expectEqual(@as(?u32, 100), map.get(key1));
     try testing.expectEqual(@as(?u32, 200), map.get(key2));
+}
+
+test "ProgramState widen composes domain widenings" {
+    const testing = std.testing;
+    const allocator = testing.allocator;
+
+    var state1 = ProgramState.init(allocator);
+    defer state1.deinit();
+
+    var state2 = ProgramState.init(allocator);
+    defer state2.deinit();
+
+    // Set up environments with overlapping and disjoint variables
+    try state1.setVar(ids.varId(1), .{ .concrete_int = 10 });
+    try state1.setVar(ids.varId(2), .{ .concrete_int = 20 });
+
+    try state2.setVar(ids.varId(1), .{ .concrete_int = 10 }); // same
+    try state2.setVar(ids.varId(2), .{ .concrete_int = 30 }); // different
+
+    // Add constraints
+    try state1.addConstraint(Constraint.intCompare(ids.varId(1), .eq, 10));
+    try state2.addConstraint(Constraint.intCompare(ids.varId(1), .eq, 10)); // shared
+
+    // Track resources
+    try state1.trackAllocation(ids.varId(100));
+    try state2.trackAllocation(ids.varId(100)); // same
+
+    var widened = try state1.widen(&state2);
+    defer widened.deinit();
+
+    // var1 should be preserved (same value)
+    const val1 = widened.getVar(ids.varId(1));
+    try testing.expect(val1 != null);
+    try testing.expect(val1.?.eql(.{ .concrete_int = 10 }));
+
+    // var2 should be widened to unknown (different values)
+    const val2 = widened.getVar(ids.varId(2));
+    try testing.expect(val2 != null);
+    try testing.expect(val2.?.isUnknown());
+
+    // Shared constraint should remain
+    try testing.expectEqual(@as(usize, 1), widened.constraintCount());
+
+    // Resource state should remain (both agree)
+    try testing.expectEqual(ResourceState.allocated, widened.getRegionState(ids.varId(100)).?);
+}
+
+test "ProgramState widen clears cached hash" {
+    const testing = std.testing;
+    const allocator = testing.allocator;
+
+    var state1 = ProgramState.init(allocator);
+    defer state1.deinit();
+
+    var state2 = ProgramState.init(allocator);
+    defer state2.deinit();
+
+    // Compute hash before widening
+    _ = state1.computeHash();
+    try testing.expect(state1.cached_hash != null);
+
+    var widened = try state1.widen(&state2);
+    defer widened.deinit();
+
+    // Widened state should have null cached_hash
+    try testing.expect(widened.cached_hash == null);
+}
+
+test "ProgramState widen error_state join same" {
+    const testing = std.testing;
+    const allocator = testing.allocator;
+
+    // Both states have same error_state
+    var state1 = ProgramState.init(allocator);
+    defer state1.deinit();
+    state1.setErrorState(.normal);
+
+    var state2 = ProgramState.init(allocator);
+    defer state2.deinit();
+    state2.setErrorState(.normal);
+
+    var widened = try state1.widen(&state2);
+    defer widened.deinit();
+
+    try testing.expectEqual(ErrorState.normal, widened.getErrorState());
+
+    // Now test with error_active
+    var state3 = ProgramState.init(allocator);
+    defer state3.deinit();
+    state3.setErrorState(.error_active);
+
+    var state4 = ProgramState.init(allocator);
+    defer state4.deinit();
+    state4.setErrorState(.error_active);
+
+    var widened2 = try state3.widen(&state4);
+    defer widened2.deinit();
+
+    try testing.expectEqual(ErrorState.error_active, widened2.getErrorState());
+}
+
+test "ProgramState widen error_state join different becomes error_active" {
+    const testing = std.testing;
+    const allocator = testing.allocator;
+
+    var state1 = ProgramState.init(allocator);
+    defer state1.deinit();
+    state1.setErrorState(.normal);
+
+    var state2 = ProgramState.init(allocator);
+    defer state2.deinit();
+    state2.setErrorState(.error_active);
+
+    var widened = try state1.widen(&state2);
+    defer widened.deinit();
+
+    // Different error states should become error_active (conservative)
+    try testing.expectEqual(ErrorState.error_active, widened.getErrorState());
+
+    // Test the reverse
+    var widened2 = try state2.widen(&state1);
+    defer widened2.deinit();
+
+    try testing.expectEqual(ErrorState.error_active, widened2.getErrorState());
+}
+
+test "ProgramState widen preserves inline depth and call stack" {
+    const testing = std.testing;
+    const allocator = testing.allocator;
+
+    var cfg = Cfg.init(allocator);
+    defer cfg.deinit();
+
+    var state1 = ProgramState.init(allocator);
+    defer state1.deinit();
+    state1.incrementInlineDepth();
+    try state1.pushCallSite(CallSite{ .call_node = ids.cfgId(1), .caller_cfg = &cfg, .return_node = ids.cfgId(2) });
+
+    var state2 = ProgramState.init(allocator);
+    defer state2.deinit();
+    state2.incrementInlineDepth();
+    try state2.pushCallSite(CallSite{ .call_node = ids.cfgId(1), .caller_cfg = &cfg, .return_node = ids.cfgId(2) });
+
+    var widened = try state1.widen(&state2);
+    defer widened.deinit();
+
+    // Inline depth and call stack should be preserved from self
+    try testing.expectEqual(@as(u32, 1), widened.getInlineDepth());
+    try testing.expectEqual(@as(usize, 1), widened.call_stack.items.len);
+    try testing.expectEqual(ids.cfgId(1), widened.call_stack.items[0].call_node);
+}
+
+test "ProgramState widen with empty states" {
+    const testing = std.testing;
+    const allocator = testing.allocator;
+
+    var state1 = ProgramState.init(allocator);
+    defer state1.deinit();
+
+    var state2 = ProgramState.init(allocator);
+    defer state2.deinit();
+
+    var widened = try state1.widen(&state2);
+    defer widened.deinit();
+
+    try testing.expectEqual(@as(usize, 0), widened.envSize());
+    try testing.expectEqual(@as(usize, 0), widened.constraintCount());
+    try testing.expectEqual(ErrorState.normal, widened.getErrorState());
+    try testing.expectEqual(@as(u32, 0), widened.getInlineDepth());
+}
+
+test "ProgramState widen store violations union" {
+    const testing = std.testing;
+    const allocator = testing.allocator;
+
+    var state1 = ProgramState.init(allocator);
+    defer state1.deinit();
+
+    var state2 = ProgramState.init(allocator);
+    defer state2.deinit();
+
+    // Create a violation in state1 (double free)
+    try state1.trackAllocation(ids.varId(100));
+    try state1.trackFree(ids.varId(100), 1);
+    try state1.trackFree(ids.varId(100), 2);
+
+    // Create a different violation in state2 (use after free)
+    try state2.trackAllocation(ids.varId(200));
+    try state2.trackFree(ids.varId(200), 3);
+    try state2.trackUse(ids.varId(200), 4);
+
+    try testing.expectEqual(@as(usize, 1), state1.getStoreViolations().len);
+    try testing.expectEqual(@as(usize, 1), state2.getStoreViolations().len);
+
+    var widened = try state1.widen(&state2);
+    defer widened.deinit();
+
+    // Both violations should be present (union)
+    try testing.expectEqual(@as(usize, 2), widened.getStoreViolations().len);
 }
