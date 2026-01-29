@@ -86,6 +86,46 @@ pub const CallSite = struct {
     return_node: CfgNodeId,
 };
 
+/// Key for identifying a loop header in a specific interprocedural context.
+/// Used to track states at loop headers for widening.
+/// Widening should only occur when traversing a loop_back edge into a loop_header
+/// pre-state, and states from different calling contexts must not be merged.
+pub const LoopHeaderKey = struct {
+    /// Hash of the ProgramPoint (loop header node + CFG + pre/post)
+    point_hash: u64,
+    /// Hash of the calling context (inline depth + call stack)
+    context_hash: u64,
+
+    pub fn init(point: ProgramPoint, state: *const ProgramState) LoopHeaderKey {
+        return .{
+            .point_hash = point.hash(),
+            .context_hash = state.contextHash(),
+        };
+    }
+
+    pub fn eql(self: LoopHeaderKey, other: LoopHeaderKey) bool {
+        return self.point_hash == other.point_hash and
+            self.context_hash == other.context_hash;
+    }
+
+    pub fn hash(self: LoopHeaderKey) u64 {
+        var hasher = std.hash.Wyhash.init(0);
+        hasher.update(std.mem.asBytes(&self.point_hash));
+        hasher.update(std.mem.asBytes(&self.context_hash));
+        return hasher.final();
+    }
+
+    pub const HashContext = struct {
+        pub fn hash(_: HashContext, key: LoopHeaderKey) u64 {
+            return key.hash();
+        }
+
+        pub fn eql(_: HashContext, a: LoopHeaderKey, b: LoopHeaderKey) bool {
+            return a.eql(b);
+        }
+    };
+};
+
 /// Abstract program state for path-sensitive analysis.
 /// Stores the environment mapping variables to abstract values,
 /// plus path constraints from branch conditions, and error state.
@@ -410,6 +450,21 @@ pub const ProgramState = struct {
     /// Check if we are at an inline call site (depth > 0).
     pub fn isInlined(self: *const ProgramState) bool {
         return self.inline_depth > 0;
+    }
+
+    /// Compute a hash of the calling context (inline depth + call stack).
+    /// Used to distinguish loop header states from different interprocedural contexts.
+    pub fn contextHash(self: *const ProgramState) u64 {
+        var hasher = std.hash.Wyhash.init(0);
+        hasher.update(std.mem.asBytes(&self.inline_depth));
+        for (self.call_stack.items) |cs| {
+            const call_node = ids.cfgIndex(cs.call_node);
+            const return_node = ids.cfgIndex(cs.return_node);
+            hasher.update(std.mem.asBytes(&call_node));
+            hasher.update(std.mem.asBytes(&return_node));
+            hasher.update(std.mem.asBytes(&@intFromPtr(cs.caller_cfg)));
+        }
+        return hasher.final();
     }
 };
 
@@ -736,4 +791,131 @@ test "ProgramState hash includes store" {
 
     try state2.trackAllocation(ids.varId(9));
     try testing.expect(state1.computeHash() != state2.computeHash());
+}
+
+test "ProgramState contextHash reflects inline depth" {
+    const testing = std.testing;
+    const allocator = testing.allocator;
+
+    var state1 = ProgramState.init(allocator);
+    defer state1.deinit();
+
+    var state2 = ProgramState.init(allocator);
+    defer state2.deinit();
+
+    try testing.expectEqual(state1.contextHash(), state2.contextHash());
+
+    state2.incrementInlineDepth();
+    try testing.expect(state1.contextHash() != state2.contextHash());
+}
+
+test "ProgramState contextHash reflects call stack" {
+    const testing = std.testing;
+    const allocator = testing.allocator;
+
+    var cfg = Cfg.init(allocator);
+    defer cfg.deinit();
+
+    var state1 = ProgramState.init(allocator);
+    defer state1.deinit();
+
+    var state2 = ProgramState.init(allocator);
+    defer state2.deinit();
+
+    try testing.expectEqual(state1.contextHash(), state2.contextHash());
+
+    try state2.pushCallSite(CallSite{ .call_node = ids.cfgId(1), .caller_cfg = &cfg, .return_node = ids.cfgId(2) });
+    try testing.expect(state1.contextHash() != state2.contextHash());
+}
+
+test "ProgramState contextHash is stable" {
+    const testing = std.testing;
+    const allocator = testing.allocator;
+
+    var cfg = Cfg.init(allocator);
+    defer cfg.deinit();
+
+    var state = ProgramState.init(allocator);
+    defer state.deinit();
+
+    state.incrementInlineDepth();
+    try state.pushCallSite(CallSite{ .call_node = ids.cfgId(5), .caller_cfg = &cfg, .return_node = ids.cfgId(10) });
+
+    const hash1 = state.contextHash();
+    const hash2 = state.contextHash();
+    try testing.expectEqual(hash1, hash2);
+}
+
+test "LoopHeaderKey basic operations" {
+    const testing = std.testing;
+    const allocator = testing.allocator;
+
+    var cfg = Cfg.init(allocator);
+    defer cfg.deinit();
+
+    var state = ProgramState.init(allocator);
+    defer state.deinit();
+
+    const point1 = ProgramPoint.initPre(ids.cfgId(5), &cfg);
+    const point2 = ProgramPoint.initPre(ids.cfgId(6), &cfg);
+
+    const key1 = LoopHeaderKey.init(point1, &state);
+    const key2 = LoopHeaderKey.init(point1, &state);
+    const key3 = LoopHeaderKey.init(point2, &state);
+
+    try testing.expect(key1.eql(key2));
+    try testing.expect(!key1.eql(key3));
+    try testing.expectEqual(key1.hash(), key2.hash());
+    try testing.expect(key1.hash() != key3.hash());
+}
+
+test "LoopHeaderKey distinguishes calling contexts" {
+    const testing = std.testing;
+    const allocator = testing.allocator;
+
+    var cfg = Cfg.init(allocator);
+    defer cfg.deinit();
+
+    var state1 = ProgramState.init(allocator);
+    defer state1.deinit();
+
+    var state2 = ProgramState.init(allocator);
+    defer state2.deinit();
+
+    state2.incrementInlineDepth();
+    try state2.pushCallSite(CallSite{ .call_node = ids.cfgId(1), .caller_cfg = &cfg, .return_node = ids.cfgId(2) });
+
+    const point = ProgramPoint.initPre(ids.cfgId(5), &cfg);
+
+    const key1 = LoopHeaderKey.init(point, &state1);
+    const key2 = LoopHeaderKey.init(point, &state2);
+
+    try testing.expect(!key1.eql(key2));
+    try testing.expect(key1.hash() != key2.hash());
+}
+
+test "LoopHeaderKey HashContext works with HashMap" {
+    const testing = std.testing;
+    const allocator = testing.allocator;
+
+    var cfg = Cfg.init(allocator);
+    defer cfg.deinit();
+
+    var state = ProgramState.init(allocator);
+    defer state.deinit();
+
+    const point1 = ProgramPoint.initPre(ids.cfgId(5), &cfg);
+    const point2 = ProgramPoint.initPre(ids.cfgId(6), &cfg);
+
+    const key1 = LoopHeaderKey.init(point1, &state);
+    const key2 = LoopHeaderKey.init(point2, &state);
+
+    var map = std.HashMap(LoopHeaderKey, u32, LoopHeaderKey.HashContext, std.hash_map.default_max_load_percentage).init(allocator);
+    defer map.deinit();
+
+    try map.put(key1, 100);
+    try map.put(key2, 200);
+
+    try testing.expectEqual(@as(?u32, 100), map.get(key1));
+    try testing.expectEqual(@as(?u32, 200), map.get(key2));
 }
