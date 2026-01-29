@@ -71,6 +71,8 @@ pub const AnalysisEngine = struct {
     type_context: ?*TypeContext,
     /// Config for resource models (optional, not owned).
     config: ?*const Config,
+    /// Whether loop-header widening is enabled.
+    use_widening: bool,
     /// Scratch buffer for FQN construction
     fqn_buffer: [256]u8 = undefined,
 
@@ -105,6 +107,7 @@ pub const AnalysisEngine = struct {
             .checker_name = null,
             .type_context = null,
             .config = null,
+            .use_widening = false,
         };
     }
 
@@ -148,6 +151,11 @@ pub const AnalysisEngine = struct {
     /// Set the maximum number of states per program point before dropping.
     pub fn setMaxStatesPerPoint(self: *AnalysisEngine, max: u32) void {
         self.graph.setMaxStatesPerPoint(max);
+    }
+
+    /// Enable or disable loop-header widening for convergence.
+    pub fn setUseWidening(self: *AnalysisEngine, use_w: bool) void {
+        self.use_widening = use_w;
     }
 
     /// Set the checker name for logging purposes.
@@ -1698,9 +1706,10 @@ pub const AnalysisEngine = struct {
                         }
 
                         // Determine if widening should be applied at this loop header.
-                        // Widening triggers only on loop_back edges into loop_header pre-states.
+                        // Widening triggers only on loop_back edges into loop_header pre-states,
+                        // and only when widening is enabled via the --use-widening flag.
                         const widening_options = blk: {
-                            if (edge.kind == .loop_back) {
+                            if (self.use_widening and edge.kind == .loop_back) {
                                 // Check if successor is a loop_header node
                                 if (current_cfg.getNode(edge.to)) |succ_cfg_node| {
                                     if (succ_cfg_node.ir_node.tag == .loop_header) {
@@ -3013,6 +3022,8 @@ test "AnalysisEngine widening simple loop converges without drops" {
     var engine = AnalysisEngine.init(allocator, &cfg);
     defer engine.deinit();
 
+    // Enable widening for this test
+    engine.setUseWidening(true);
     // Set a low max_states_per_point
     engine.setMaxStatesPerPoint(5);
 
@@ -3083,6 +3094,8 @@ test "AnalysisEngine widening nested loops widen per header" {
     var engine = AnalysisEngine.init(allocator, &cfg);
     defer engine.deinit();
 
+    // Enable widening for this test
+    engine.setUseWidening(true);
     engine.setMaxStatesPerPoint(5);
 
     try engine.run();
@@ -3149,6 +3162,8 @@ test "AnalysisEngine widening branching loop preserves constraints conservativel
     var engine = AnalysisEngine.init(allocator, &cfg);
     defer engine.deinit();
 
+    // Enable widening for this test
+    engine.setUseWidening(true);
     engine.setMaxStatesPerPoint(5);
 
     try engine.run();
@@ -3198,6 +3213,8 @@ test "AnalysisEngine widening error path in loop remains sound" {
     var engine = AnalysisEngine.init(allocator, &cfg);
     defer engine.deinit();
 
+    // Enable widening for this test
+    engine.setUseWidening(true);
     engine.setMaxStatesPerPoint(10);
 
     try engine.run();

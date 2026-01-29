@@ -27,6 +27,8 @@ pub const Config = struct {
     rule_filter: RuleFilter,
     max_worklist_steps: ?usize = null,
     max_states_per_point: ?u32 = null,
+    /// Enable loop-header widening for convergence
+    use_widening: ?bool = null,
     /// Custom resource models for resource tracking
     resource_models: []const ResourceModel = &.{},
 
@@ -165,6 +167,7 @@ pub fn parseConfig(allocator: std.mem.Allocator, content: []const u8) ConfigErro
     const disabled_rules = obj.get("disabled_rules");
     const max_worklist_steps_value = obj.get("max_worklist_steps");
     const max_states_per_point_value = obj.get("max_states_per_point");
+    const use_widening_value = obj.get("use_widening");
 
     if (enabled_rules != null and disabled_rules != null) {
         return ConfigError.MutuallyExclusiveFields;
@@ -190,6 +193,14 @@ pub fn parseConfig(allocator: std.mem.Allocator, content: []const u8) ConfigErro
             return ConfigError.InvalidConfigFormat;
         }
         max_states_per_point = std.math.cast(u32, value.integer) orelse return ConfigError.InvalidConfigFormat;
+    }
+
+    var use_widening: ?bool = null;
+    if (use_widening_value) |value| {
+        if (value != .bool) {
+            return ConfigError.InvalidConfigFormat;
+        }
+        use_widening = value.bool;
     }
 
     // Parse resource_models first so all return paths can include it
@@ -233,6 +244,7 @@ pub fn parseConfig(allocator: std.mem.Allocator, content: []const u8) ConfigErro
             .rule_filter = .{ .allowlist = rule_names },
             .max_worklist_steps = max_worklist_steps,
             .max_states_per_point = max_states_per_point,
+            .use_widening = use_widening,
             .resource_models = resource_models,
         };
     }
@@ -260,6 +272,7 @@ pub fn parseConfig(allocator: std.mem.Allocator, content: []const u8) ConfigErro
             .rule_filter = .{ .blocklist = rule_names },
             .max_worklist_steps = max_worklist_steps,
             .max_states_per_point = max_states_per_point,
+            .use_widening = use_widening,
             .resource_models = resource_models,
         };
     }
@@ -268,6 +281,7 @@ pub fn parseConfig(allocator: std.mem.Allocator, content: []const u8) ConfigErro
         .rule_filter = .none,
         .max_worklist_steps = max_worklist_steps,
         .max_states_per_point = max_states_per_point,
+        .use_widening = use_widening,
         .resource_models = resource_models,
     };
 }

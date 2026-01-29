@@ -59,6 +59,7 @@ pub const CliArgs = struct {
     use_cache: bool,
     max_worklist_steps: ?usize,
     max_states_per_point: ?u32,
+    use_widening: ?bool,
 };
 
 pub const CliError = error{
@@ -86,6 +87,7 @@ pub fn parseArgs(allocator: std.mem.Allocator, args: []const []const u8) CliErro
     var use_cache: bool = false;
     var max_worklist_steps: ?usize = null;
     var max_states_per_point: ?u32 = null;
+    var use_widening: ?bool = null;
     var build_meta: ?BuildMetadata = null;
     errdefer {
         if (build_meta) |*meta| {
@@ -151,6 +153,8 @@ pub fn parseArgs(allocator: std.mem.Allocator, args: []const []const u8) CliErro
             const parsed = std.fmt.parseInt(u32, args[i], 10) catch return CliError.InvalidNumericValue;
             if (parsed == 0) return CliError.InvalidNumericValue;
             max_states_per_point = parsed;
+        } else if (std.mem.eql(u8, arg, "--use-widening")) {
+            use_widening = true;
         } else if (std.mem.startsWith(u8, arg, "--")) {
             continue;
         } else {
@@ -187,6 +191,7 @@ pub fn parseArgs(allocator: std.mem.Allocator, args: []const []const u8) CliErro
         .use_cache = use_cache,
         .max_worklist_steps = max_worklist_steps,
         .max_states_per_point = max_states_per_point,
+        .use_widening = use_widening,
     };
 }
 
@@ -194,6 +199,7 @@ const MergedConfig = struct {
     rule_filter: RuleFilter,
     max_worklist_steps: ?usize,
     max_states_per_point: ?u32,
+    use_widening: ?bool,
     resource_models: []const config.ResourceModel = &.{},
 };
 
@@ -206,12 +212,14 @@ fn mergeConfig(allocator: std.mem.Allocator, cli_args: CliArgs) !MergedConfig {
                 .rule_filter = cli_args.rule_filter,
                 .max_worklist_steps = cli_args.max_worklist_steps,
                 .max_states_per_point = cli_args.max_states_per_point,
+                .use_widening = cli_args.use_widening,
             };
         }
         return err;
     };
     const max_worklist_steps = cli_args.max_worklist_steps orelse loaded_config.max_worklist_steps;
     const max_states_per_point = cli_args.max_states_per_point orelse loaded_config.max_states_per_point;
+    const use_widening = cli_args.use_widening orelse loaded_config.use_widening;
     const resource_models = loaded_config.resource_models;
 
     switch (cli_args.rule_filter) {
@@ -220,6 +228,7 @@ fn mergeConfig(allocator: std.mem.Allocator, cli_args: CliArgs) !MergedConfig {
                 .rule_filter = loaded_config.rule_filter,
                 .max_worklist_steps = max_worklist_steps,
                 .max_states_per_point = max_states_per_point,
+                .use_widening = use_widening,
                 .resource_models = resource_models,
             };
         },
@@ -231,6 +240,7 @@ fn mergeConfig(allocator: std.mem.Allocator, cli_args: CliArgs) !MergedConfig {
                 .rule_filter = cli_args.rule_filter,
                 .max_worklist_steps = max_worklist_steps,
                 .max_states_per_point = max_states_per_point,
+                .use_widening = use_widening,
                 .resource_models = resource_models,
             };
         },
@@ -242,6 +252,7 @@ fn mergeConfig(allocator: std.mem.Allocator, cli_args: CliArgs) !MergedConfig {
                 .rule_filter = cli_args.rule_filter,
                 .max_worklist_steps = max_worklist_steps,
                 .max_states_per_point = max_states_per_point,
+                .use_widening = use_widening,
                 .resource_models = resource_models,
             };
         },
@@ -413,6 +424,9 @@ pub fn main() !void {
     if (final_config.max_states_per_point) |max| {
         analyzer.setMaxStatesPerPoint(max);
     }
+    if (final_config.use_widening) |use_w| {
+        analyzer.setUseWidening(use_w);
+    }
     // Pass resource models to the analyzer for config-driven detection
     if (final_config.resource_models.len > 0) {
         analyzer.setConfig(.{
@@ -458,6 +472,7 @@ fn printUsage() !void {
     try stdout.writeAll("  --format <format> Output format: 'text', 'json', or 'sarif' (default: text)\n");
     try stdout.writeAll("  --max-steps <n>   Max worklist steps per engine run\n");
     try stdout.writeAll("  --max-states-per-point <n> Max unique states per CFG point\n");
+    try stdout.writeAll("  --use-widening    Enable loop-header widening for convergence\n");
     try stdout.writeAll("  --cache           Enable incremental caching\n");
     try stdout.writeAll("\n  Note: --do and --skip are mutually exclusive and override config file.\n");
     try stdout.writeAll("\nArguments:\n");
@@ -784,6 +799,7 @@ test "mergeConfig: CLI overrides config allowlist" {
         .use_cache = false,
         .max_worklist_steps = null,
         .max_states_per_point = null,
+        .use_widening = null,
     };
 
     const result = try mergeConfig(allocator, cli_args);
@@ -825,6 +841,7 @@ test "mergeConfig: uses config when no CLI filter" {
         .use_cache = false,
         .max_worklist_steps = null,
         .max_states_per_point = null,
+        .use_widening = null,
     };
 
     const result = try mergeConfig(allocator, cli_args);
@@ -865,6 +882,7 @@ test "mergeConfig: no config file and no CLI filter" {
         .use_cache = false,
         .max_worklist_steps = null,
         .max_states_per_point = null,
+        .use_widening = null,
     };
 
     const result = try mergeConfig(allocator, cli_args);
