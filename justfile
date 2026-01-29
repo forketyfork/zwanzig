@@ -27,7 +27,7 @@ lint:
     shellcheck scripts/*.sh
 
     zig fmt --check src/
-    zig build run -- src/**/*.zig
+    zig build run -- --use-widening src/**/*.zig
 
 validate:
     ./validate.sh

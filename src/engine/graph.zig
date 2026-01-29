@@ -11,7 +11,7 @@ const LoopHeaderKey = state_mod.LoopHeaderKey;
 
 /// Default maximum number of unique states per program point.
 /// Beyond this, new states at the same point are dropped (widening approximation).
-const default_max_states_per_point: u32 = 10;
+const default_max_states_per_point: u32 = 50;
 
 /// A node in the exploded graph, keyed by (ProgramPoint, ProgramState).
 pub const ExplodedNode = struct {
