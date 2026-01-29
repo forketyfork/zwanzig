@@ -51,15 +51,25 @@ pub const StoreViolationsEngineChecker = struct {
 
             var engine = AnalysisEngine.initWithSource(allocator, cfg, src);
             defer engine.deinit();
-            engine.setMaxWorklistSteps(100_000);
             engine.setCheckerName("store-violations-engine");
             if (context.build_metadata) |metadata| {
                 engine.setBuildMetadata(metadata);
             }
+            if (context.analysis_limits.max_worklist_steps) |steps| {
+                engine.setMaxWorklistSteps(steps);
+            }
+            if (context.analysis_limits.max_states_per_point) |max| {
+                engine.setMaxStatesPerPoint(max);
+            }
+            var run_ok = true;
             engine.run() catch |err| switch (err) {
                 error.OutOfMemory => return error.OutOfMemory,
-                error.AnalysisLimitExceeded => return,
+                error.AnalysisLimitExceeded => run_ok = false,
             };
+            if (context.analysis_stats) |stats| {
+                stats.recordRun(engine.getGraph().getDroppedStateCount());
+            }
+            if (!run_ok) return;
 
             var reported: std.ArrayList(StoreViolation) = .empty;
             defer reported.deinit(allocator);

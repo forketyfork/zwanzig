@@ -475,7 +475,9 @@ Create `.zwanzig.json` for persistent settings. It's loaded automatically from t
 
 ```json
 {
-  "enabled_rules": ["empty-catch-engine", "dupe-import", "todo"]
+  "enabled_rules": ["empty-catch-engine", "dupe-import", "todo"],
+  "max_worklist_steps": 200000,
+  "max_states_per_point": 50
 }
 ```
 
@@ -483,7 +485,9 @@ Or to disable specific rules:
 
 ```json
 {
-  "disabled_rules": ["todo", "unused-decl"]
+  "disabled_rules": ["todo", "unused-decl"],
+  "max_worklist_steps": 200000,
+  "max_states_per_point": 50
 }
 ```
 
@@ -499,11 +503,21 @@ Or to disable specific rules:
 zwanzig --config path/to/custom.json src/
 ```
 
+**Override limits via CLI:**
+
+```bash
+zwanzig --max-steps 300000 --max-states-per-point 100 src/
+```
+
 **Config file format:**
 
 - `enabled_rules`: Array of rule names to run (allowlist mode)
 - `disabled_rules`: Array of rule names to skip (blocklist mode)
-- These fields are mutually exclusive - only one can be present
+- `max_worklist_steps`: Maximum worklist steps per engine run (positive integer)
+- `max_states_per_point`: Maximum unique states per CFG point (positive integer)
+- `enabled_rules` and `disabled_rules` are mutually exclusive - only one can be present
+
+Sample config: `docs/zwanzig.sample.json`
 
 ### Inline Suppression
 

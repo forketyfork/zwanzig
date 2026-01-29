@@ -4,7 +4,6 @@ const cfg_mod = @import("../cfg.zig");
 const ids = @import("../ids.zig");
 const Cfg = cfg_mod.Cfg;
 const CfgNode = cfg_mod.CfgNode;
-const EdgeKind = cfg_mod.EdgeKind;
 const CfgBuilder = cfg_mod.CfgBuilder;
 const Source = @import("../source.zig").Source;
 const BuildMetadata = @import("../build_metadata.zig").BuildMetadata;
@@ -65,8 +64,6 @@ pub const AnalysisEngine = struct {
     const WorklistItem = struct {
         /// Index of the exploded graph node to process
         node_index: u32,
-        /// The kind of edge that led to this node (for path-sensitive analysis)
-        edge_kind: EdgeKind,
         /// Optional constraint to apply (from branch condition)
         pending_constraint: ?Constraint,
         /// CFG to use for this worklist item (for interprocedural analysis)
@@ -122,6 +119,11 @@ pub const AnalysisEngine = struct {
     /// Set the maximum number of worklist steps before aborting analysis.
     pub fn setMaxWorklistSteps(self: *AnalysisEngine, steps: usize) void {
         self.max_worklist_steps = steps;
+    }
+
+    /// Set the maximum number of states per program point before dropping.
+    pub fn setMaxStatesPerPoint(self: *AnalysisEngine, max: u32) void {
+        self.graph.setMaxStatesPerPoint(max);
     }
 
     /// Set the checker name for logging purposes.
@@ -257,7 +259,7 @@ pub const AnalysisEngine = struct {
         if (!result.is_new) {
             initial_state.deinit();
         }
-        try self.worklist.append(self.allocator, .{ .node_index = result.index, .edge_kind = .normal, .pending_constraint = null, .cfg = cfg });
+        try self.worklist.append(self.allocator, .{ .node_index = result.index, .pending_constraint = null, .cfg = cfg });
 
         var worklist_steps: usize = 0;
         while (self.worklist.pop()) |item| {
@@ -278,7 +280,7 @@ pub const AnalysisEngine = struct {
                 });
                 return error.AnalysisLimitExceeded;
             }
-            try self.processNode(item.node_index, item.edge_kind, item.pending_constraint, item.cfg);
+            try self.processNode(item.node_index, item.pending_constraint, item.cfg);
         }
     }
 
@@ -641,16 +643,15 @@ pub const AnalysisEngine = struct {
         return main_tokens[call_node];
     }
 
-    fn processNode(self: *AnalysisEngine, node_index: u32, edge_kind: EdgeKind, pending_constraint: ?Constraint, current_cfg: *const Cfg) EngineError!void {
-        _ = edge_kind;
-
+    fn processNode(self: *AnalysisEngine, node_index: u32, pending_constraint: ?Constraint, current_cfg: *const Cfg) EngineError!void {
         const exploded_node = self.graph.getNode(node_index) orelse return;
         const point = exploded_node.point;
 
         // Clone the state immediately - we can't hold a reference to exploded_node.state
         // because graph operations may reallocate the nodes array and invalidate pointers.
         var state_copy = try exploded_node.state.clone(self.allocator);
-        defer state_copy.deinit();
+        var state_owned = true;
+        defer if (state_owned) state_copy.deinit();
 
         switch (point.kind) {
             .pre => {
@@ -669,28 +670,29 @@ pub const AnalysisEngine = struct {
                 }
 
                 const post_point = ProgramPoint.initPost(point.node_index, current_cfg);
-                var new_state = try self.transferFunction(point, &state_copy, current_cfg);
+                try self.transferFunction(point, &state_copy, current_cfg);
 
                 // Apply any pending constraint from a branch edge
                 if (pending_constraint) |constraint| {
-                    try new_state.addConstraint(constraint);
+                    try state_copy.addConstraint(constraint);
 
                     // Check if the state is still satisfiable after adding the constraint
-                    if (!new_state.isSatisfiable()) {
+                    if (!state_copy.isSatisfiable()) {
                         self.pruned_path_count += 1;
-                        new_state.deinit();
                         return; // Prune this path
                     }
                 }
 
-                const result = try self.graph.getOrCreateNode(post_point, &new_state);
+                const result = try self.graph.getOrCreateNode(post_point, &state_copy);
                 if (!result.is_new) {
-                    new_state.deinit();
+                    // Keep ownership; defer will deinit.
+                } else {
+                    state_owned = false;
                 }
                 try self.graph.addEdge(node_index, result.index);
 
                 if (result.is_new) {
-                    try self.worklist.append(self.allocator, .{ .node_index = result.index, .edge_kind = .normal, .pending_constraint = null, .cfg = current_cfg });
+                    try self.worklist.append(self.allocator, .{ .node_index = result.index, .pending_constraint = null, .cfg = current_cfg });
                 }
             },
             .post => {
@@ -769,7 +771,7 @@ pub const AnalysisEngine = struct {
                         try self.graph.addEdge(node_index, result.index);
 
                         if (result.is_new) {
-                            try self.worklist.append(self.allocator, .{ .node_index = result.index, .edge_kind = edge.kind, .pending_constraint = null, .cfg = current_cfg });
+                            try self.worklist.append(self.allocator, .{ .node_index = result.index, .pending_constraint = null, .cfg = current_cfg });
                         }
                     }
                 }
@@ -830,7 +832,6 @@ pub const AnalysisEngine = struct {
                         } else {
                             try self.worklist.append(self.allocator, .{
                                 .node_index = result.index,
-                                .edge_kind = .normal,
                                 .pending_constraint = null,
                                 .cfg = caller_cfg,
                             });
@@ -882,7 +883,6 @@ pub const AnalysisEngine = struct {
         } else {
             try self.worklist.append(self.allocator, .{
                 .node_index = result.index,
-                .edge_kind = .normal,
                 .pending_constraint = null,
                 .cfg = callee_cfg,
             });
@@ -915,7 +915,6 @@ pub const AnalysisEngine = struct {
         } else {
             try self.worklist.append(self.allocator, .{
                 .node_index = result.index,
-                .edge_kind = .normal,
                 .pending_constraint = null,
                 .cfg = call_site.caller_cfg,
             });
@@ -958,24 +957,22 @@ pub const AnalysisEngine = struct {
     /// Transfer function: compute the new state after executing a CFG node.
     /// Evaluates literals and assignments, updating the environment.
     /// For call nodes that couldn't be inlined, treats them as having unknown effects.
-    fn transferFunction(self: *AnalysisEngine, point: ProgramPoint, state: *const ProgramState, current_cfg: *const Cfg) EngineError!ProgramState {
-        const cfg_node = current_cfg.getNode(point.node_index) orelse return try state.clone(self.allocator);
+    fn transferFunction(self: *AnalysisEngine, point: ProgramPoint, state: *ProgramState, current_cfg: *const Cfg) EngineError!void {
+        const cfg_node = current_cfg.getNode(point.node_index) orelse return;
         const ir_node = cfg_node.ir_node;
-
-        var new_state = try state.clone(self.allocator);
 
         switch (ir_node.tag) {
             .var_decl => {
                 if (ir_node.ast_node) |ast_node| {
                     const var_id = self.resolveVarIdFromVarDecl(ast_node) orelse ids.varId(ast_node);
-                    try new_state.setVar(var_id, .unknown);
+                    try state.setVar(var_id, .unknown);
                     if (self.resolveVarDeclInitNode(ast_node)) |init_node| {
                         if (self.resolveAllocatorCall(init_node)) |call_info| {
                             if (call_info.kind == .alloc) {
-                                try new_state.trackAllocation(var_id);
+                                try state.trackAllocation(var_id);
                             }
                         } else if (self.isDefinitelyNonAlloc(init_node)) {
-                            try new_state.trackNonAllocation(var_id);
+                            try state.trackNonAllocation(var_id);
                         }
                     }
                 }
@@ -986,14 +983,14 @@ pub const AnalysisEngine = struct {
                 if (ir_node.operand_node) |lhs_node| {
                     // For now, set to unknown. Future enhancement: evaluate RHS literals
                     const var_id = self.resolveVarIdFromIdentifier(lhs_node) orelse ids.varId(lhs_node);
-                    try new_state.setVar(var_id, .unknown);
+                    try state.setVar(var_id, .unknown);
                     if (ir_node.operand2_node) |rhs_node| {
                         if (self.resolveAllocatorCall(rhs_node)) |call_info| {
                             if (call_info.kind == .alloc) {
-                                try new_state.trackAllocation(var_id);
+                                try state.trackAllocation(var_id);
                             }
                         } else if (self.isDefinitelyNonAlloc(rhs_node)) {
-                            try new_state.trackNonAllocation(var_id);
+                            try state.trackNonAllocation(var_id);
                         }
                     }
                 }
@@ -1013,7 +1010,7 @@ pub const AnalysisEngine = struct {
                             if (call_info.first_arg) |arg_node| {
                                 if (self.resolveVarIdFromExpr(arg_node)) |var_id| {
                                     const call_token = self.resolveCallToken(call_info.call_node);
-                                    try new_state.trackFree(var_id, call_token);
+                                    try state.trackFree(var_id, call_token);
                                 }
                             }
                         }
@@ -1022,8 +1019,6 @@ pub const AnalysisEngine = struct {
             },
             else => {},
         }
-
-        return new_state;
     }
 
     /// Get the count of pruned paths
@@ -1218,7 +1213,7 @@ test "AnalysisEngine branch constraint pruning" {
     var initial_state = ProgramState.init(allocator);
     try initial_state.setVar(ids.varId(100), .{ .concrete_int = 5 });
     const result = try engine.graph.getOrCreateNode(entry_point, &initial_state);
-    try engine.worklist.append(allocator, .{ .node_index = result.index, .edge_kind = .normal, .pending_constraint = null, .cfg = &cfg });
+    try engine.worklist.append(allocator, .{ .node_index = result.index, .pending_constraint = null, .cfg = &cfg });
     if (!result.is_new) {
         initial_state.deinit();
     }
