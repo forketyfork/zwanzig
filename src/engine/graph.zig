@@ -131,11 +131,16 @@ pub const ExplodedGraph = struct {
         widening_applied: bool = false,
         /// Whether widening converged (state unchanged after widening)
         converged: bool = false,
+        /// Whether the caller should deinit the input state.
+        /// True when: (1) node already exists (is_new == false), or
+        ///            (2) widening was applied (the widened state, not input, was consumed)
+        caller_should_deinit: bool = false,
     };
 
     /// Get or create a node for the given point and state.
     /// Returns the node index and whether it was newly created.
-    /// Note: if a node already exists, the state is not consumed and caller should deinit it.
+    /// Ownership: The caller should deinit `state` if `is_new == false` OR if `widening_applied == true`.
+    /// When widening is applied, the widened state (not the original) is used for the new node.
     pub fn getOrCreateNode(self: *ExplodedGraph, point: ProgramPoint, state: *ProgramState) EngineError!GetOrCreateResult {
         return self.getOrCreateNodeWithWidening(point, state, .{});
     }
@@ -189,13 +194,20 @@ pub const ExplodedGraph = struct {
                             self.widening_converged += 1;
                         } else {
                             // Update stored state with widened result for next iteration
-                            stored_state.deinit();
-                            const new_clone = widened_state.?.clone(self.allocator) catch |err| switch (err) {
+                            // Clone first, then replace to avoid leaving invalid state on OOM
+                            var new_clone = widened_state.?.clone(self.allocator) catch |err| switch (err) {
                                 error.OutOfMemory => return EngineError.OutOfMemory,
                             };
+                            errdefer new_clone.deinit();
+                            // Save old state before put() overwrites it
+                            var old_state = stored_state.*;
+                            // put() for existing key replaces value without allocation failure
+                            // (capacity already exists), but we handle it defensively
                             self.loop_header_states.put(header_key, new_clone) catch |err| switch (err) {
                                 error.OutOfMemory => return EngineError.OutOfMemory,
                             };
+                            // Deinit old state after successful replacement
+                            old_state.deinit();
                         }
 
                         // Increment visit count
@@ -225,7 +237,7 @@ pub const ExplodedGraph = struct {
             if (widened_state) |*ws| {
                 ws.deinit();
             }
-            return .{ .index = existing_index, .is_new = false, .widening_applied = widening_applied, .converged = converged };
+            return .{ .index = existing_index, .is_new = false, .widening_applied = widening_applied, .converged = converged, .caller_should_deinit = true };
         }
 
         // Step 3: Check per-point state limit (safety net after widening)
@@ -238,7 +250,7 @@ pub const ExplodedGraph = struct {
             if (widened_state) |*ws| {
                 ws.deinit();
             }
-            return .{ .index = std.math.maxInt(u32), .is_new = false, .widening_applied = widening_applied, .converged = converged };
+            return .{ .index = std.math.maxInt(u32), .is_new = false, .widening_applied = widening_applied, .converged = converged, .caller_should_deinit = true };
         }
 
         const index: u32 = @intCast(self.nodes.items.len);
@@ -266,7 +278,8 @@ pub const ExplodedGraph = struct {
             self.widened_nodes += 1;
         }
 
-        return .{ .index = index, .is_new = true, .widening_applied = widening_applied, .converged = converged };
+        // Caller should deinit the input state if widening was applied (the widened state was consumed, not the input)
+        return .{ .index = index, .is_new = true, .widening_applied = widening_applied, .converged = converged, .caller_should_deinit = widening_applied };
     }
 
     /// Add an edge between two exploded graph nodes
@@ -334,10 +347,11 @@ test "ExplodedGraph node creation and deduplication" {
     // Same point, same state should deduplicate
     var state1_clone = try state1.clone(allocator);
     const result2 = try graph.getOrCreateNode(point, &state1_clone);
-    if (!result2.is_new) {
+    if (result2.caller_should_deinit) {
         state1_clone.deinit();
     }
     try testing.expect(!result2.is_new);
+    try testing.expect(result2.caller_should_deinit);
     try testing.expectEqual(@as(u32, 0), result2.index);
     try testing.expectEqual(@as(usize, 1), graph.nodeCount());
 

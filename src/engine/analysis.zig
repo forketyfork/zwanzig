@@ -289,7 +289,7 @@ pub const AnalysisEngine = struct {
         const entry_point = ProgramPoint.initPre(cfg.entry, cfg);
 
         const result = try self.graph.getOrCreateNode(entry_point, &initial_state);
-        if (!result.is_new) {
+        if (result.caller_should_deinit) {
             initial_state.deinit();
         }
         try self.worklist.append(self.allocator, .{ .node_index = result.index, .edge_kind = .normal, .pending_constraint = null, .cfg = cfg });
@@ -1614,7 +1614,7 @@ pub const AnalysisEngine = struct {
                 }
 
                 const result = try self.graph.getOrCreateNode(post_point, &new_state);
-                if (!result.is_new) {
+                if (result.caller_should_deinit) {
                     new_state.deinit();
                 }
                 try self.graph.addEdge(node_index, result.index);
@@ -1697,7 +1697,7 @@ pub const AnalysisEngine = struct {
                         }
 
                         const result = try self.graph.getOrCreateNode(succ_point, &succ_state);
-                        if (!result.is_new) {
+                        if (result.caller_should_deinit) {
                             succ_state.deinit();
                         }
                         try self.graph.addEdge(node_index, result.index);
@@ -1759,9 +1759,10 @@ pub const AnalysisEngine = struct {
                         // Create the post-call point
                         const post_call_point = ProgramPoint.initPre(ret_node, caller_cfg);
                         const result = try self.graph.getOrCreateNode(post_call_point, &summary_state);
-                        if (!result.is_new) {
+                        if (result.caller_should_deinit) {
                             summary_state.deinit();
-                        } else {
+                        }
+                        if (result.is_new) {
                             try self.worklist.append(self.allocator, .{
                                 .node_index = result.index,
                                 .edge_kind = .normal,
@@ -1811,9 +1812,10 @@ pub const AnalysisEngine = struct {
         // Create entry point for the callee
         const callee_entry_point = ProgramPoint.initPre(callee_cfg.entry, callee_cfg);
         const result = try self.graph.getOrCreateNode(callee_entry_point, &inline_state);
-        if (!result.is_new) {
+        if (result.caller_should_deinit) {
             inline_state.deinit();
-        } else {
+        }
+        if (result.is_new) {
             try self.worklist.append(self.allocator, .{
                 .node_index = result.index,
                 .edge_kind = .normal,
@@ -1844,9 +1846,10 @@ pub const AnalysisEngine = struct {
         // Create the return point in the caller
         const return_point = ProgramPoint.initPre(call_site.return_node, call_site.caller_cfg);
         const result = try self.graph.getOrCreateNode(return_point, &return_state);
-        if (!result.is_new) {
+        if (result.caller_should_deinit) {
             return_state.deinit();
-        } else {
+        }
+        if (result.is_new) {
             try self.worklist.append(self.allocator, .{
                 .node_index = result.index,
                 .edge_kind = .normal,
@@ -2418,7 +2421,7 @@ test "AnalysisEngine branch constraint pruning" {
     try initial_state.setVar(ids.varId(100), .{ .concrete_int = 5 });
     const result = try engine.graph.getOrCreateNode(entry_point, &initial_state);
     try engine.worklist.append(allocator, .{ .node_index = result.index, .edge_kind = .normal, .pending_constraint = null, .cfg = &cfg });
-    if (!result.is_new) {
+    if (result.caller_should_deinit) {
         initial_state.deinit();
     }
 
