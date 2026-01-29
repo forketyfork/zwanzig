@@ -55,6 +55,8 @@ pub const Store = struct {
     violations: std.ArrayList(StoreViolation),
     aliases: std.AutoHashMap(VarId, VarId),
     deferred: std.AutoHashMap(VarId, DeferredAction),
+    errdeferred: std.AutoHashMap(VarId, DeferredAction),
+    owners: std.AutoHashMap(VarId, VarId),
     allocator: std.mem.Allocator,
 
     pub fn init(allocator: std.mem.Allocator) Store {
@@ -63,6 +65,8 @@ pub const Store = struct {
             .violations = .empty,
             .aliases = std.AutoHashMap(VarId, VarId).init(allocator),
             .deferred = std.AutoHashMap(VarId, DeferredAction).init(allocator),
+            .errdeferred = std.AutoHashMap(VarId, DeferredAction).init(allocator),
+            .owners = std.AutoHashMap(VarId, VarId).init(allocator),
             .allocator = allocator,
         };
     }
@@ -72,6 +76,8 @@ pub const Store = struct {
         self.violations.deinit(self.allocator);
         self.aliases.deinit();
         self.deferred.deinit();
+        self.errdeferred.deinit();
+        self.owners.deinit();
     }
 
     pub fn clone(self: *const Store, allocator: std.mem.Allocator) !Store {
@@ -95,6 +101,16 @@ pub const Store = struct {
         var deferred_iter = self.deferred.iterator();
         while (deferred_iter.next()) |entry| {
             try new_store.deferred.put(entry.key_ptr.*, entry.value_ptr.*);
+        }
+
+        var errdeferred_iter = self.errdeferred.iterator();
+        while (errdeferred_iter.next()) |entry| {
+            try new_store.errdeferred.put(entry.key_ptr.*, entry.value_ptr.*);
+        }
+
+        var owners_iter = self.owners.iterator();
+        while (owners_iter.next()) |entry| {
+            try new_store.owners.put(entry.key_ptr.*, entry.value_ptr.*);
         }
 
         return new_store;
@@ -143,6 +159,26 @@ pub const Store = struct {
             }
         }
 
+        if (self.errdeferred.count() != other.errdeferred.count()) return false;
+        var errdeferred_iter = self.errdeferred.iterator();
+        while (errdeferred_iter.next()) |entry| {
+            if (other.errdeferred.get(entry.key_ptr.*)) |other_action| {
+                if (entry.value_ptr.* != other_action) return false;
+            } else {
+                return false;
+            }
+        }
+
+        if (self.owners.count() != other.owners.count()) return false;
+        var owners_iter = self.owners.iterator();
+        while (owners_iter.next()) |entry| {
+            if (other.owners.get(entry.key_ptr.*)) |other_owner| {
+                if (entry.value_ptr.* != other_owner) return false;
+            } else {
+                return false;
+            }
+        }
+
         return true;
     }
 
@@ -184,6 +220,27 @@ pub const Store = struct {
             deferred_hash ^= hasher.final();
         }
 
+        var errdeferred_hash: u64 = 0;
+        var errdeferred_iter = self.errdeferred.iterator();
+        while (errdeferred_iter.next()) |entry| {
+            var hasher = std.hash.Wyhash.init(0);
+            const key = ids.varIndex(entry.key_ptr.*);
+            hasher.update(std.mem.asBytes(&key));
+            hasher.update(std.mem.asBytes(&entry.value_ptr.*));
+            errdeferred_hash ^= hasher.final();
+        }
+
+        var owners_hash: u64 = 0;
+        var owners_iter = self.owners.iterator();
+        while (owners_iter.next()) |entry| {
+            var hasher = std.hash.Wyhash.init(0);
+            const key = ids.varIndex(entry.key_ptr.*);
+            const value = ids.varIndex(entry.value_ptr.*);
+            hasher.update(std.mem.asBytes(&key));
+            hasher.update(std.mem.asBytes(&value));
+            owners_hash ^= hasher.final();
+        }
+
         var hasher = std.hash.Wyhash.init(0);
         const resources_count = self.resources.count();
         const violations_len = self.violations.items.len;
@@ -191,12 +248,18 @@ pub const Store = struct {
         hasher.update(std.mem.asBytes(&violations_hash));
         hasher.update(std.mem.asBytes(&aliases_hash));
         hasher.update(std.mem.asBytes(&deferred_hash));
+        hasher.update(std.mem.asBytes(&errdeferred_hash));
+        hasher.update(std.mem.asBytes(&owners_hash));
         hasher.update(std.mem.asBytes(&resources_count));
         hasher.update(std.mem.asBytes(&violations_len));
         const aliases_count = self.aliases.count();
         const deferred_count = self.deferred.count();
+        const errdeferred_count = self.errdeferred.count();
+        const owners_count = self.owners.count();
         hasher.update(std.mem.asBytes(&aliases_count));
         hasher.update(std.mem.asBytes(&deferred_count));
+        hasher.update(std.mem.asBytes(&errdeferred_count));
+        hasher.update(std.mem.asBytes(&owners_count));
 
         return hasher.final();
     }
@@ -206,21 +269,63 @@ pub const Store = struct {
         return self.resources.get(root);
     }
 
+    pub fn recordOwnership(self: *Store, resource: VarId, container: VarId) !void {
+        const resource_root = self.canonical(resource);
+        const container_root = self.canonical(container);
+        if (resource_root == container_root) return;
+        try self.owners.put(resource_root, container_root);
+    }
+
+    fn removeOwnershipFor(self: *Store, region: VarId) void {
+        const root = self.canonical(region);
+        _ = self.owners.remove(root);
+
+        var iter = self.owners.iterator();
+        while (iter.next()) |entry| {
+            if (entry.value_ptr.* == root) {
+                self.owners.removeByPtr(entry.key_ptr);
+            }
+        }
+    }
+
+    pub fn escapeOwned(self: *Store, container: VarId) std.mem.Allocator.Error!void {
+        const container_root = self.canonical(container);
+        var to_escape: std.ArrayList(VarId) = .empty;
+        defer to_escape.deinit(self.allocator);
+
+        var iter = self.owners.iterator();
+        while (iter.next()) |entry| {
+            if (entry.value_ptr.* == container_root) {
+                try to_escape.append(self.allocator, entry.key_ptr.*);
+            }
+        }
+
+        for (to_escape.items) |resource| {
+            self.escapeRegion(resource);
+        }
+    }
+
     pub fn markAllocated(self: *Store, region: VarId) !void {
         _ = self.aliases.remove(region);
         _ = self.deferred.remove(region);
+        _ = self.errdeferred.remove(region);
+        self.removeOwnershipFor(region);
         try self.resources.put(region, .allocated);
     }
 
     pub fn markOpened(self: *Store, region: VarId) !void {
         _ = self.aliases.remove(region);
         _ = self.deferred.remove(region);
+        _ = self.errdeferred.remove(region);
+        self.removeOwnershipFor(region);
         try self.resources.put(region, .open);
     }
 
     pub fn markNonAllocated(self: *Store, region: VarId) !void {
         _ = self.aliases.remove(region);
         _ = self.deferred.remove(region);
+        _ = self.errdeferred.remove(region);
+        self.removeOwnershipFor(region);
         try self.resources.put(region, .non_allocated);
     }
 
@@ -229,6 +334,7 @@ pub const Store = struct {
             _ = self.aliases.remove(region);
             return;
         }
+        self.removeOwnershipFor(region);
         const root = self.canonical(region);
         var has_alias = false;
         var new_root: VarId = root;
@@ -247,6 +353,7 @@ pub const Store = struct {
         if (!has_alias) {
             _ = self.resources.remove(root);
             _ = self.deferred.remove(root);
+            _ = self.errdeferred.remove(root);
             return;
         }
 
@@ -270,6 +377,16 @@ pub const Store = struct {
             _ = self.deferred.remove(new_root);
         }
 
+        if (self.errdeferred.get(root)) |action| {
+            _ = self.errdeferred.remove(root);
+            _ = self.errdeferred.remove(new_root);
+            self.errdeferred.put(new_root, action) catch {
+                _ = self.errdeferred.remove(new_root);
+            };
+        } else {
+            _ = self.errdeferred.remove(new_root);
+        }
+
         var update_iter = self.aliases.iterator();
         while (update_iter.next()) |entry| {
             if (entry.value_ptr.* == root) {
@@ -281,8 +398,10 @@ pub const Store = struct {
 
     pub fn escapeRegion(self: *Store, region: VarId) void {
         const root = self.canonical(region);
+        self.removeOwnershipFor(root);
         _ = self.resources.remove(root);
         _ = self.deferred.remove(root);
+        _ = self.errdeferred.remove(root);
         _ = self.aliases.remove(region);
     }
 
@@ -303,7 +422,9 @@ pub const Store = struct {
         for (to_remove.items) |key| {
             _ = self.resources.remove(key);
             _ = self.deferred.remove(key);
+            _ = self.errdeferred.remove(key);
             _ = self.aliases.remove(key);
+            self.removeOwnershipFor(key);
         }
     }
 
@@ -327,6 +448,8 @@ pub const Store = struct {
             try self.resources.put(root, .freed);
         }
         _ = self.deferred.remove(root);
+        _ = self.errdeferred.remove(root);
+        self.removeOwnershipFor(root);
     }
 
     pub fn markClosed(self: *Store, region: VarId, call_token: ?u32) !void {
@@ -348,6 +471,8 @@ pub const Store = struct {
             try self.resources.put(root, .closed);
         }
         _ = self.deferred.remove(root);
+        _ = self.errdeferred.remove(root);
+        self.removeOwnershipFor(root);
     }
 
     pub fn markUsed(self: *Store, region: VarId, call_token: ?u32) !void {
@@ -391,7 +516,17 @@ pub const Store = struct {
         try self.deferred.put(root, .close);
     }
 
-    pub fn recordLeaks(self: *Store) !void {
+    pub fn markErrdeferredFree(self: *Store, region: VarId) !void {
+        const root = self.canonical(region);
+        try self.errdeferred.put(root, .free);
+    }
+
+    pub fn markErrdeferredClose(self: *Store, region: VarId) !void {
+        const root = self.canonical(region);
+        try self.errdeferred.put(root, .close);
+    }
+
+    pub fn recordLeaks(self: *Store, error_path: bool) !void {
         var iter = self.resources.iterator();
         while (iter.next()) |entry| {
             switch (entry.value_ptr.*) {
@@ -399,11 +534,21 @@ pub const Store = struct {
                     if (self.deferred.get(entry.key_ptr.*)) |action| {
                         if (action == .free) continue;
                     }
+                    if (error_path) {
+                        if (self.errdeferred.get(entry.key_ptr.*)) |action| {
+                            if (action == .free) continue;
+                        }
+                    }
                     try self.recordViolation(entry.key_ptr.*, .resource_leak, ids.varIndex(entry.key_ptr.*));
                 },
                 .open => {
                     if (self.deferred.get(entry.key_ptr.*)) |action| {
                         if (action == .close) continue;
+                    }
+                    if (error_path) {
+                        if (self.errdeferred.get(entry.key_ptr.*)) |action| {
+                            if (action == .close) continue;
+                        }
                     }
                     try self.recordViolation(entry.key_ptr.*, .resource_leak, ids.varIndex(entry.key_ptr.*));
                 },
@@ -447,6 +592,8 @@ pub const Store = struct {
         try self.aliases.put(alias, root);
         _ = self.resources.remove(alias);
         _ = self.deferred.remove(alias);
+        _ = self.errdeferred.remove(alias);
+        _ = self.owners.remove(alias);
     }
 };
 
@@ -568,7 +715,7 @@ test "Store records leaks for allocated resources" {
     const region = ids.varId(16);
 
     try store.markAllocated(region);
-    try store.recordLeaks();
+    try store.recordLeaks(false);
 
     try testing.expectEqual(@as(usize, 1), store.violationCount());
     try testing.expectEqual(StoreViolationKind.resource_leak, store.getViolations()[0].kind);

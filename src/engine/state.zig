@@ -251,6 +251,11 @@ pub const ProgramState = struct {
         self.invalidateCache();
     }
 
+    pub fn trackEscapeOwned(self: *ProgramState, region: VarId) std.mem.Allocator.Error!void {
+        try self.store.escapeOwned(region);
+        self.invalidateCache();
+    }
+
     pub fn trackEscapeByName(self: *ProgramState, tree: *const std.zig.Ast, name: []const u8) !void {
         try self.store.escapeByName(tree, name);
         self.invalidateCache();
@@ -274,6 +279,21 @@ pub const ProgramState = struct {
         self.invalidateCache();
     }
 
+    pub fn trackErrdeferredFree(self: *ProgramState, region: VarId) !void {
+        try self.store.markErrdeferredFree(region);
+        self.invalidateCache();
+    }
+
+    pub fn trackErrdeferredClose(self: *ProgramState, region: VarId) !void {
+        try self.store.markErrdeferredClose(region);
+        self.invalidateCache();
+    }
+
+    pub fn trackOwnership(self: *ProgramState, resource: VarId, container: VarId) !void {
+        try self.store.recordOwnership(resource, container);
+        self.invalidateCache();
+    }
+
     /// Track a region aliasing another region.
     pub fn trackAlias(self: *ProgramState, alias: VarId, target: VarId) !void {
         try self.store.aliasRegion(alias, target);
@@ -282,7 +302,7 @@ pub const ProgramState = struct {
 
     /// Track resource leaks in the current state.
     pub fn trackLeaks(self: *ProgramState) !void {
-        try self.store.recordLeaks();
+        try self.store.recordLeaks(self.isErrorPath());
         self.invalidateCache();
     }
 

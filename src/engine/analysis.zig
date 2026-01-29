@@ -476,7 +476,13 @@ pub const AnalysisEngine = struct {
             }
         }
 
-        if (std.mem.eql(u8, field_name, "open") or std.mem.eql(u8, field_name, "openFile") or std.mem.eql(u8, field_name, "openDir") or std.mem.eql(u8, field_name, "openIterableDir") or std.mem.eql(u8, field_name, "createFile")) {
+        if ((std.mem.eql(u8, field_name, "open") or
+            std.mem.eql(u8, field_name, "openFile") or
+            std.mem.eql(u8, field_name, "openDir") or
+            std.mem.eql(u8, field_name, "openIterableDir") or
+            std.mem.eql(u8, field_name, "createFile")) and
+            self.isKnownOpenBase(tree, base_node))
+        {
             return .{ .kind = .open, .target_expr = null, .call_node = call_ast_node };
         }
 
@@ -508,6 +514,38 @@ pub const AnalysisEngine = struct {
                 if (field_token >= token_tags.len or token_tags[field_token] != .identifier) return false;
                 const field_name = tree.tokenSlice(field_token);
                 return std.mem.eql(u8, field_name, "allocator");
+            },
+            else => return false,
+        }
+    }
+
+    fn isKnownOpenBase(self: *AnalysisEngine, tree: *const std.zig.Ast, base_node: u32) bool {
+        _ = self;
+        const tags = tree.nodes.items(.tag);
+        const datas = tree.nodes.items(.data);
+        const token_tags = tree.tokens.items(.tag);
+        const main_tokens = tree.nodes.items(.main_token);
+
+        if (base_node >= tags.len) return false;
+        switch (tags[base_node]) {
+            .identifier => {
+                const base_token = main_tokens[base_node];
+                if (base_token >= token_tags.len or token_tags[base_token] != .identifier) return false;
+                const base_name = tree.tokenSlice(base_token);
+                return std.mem.eql(u8, base_name, "posix");
+            },
+            .field_access => {
+                const field_access_data = datas[base_node].node_and_token;
+                const base_expr = @intFromEnum(field_access_data[0]);
+                const field_token = field_access_data[1];
+                if (field_token >= token_tags.len or token_tags[field_token] != .identifier) return false;
+                const field_name = tree.tokenSlice(field_token);
+                if (!std.mem.eql(u8, field_name, "posix") and !std.mem.eql(u8, field_name, "fs")) return false;
+                if (base_expr >= tags.len or tags[base_expr] != .identifier) return false;
+                const base_token = main_tokens[base_expr];
+                if (base_token >= token_tags.len or token_tags[base_token] != .identifier) return false;
+                const base_name = tree.tokenSlice(base_token);
+                return std.mem.eql(u8, base_name, "std");
             },
             else => return false,
         }
@@ -737,6 +775,7 @@ pub const AnalysisEngine = struct {
         switch (tags[expr_node]) {
             .identifier => {
                 if (self.resolveVarIdFromIdentifier(expr_node, current_cfg)) |var_id| {
+                    try state.trackEscapeOwned(var_id);
                     state.trackEscape(var_id);
                     const token = main_tokens[expr_node];
                     if (ids.varIndex(var_id) == token and token < token_tags.len and token_tags[token] == .identifier) {
@@ -901,6 +940,109 @@ pub const AnalysisEngine = struct {
             },
             else => {},
         }
+    }
+
+    fn recordOwnershipFromExpr(
+        self: *AnalysisEngine,
+        state: *ProgramState,
+        expr_node: u32,
+        container_var: ids.VarId,
+        current_cfg: *const Cfg,
+    ) EngineError!void {
+        const src = self.source orelse return;
+        const tree = src.ast() catch return;
+        const tags = tree.nodes.items(.tag);
+        const datas = tree.nodes.items(.data);
+
+        if (expr_node >= tags.len) return;
+
+        switch (tags[expr_node]) {
+            .struct_init,
+            .struct_init_comma,
+            .struct_init_one,
+            .struct_init_one_comma,
+            .struct_init_dot,
+            .struct_init_dot_comma,
+            .struct_init_dot_two,
+            .struct_init_dot_two_comma,
+            => try self.recordOwnershipFromStructInit(state, expr_node, container_var, current_cfg),
+            .grouped_expression, .unwrap_optional => {
+                const data = datas[expr_node].node_and_token;
+                try self.recordOwnershipFromExpr(state, @intFromEnum(data[0]), container_var, current_cfg);
+            },
+            .@"try" => try self.recordOwnershipFromExpr(state, @intFromEnum(datas[expr_node].node), container_var, current_cfg),
+            .@"catch" => {
+                const pair = datas[expr_node].node_and_node;
+                try self.recordOwnershipFromExpr(state, @intFromEnum(pair[0]), container_var, current_cfg);
+                try self.recordOwnershipFromExpr(state, @intFromEnum(pair[1]), container_var, current_cfg);
+            },
+            else => {},
+        }
+    }
+
+    fn recordOwnershipFromStructInit(
+        self: *AnalysisEngine,
+        state: *ProgramState,
+        struct_node: u32,
+        container_var: ids.VarId,
+        current_cfg: *const Cfg,
+    ) EngineError!void {
+        const src = self.source orelse return;
+        const tree = src.ast() catch return;
+        const tags = tree.nodes.items(.tag);
+
+        if (struct_node >= tags.len) return;
+
+        var buf: [2]std.zig.Ast.Node.Index = undefined;
+        const struct_init = tree.fullStructInit(&buf, @enumFromInt(struct_node)) orelse return;
+
+        for (struct_init.ast.fields) |field| {
+            const field_idx = @intFromEnum(field);
+            if (field_idx >= tags.len) continue;
+
+            switch (tags[field_idx]) {
+                .container_field, .container_field_init, .container_field_align => {
+                    const full_field = tree.fullContainerField(@enumFromInt(field_idx)) orelse continue;
+                    if (full_field.ast.value_expr.unwrap()) |value_expr| {
+                        if (self.resolveVarIdFromExpr(@intFromEnum(value_expr), current_cfg)) |var_id| {
+                            try state.trackOwnership(var_id, container_var);
+                        }
+                    } else if (full_field.ast.tuple_like) {
+                        if (full_field.ast.type_expr.unwrap()) |value_expr| {
+                            if (self.resolveVarIdFromExpr(@intFromEnum(value_expr), current_cfg)) |var_id| {
+                                try state.trackOwnership(var_id, container_var);
+                            }
+                        }
+                    }
+                },
+                else => {
+                    if (self.resolveVarIdFromExpr(field_idx, current_cfg)) |var_id| {
+                        try state.trackOwnership(var_id, container_var);
+                    }
+                },
+            }
+        }
+    }
+
+    fn recordOwnershipFromFieldAssign(
+        self: *AnalysisEngine,
+        state: *ProgramState,
+        lhs_node: u32,
+        rhs_node: u32,
+        current_cfg: *const Cfg,
+    ) EngineError!void {
+        const src = self.source orelse return;
+        const tree = src.ast() catch return;
+        const tags = tree.nodes.items(.tag);
+        const datas = tree.nodes.items(.data);
+
+        if (lhs_node >= tags.len or tags[lhs_node] != .field_access) return;
+
+        const field_access_data = datas[lhs_node].node_and_token;
+        const base_node = @intFromEnum(field_access_data[0]);
+        const container_var = self.resolveVarIdFromExpr(base_node, current_cfg) orelse return;
+        const resource_var = self.resolveVarIdFromExpr(rhs_node, current_cfg) orelse return;
+        try state.trackOwnership(resource_var, container_var);
     }
 
     fn bindPayloadAlias(self: *AnalysisEngine, state: *ProgramState, payload_token: u32, expr_node: u32, current_cfg: *const Cfg) EngineError!void {
@@ -1426,6 +1568,7 @@ pub const AnalysisEngine = struct {
                         } else if (self.isDefinitelyNonAlloc(init_node)) {
                             try new_state.trackNonAllocation(var_id);
                         }
+                        try self.recordOwnershipFromExpr(&new_state, init_node, var_id, current_cfg);
                         try self.checkUseAfterFreeInExpr(&new_state, init_node, current_cfg);
                     }
                 }
@@ -1461,11 +1604,13 @@ pub const AnalysisEngine = struct {
                             } else if (self.isDefinitelyNonAlloc(rhs_node)) {
                                 try new_state.trackNonAllocation(var_id);
                             }
+                            try self.recordOwnershipFromExpr(&new_state, rhs_node, var_id, current_cfg);
                             try self.checkUseAfterFreeInExpr(&new_state, rhs_node, current_cfg);
                         }
                     } else if (ir_node.operand2_node) |rhs_node| {
                         try self.checkUseAfterFreeInExpr(&new_state, rhs_node, current_cfg);
                         try self.markEscapedInExpr(&new_state, rhs_node, current_cfg);
+                        try self.recordOwnershipFromFieldAssign(&new_state, lhs_node, rhs_node, current_cfg);
                     }
                 }
             },
@@ -1513,18 +1658,29 @@ pub const AnalysisEngine = struct {
                     try self.applyDeferredReleases(&new_state, ast_node, current_cfg);
                 }
             },
+            .errdefer_stmt => {
+                if (ir_node.ast_node) |ast_node| {
+                    try self.applyErrdeferredReleases(&new_state, ast_node, current_cfg);
+                }
+            },
             .ret => {
                 if (ir_node.ast_node) |ast_node| {
                     if (self.source) |src| {
                         if (src.ast() catch null) |tree| {
                             const data = tree.nodes.items(.data);
+                            const tags = tree.nodes.items(.tag);
                             if (ast_node < data.len) {
                                 if (data[ast_node].opt_node.unwrap()) |ret_expr| {
-                                    try self.checkUseAfterFreeInExpr(&new_state, @intFromEnum(ret_expr), current_cfg);
-                                    if (self.resolveVarIdFromExpr(@intFromEnum(ret_expr), current_cfg)) |var_id| {
+                                    const ret_expr_idx = @intFromEnum(ret_expr);
+                                    try self.checkUseAfterFreeInExpr(&new_state, ret_expr_idx, current_cfg);
+                                    if (ret_expr_idx < tags.len and tags[ret_expr_idx] == .error_value) {
+                                        new_state.setErrorState(.error_active);
+                                    }
+                                    if (self.resolveVarIdFromExpr(ret_expr_idx, current_cfg)) |var_id| {
+                                        try new_state.trackEscapeOwned(var_id);
                                         new_state.trackEscape(var_id);
                                     }
-                                    try self.markEscapedInExpr(&new_state, @intFromEnum(ret_expr), current_cfg);
+                                    try self.markEscapedInExpr(&new_state, ret_expr_idx, current_cfg);
                                 }
                             }
                         }
@@ -1547,7 +1703,9 @@ pub const AnalysisEngine = struct {
                 if (current_cfg.fn_ast_node) |fn_node| {
                     try self.escapeReturnedVars(&new_state, fn_node, current_cfg);
                 }
-                try new_state.trackLeaks();
+                if (!new_state.isErrorPath()) {
+                    try new_state.trackLeaks();
+                }
             },
             else => {},
         }
@@ -1561,10 +1719,20 @@ pub const AnalysisEngine = struct {
         const data = tree.nodes.items(.data);
         if (defer_node >= data.len) return;
         const body_node = @intFromEnum(data[defer_node].node);
-        try self.scanDeferredBody(state, body_node, current_cfg);
+        try self.scanDeferredBody(state, body_node, current_cfg, false);
     }
 
-    fn scanDeferredBody(self: *AnalysisEngine, state: *ProgramState, node: u32, current_cfg: *const Cfg) EngineError!void {
+    fn applyErrdeferredReleases(self: *AnalysisEngine, state: *ProgramState, defer_node: u32, current_cfg: *const Cfg) EngineError!void {
+        const src = self.source orelse return;
+        const tree = src.ast() catch return;
+        const data = tree.nodes.items(.data);
+        if (defer_node >= data.len) return;
+        const body_node = @intFromEnum(data[defer_node].opt_token_and_node[1]);
+        if (body_node == 0) return;
+        try self.scanDeferredBody(state, body_node, current_cfg, true);
+    }
+
+    fn scanDeferredBody(self: *AnalysisEngine, state: *ProgramState, node: u32, current_cfg: *const Cfg, error_only: bool) EngineError!void {
         const src = self.source orelse return;
         const tree = src.ast() catch return;
         const tags = tree.nodes.items(.tag);
@@ -1580,14 +1748,22 @@ pub const AnalysisEngine = struct {
                         .free => {
                             if (call_info.target_expr) |arg_node| {
                                 if (self.resolveVarIdFromExpr(arg_node, current_cfg)) |var_id| {
-                                    try state.trackDeferredFree(var_id, call_token);
+                                    if (error_only) {
+                                        try state.trackErrdeferredFree(var_id);
+                                    } else {
+                                        try state.trackDeferredFree(var_id, call_token);
+                                    }
                                 }
                             }
                         },
                         .close => {
                             if (call_info.target_expr) |arg_node| {
                                 if (self.resolveVarIdFromExpr(arg_node, current_cfg)) |var_id| {
-                                    try state.trackDeferredClose(var_id, call_token);
+                                    if (error_only) {
+                                        try state.trackErrdeferredClose(var_id);
+                                    } else {
+                                        try state.trackDeferredClose(var_id, call_token);
+                                    }
                                 }
                             }
                         },
@@ -1623,25 +1799,25 @@ pub const AnalysisEngine = struct {
                 }
 
                 for (statements) |stmt| {
-                    try self.scanDeferredBody(state, stmt, current_cfg);
+                    try self.scanDeferredBody(state, stmt, current_cfg, error_only);
                 }
             },
             .@"if", .if_simple => {
                 const full_if = tree.fullIf(@enumFromInt(node)) orelse return;
                 if (full_if.payload_token) |tok| {
                     try self.bindPayloadAlias(state, tok, @intFromEnum(full_if.ast.cond_expr), current_cfg);
-                    try self.scanDeferredBody(state, @intFromEnum(full_if.ast.then_expr), current_cfg);
+                    try self.scanDeferredBody(state, @intFromEnum(full_if.ast.then_expr), current_cfg, error_only);
                     state.resetRegion(ids.varId(tok));
                 } else {
-                    try self.scanDeferredBody(state, @intFromEnum(full_if.ast.then_expr), current_cfg);
+                    try self.scanDeferredBody(state, @intFromEnum(full_if.ast.then_expr), current_cfg, error_only);
                 }
                 if (full_if.ast.else_expr.unwrap()) |else_node| {
                     if (full_if.error_token) |tok| {
                         try self.bindPayloadUnknown(state, tok);
-                        try self.scanDeferredBody(state, @intFromEnum(else_node), current_cfg);
+                        try self.scanDeferredBody(state, @intFromEnum(else_node), current_cfg, error_only);
                         state.resetRegion(ids.varId(tok));
                     } else {
-                        try self.scanDeferredBody(state, @intFromEnum(else_node), current_cfg);
+                        try self.scanDeferredBody(state, @intFromEnum(else_node), current_cfg, error_only);
                     }
                 }
             },
@@ -1649,18 +1825,18 @@ pub const AnalysisEngine = struct {
                 const full_while = tree.fullWhile(@enumFromInt(node)) orelse return;
                 if (full_while.payload_token) |tok| {
                     try self.bindPayloadAlias(state, tok, @intFromEnum(full_while.ast.cond_expr), current_cfg);
-                    try self.scanDeferredBody(state, @intFromEnum(full_while.ast.then_expr), current_cfg);
+                    try self.scanDeferredBody(state, @intFromEnum(full_while.ast.then_expr), current_cfg, error_only);
                     state.resetRegion(ids.varId(tok));
                 } else {
-                    try self.scanDeferredBody(state, @intFromEnum(full_while.ast.then_expr), current_cfg);
+                    try self.scanDeferredBody(state, @intFromEnum(full_while.ast.then_expr), current_cfg, error_only);
                 }
                 if (full_while.ast.else_expr.unwrap()) |else_node| {
                     if (full_while.error_token) |tok| {
                         try self.bindPayloadUnknown(state, tok);
-                        try self.scanDeferredBody(state, @intFromEnum(else_node), current_cfg);
+                        try self.scanDeferredBody(state, @intFromEnum(else_node), current_cfg, error_only);
                         state.resetRegion(ids.varId(tok));
                     } else {
-                        try self.scanDeferredBody(state, @intFromEnum(else_node), current_cfg);
+                        try self.scanDeferredBody(state, @intFromEnum(else_node), current_cfg, error_only);
                     }
                 }
             },
@@ -1668,19 +1844,19 @@ pub const AnalysisEngine = struct {
                 const full_for = tree.fullFor(@enumFromInt(node)) orelse return;
                 if (full_for.payload_token != 0) {
                     try self.bindForPayloads(state, full_for.payload_token);
-                    try self.scanDeferredBody(state, @intFromEnum(full_for.ast.then_expr), current_cfg);
+                    try self.scanDeferredBody(state, @intFromEnum(full_for.ast.then_expr), current_cfg, error_only);
                 } else {
-                    try self.scanDeferredBody(state, @intFromEnum(full_for.ast.then_expr), current_cfg);
+                    try self.scanDeferredBody(state, @intFromEnum(full_for.ast.then_expr), current_cfg, error_only);
                 }
                 if (full_for.ast.else_expr.unwrap()) |else_node| {
-                    try self.scanDeferredBody(state, @intFromEnum(else_node), current_cfg);
+                    try self.scanDeferredBody(state, @intFromEnum(else_node), current_cfg, error_only);
                 }
             },
             .@"switch", .switch_comma => {
                 const full_switch = tree.switchFull(@enumFromInt(node));
                 for (full_switch.ast.cases) |case_node| {
                     const full_case = tree.fullSwitchCase(case_node) orelse continue;
-                    try self.scanDeferredBody(state, @intFromEnum(full_case.ast.target_expr), current_cfg);
+                    try self.scanDeferredBody(state, @intFromEnum(full_case.ast.target_expr), current_cfg, error_only);
                 }
             },
             else => {},
