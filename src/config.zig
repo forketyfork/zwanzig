@@ -3,6 +3,8 @@ const RuleFilter = @import("rule_filter.zig").RuleFilter;
 
 pub const Config = struct {
     rule_filter: RuleFilter,
+    max_worklist_steps: ?usize = null,
+    max_states_per_point: ?u32 = null,
 
     pub fn deinit(self: *Config, allocator: std.mem.Allocator) void {
         switch (self.rule_filter) {
@@ -71,9 +73,33 @@ pub fn parseConfig(allocator: std.mem.Allocator, content: []const u8) ConfigErro
 
     const enabled_rules = obj.get("enabled_rules");
     const disabled_rules = obj.get("disabled_rules");
+    const max_worklist_steps_value = obj.get("max_worklist_steps");
+    const max_states_per_point_value = obj.get("max_states_per_point");
 
     if (enabled_rules != null and disabled_rules != null) {
         return ConfigError.MutuallyExclusiveFields;
+    }
+
+    var max_worklist_steps: ?usize = null;
+    if (max_worklist_steps_value) |value| {
+        if (value != .integer) {
+            return ConfigError.InvalidConfigFormat;
+        }
+        if (value.integer <= 0) {
+            return ConfigError.InvalidConfigFormat;
+        }
+        max_worklist_steps = std.math.cast(usize, value.integer) orelse return ConfigError.InvalidConfigFormat;
+    }
+
+    var max_states_per_point: ?u32 = null;
+    if (max_states_per_point_value) |value| {
+        if (value != .integer) {
+            return ConfigError.InvalidConfigFormat;
+        }
+        if (value.integer <= 0) {
+            return ConfigError.InvalidConfigFormat;
+        }
+        max_states_per_point = std.math.cast(u32, value.integer) orelse return ConfigError.InvalidConfigFormat;
     }
 
     if (enabled_rules) |rules_value| {
@@ -97,6 +123,8 @@ pub fn parseConfig(allocator: std.mem.Allocator, content: []const u8) ConfigErro
 
         return Config{
             .rule_filter = .{ .allowlist = rule_names },
+            .max_worklist_steps = max_worklist_steps,
+            .max_states_per_point = max_states_per_point,
         };
     }
 
@@ -121,11 +149,15 @@ pub fn parseConfig(allocator: std.mem.Allocator, content: []const u8) ConfigErro
 
         return Config{
             .rule_filter = .{ .blocklist = rule_names },
+            .max_worklist_steps = max_worklist_steps,
+            .max_states_per_point = max_states_per_point,
         };
     }
 
     return Config{
         .rule_filter = .none,
+        .max_worklist_steps = max_worklist_steps,
+        .max_states_per_point = max_states_per_point,
     };
 }
 

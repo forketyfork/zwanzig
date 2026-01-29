@@ -134,6 +134,11 @@ pub const AnalysisEngine = struct {
         self.max_worklist_steps = steps;
     }
 
+    /// Set the maximum number of states per program point before dropping.
+    pub fn setMaxStatesPerPoint(self: *AnalysisEngine, max: u32) void {
+        self.graph.setMaxStatesPerPoint(max);
+    }
+
     /// Set the checker name for logging purposes.
     pub fn setCheckerName(self: *AnalysisEngine, name: []const u8) void {
         self.checker_name = name;

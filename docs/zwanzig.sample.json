@@ -1,0 +1,5 @@
+{
+  "enabled_rules": ["empty-catch-engine", "dupe-import", "todo"],
+  "max_worklist_steps": 200000,
+  "max_states_per_point": 50
+}

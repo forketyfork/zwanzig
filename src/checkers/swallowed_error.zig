@@ -66,16 +66,24 @@ pub const SwallowedErrorChecker = struct {
             // Run the analysis engine with a worklist limit to avoid pathological cases
             var engine = AnalysisEngine.initWithSource(allocator, cfg, src);
             defer engine.deinit();
-            engine.setMaxWorklistSteps(100_000);
             engine.setCheckerName("swallowed-error");
             if (context.build_metadata) |metadata| {
                 engine.setBuildMetadata(metadata);
+            }
+            if (context.analysis_limits.max_worklist_steps) |steps| {
+                engine.setMaxWorklistSteps(steps);
+            }
+            if (context.analysis_limits.max_states_per_point) |max| {
+                engine.setMaxStatesPerPoint(max);
             }
             var engine_ok = true;
             engine.run() catch |err| switch (err) {
                 error.OutOfMemory => return error.OutOfMemory,
                 error.AnalysisLimitExceeded => engine_ok = false,
             };
+            if (context.analysis_stats) |stats| {
+                stats.recordRun(engine.getGraph().getDroppedStateCount());
+            }
 
             // Examine CFG nodes for catch_expr with swallowed errors
             for (cfg.nodes.items) |cfg_node| {

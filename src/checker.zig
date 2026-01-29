@@ -12,6 +12,25 @@ const type_context_mod = @import("type_context.zig");
 pub const TypeContext = type_context_mod.TypeContext;
 pub const TypeInfo = type_context_mod.TypeInfo;
 
+pub const AnalysisStats = struct {
+    total_runs: u64 = 0,
+    runs_with_drops: u64 = 0,
+    dropped_states: u64 = 0,
+
+    pub fn recordRun(self: *AnalysisStats, dropped_states: u32) void {
+        self.total_runs += 1;
+        if (dropped_states > 0) {
+            self.runs_with_drops += 1;
+            self.dropped_states += dropped_states;
+        }
+    }
+};
+
+pub const AnalysisLimits = struct {
+    max_worklist_steps: ?usize = null,
+    max_states_per_point: ?u32 = null,
+};
+
 /// Context passed to checkers providing access to analyzer-level configuration
 /// and type information.
 ///
@@ -26,6 +45,8 @@ pub const CheckerContext = struct {
     /// Type context for ZIR-based type queries.
     /// This is null if typed IR is not enabled or ZIR generation failed.
     type_context: ?*TypeContext = null,
+    analysis_stats: ?*AnalysisStats = null,
+    analysis_limits: AnalysisLimits = .{},
 
     /// Check if type information is available.
     pub fn hasTypeInfo(self: *const CheckerContext) bool {

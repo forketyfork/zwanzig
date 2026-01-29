@@ -7,9 +7,9 @@ const EngineError = @import("base.zig").EngineError;
 const ProgramPoint = @import("state.zig").ProgramPoint;
 const ProgramState = @import("state.zig").ProgramState;
 
-/// Maximum number of unique states per program point.
+/// Default maximum number of unique states per program point.
 /// Beyond this, new states at the same point are dropped (widening approximation).
-const max_states_per_point: u32 = 10;
+const default_max_states_per_point: u32 = 50;
 
 /// A node in the exploded graph, keyed by (ProgramPoint, ProgramState).
 pub const ExplodedNode = struct {
@@ -59,11 +59,17 @@ pub const ExplodedGraph = struct {
     /// All nodes in the exploded graph
     nodes: std.ArrayList(ExplodedNode),
     /// Map from (point, state) hash to node index for deduplication
+    /// Hash collisions are possible; we accept the small risk as a pragmatic
+    /// tradeoff for memory and performance.
     node_map: std.AutoHashMap(u64, u32),
     /// Reference to the CFG being analyzed
     cfg: *const Cfg,
     /// Count of states per program point (for widening)
     point_state_counts: std.AutoHashMap(u64, u32),
+    /// Maximum number of unique states per program point before dropping
+    max_states_per_point: u32,
+    /// Count of states dropped due to per-point limit
+    dropped_state_count: u32,
 
     pub fn init(allocator: std.mem.Allocator, cfg: *const Cfg) ExplodedGraph {
         return .{
@@ -72,6 +78,8 @@ pub const ExplodedGraph = struct {
             .node_map = std.AutoHashMap(u64, u32).init(allocator),
             .cfg = cfg,
             .point_state_counts = std.AutoHashMap(u64, u32).init(allocator),
+            .max_states_per_point = default_max_states_per_point,
+            .dropped_state_count = 0,
         };
     }
 
@@ -97,9 +105,10 @@ pub const ExplodedGraph = struct {
         // Check per-point state limit (widening approximation)
         const point_key = point.hash();
         const current_count = self.point_state_counts.get(point_key) orelse 0;
-        if (current_count >= max_states_per_point) {
+        if (current_count >= self.max_states_per_point) {
             // Too many states at this point - approximate by not exploring further.
             // Use maxInt as sentinel; addEdge will reject it via bounds check.
+            self.dropped_state_count += 1;
             return .{ .index = std.math.maxInt(u32), .is_new = false };
         }
 
@@ -132,6 +141,14 @@ pub const ExplodedGraph = struct {
     /// Get node count
     pub fn nodeCount(self: *const ExplodedGraph) usize {
         return self.nodes.items.len;
+    }
+
+    pub fn getDroppedStateCount(self: *const ExplodedGraph) u32 {
+        return self.dropped_state_count;
+    }
+
+    pub fn setMaxStatesPerPoint(self: *ExplodedGraph, max: u32) void {
+        self.max_states_per_point = max;
     }
 };
 
