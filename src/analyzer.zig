@@ -212,6 +212,7 @@ pub const Analyzer = struct {
 
     pub fn analyzeFile(self: *Analyzer, file_path: []const u8) !void {
         var result = try self.analyzeFileResult(file_path);
+        errdefer result.deinit(self.allocator);
         try self.mergeResult(&result);
     }
 
@@ -222,18 +223,6 @@ pub const Analyzer = struct {
         }
         result.diagnostics.deinit(self.allocator);
         result.diagnostics = .empty;
-    }
-
-    /// Load typed IR for a source file using ZirBridge.
-    fn loadTypedIr(self: *Analyzer, source: *Source) !void {
-        if (self.zir_bridge) |*bridge| {
-            bridge.loadFromSource(source) catch |err| {
-                switch (err) {
-                    error.ParseError, error.AstGenFailed => {},
-                    else => return err,
-                }
-            };
-        }
     }
 
     /// Analyze a single file and return an isolated AnalysisResult.
@@ -295,11 +284,6 @@ pub const Analyzer = struct {
                     };
                 }
             }
-        }
-
-        if (self.use_typed_ir) {
-            log.debug("analyzeResult: load typed ir {s}", .{file_path});
-            try self.loadTypedIr(&source);
         }
 
         var result = AnalysisResult.init();
