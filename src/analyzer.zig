@@ -397,9 +397,93 @@ pub const Analyzer = struct {
         }
 
         try writer.print("Found {d} issue(s):\n", .{self.diagnostics.items.len});
+        var file_cache = std.StringHashMap([]const u8).init(self.allocator);
+        defer {
+            var value_iter = file_cache.valueIterator();
+            while (value_iter.next()) |value| {
+                self.allocator.free(value.*);
+            }
+            file_cache.deinit();
+        }
+
         for (self.diagnostics.items) |diag| {
             try diag.format(writer);
+
+            const content = file_cache.get(diag.file_path) orelse blk: {
+                const file = if (std.fs.path.isAbsolute(diag.file_path))
+                    std.fs.openFileAbsolute(diag.file_path, .{})
+                else
+                    std.fs.cwd().openFile(diag.file_path, .{});
+                const opened_file = file catch break :blk null;
+                defer opened_file.close();
+
+                const max_size = 10 * 1024 * 1024;
+                const loaded = opened_file.readToEndAllocOptions(
+                    self.allocator,
+                    max_size,
+                    null,
+                    std.mem.Alignment.of(u8),
+                    0,
+                ) catch break :blk null;
+                file_cache.put(diag.file_path, loaded) catch {
+                    self.allocator.free(loaded);
+                    break :blk null;
+                };
+                break :blk loaded;
+            };
+
+            if (content) |file_content| {
+                if (lineSliceFor(file_content, diag.range.start.line)) |line| {
+                    try writer.print("  {s}\n", .{line});
+
+                    const line_len = line.len;
+                    var start_col = diag.range.start.column;
+                    if (start_col == 0) {
+                        start_col = 1;
+                    }
+                    if (line_len > 0 and start_col > line_len) {
+                        start_col = line_len;
+                    }
+
+                    var end_col: usize = start_col;
+                    if (diag.range.end.line == diag.range.start.line) {
+                        end_col = diag.range.end.column;
+                    }
+                    if (end_col < start_col) {
+                        end_col = start_col;
+                    }
+                    if (line_len > 0 and end_col > line_len) {
+                        end_col = line_len;
+                    }
+
+                    const caret_len = if (line_len == 0) 1 else @max(end_col - start_col + 1, 1);
+                    try writer.writeAll("  ");
+                    var space_index: usize = 1;
+                    while (space_index < start_col) : (space_index += 1) {
+                        try writer.writeByte(' ');
+                    }
+                    var caret_index: usize = 0;
+                    while (caret_index < caret_len) : (caret_index += 1) {
+                        try writer.writeByte('^');
+                    }
+                    try writer.writeByte('\n');
+                }
+            }
         }
+    }
+
+    fn lineSliceFor(content: []const u8, line_number: usize) ?[]const u8 {
+        var line_iter = std.mem.splitScalar(u8, content, '\n');
+        var current_line: usize = 1;
+        while (line_iter.next()) |line| : (current_line += 1) {
+            if (current_line == line_number) {
+                if (line.len > 0 and line[line.len - 1] == '\r') {
+                    return line[0 .. line.len - 1];
+                }
+                return line;
+            }
+        }
+        return null;
     }
 
     fn printJsonResults(self: *Analyzer, writer: anytype) !void {
