@@ -216,6 +216,8 @@ pub const Analyzer = struct {
         defer file.close();
 
         const max_size = 10 * 1024 * 1024;
+        // Sentinel needed for Source.init; free accounts for sentinel byte below
+        // zwanzig-disable-next-line: sentinel-alloc
         const content = try file.readToEndAllocOptions(
             self.allocator,
             max_size,
@@ -223,7 +225,7 @@ pub const Analyzer = struct {
             std.mem.Alignment.of(u8),
             0,
         );
-        defer self.allocator.free(content);
+        defer self.allocator.free(content.ptr[0 .. content.len + 1]);
 
         var source = Source.init(self.allocator, file_path, content);
         defer source.deinit();

@@ -89,7 +89,7 @@ pub const ConsoleFormatter = struct {
             max_size,
             null,
             std.mem.Alignment.of(u8),
-            0,
+            null,
         ) catch return null;
 
         self.file_cache.put(file_path, loaded) catch {

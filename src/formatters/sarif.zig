@@ -1,4 +1,3 @@
-const std = @import("std");
 const CheckerManagerWithRules = @import("../checker.zig").CheckerManagerWithRules;
 const Diagnostic = @import("../rule.zig").Diagnostic;
 
