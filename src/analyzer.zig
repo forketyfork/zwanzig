@@ -15,6 +15,8 @@ const Cache = cache_mod.Cache;
 const CacheKey = cache_mod.CacheKey;
 const cached_artifacts_mod = @import("cached_artifacts.zig");
 const CachedArtifacts = cached_artifacts_mod.CachedArtifacts;
+const ConsoleFormatter = @import("formatters/console.zig").ConsoleFormatter;
+const SarifFormatter = @import("formatters/sarif.zig").SarifFormatter;
 const log = std.log.scoped(.analyzer);
 const diagnostic_mod = @import("diagnostic.zig");
 const suppression = @import("suppression.zig");
@@ -385,105 +387,19 @@ pub const Analyzer = struct {
 
         switch (format) {
             .json => try self.printJsonResults(stdout),
-            .text => try self.printTextResults(stdout),
-            .sarif => try self.printSarifResults(stdout),
+            .text => {
+                var formatter = ConsoleFormatter.init(self.allocator);
+                try formatter.write(stdout, self.diagnostics.items);
+            },
+            .sarif => {
+                var formatter = SarifFormatter.init(
+                    &self.checker_manager,
+                    self.tool_version,
+                    self.diagnostics.items,
+                );
+                try formatter.write(stdout);
+            },
         }
-    }
-
-    fn printTextResults(self: *Analyzer, writer: anytype) !void {
-        if (self.diagnostics.items.len == 0) {
-            try writer.writeAll("No issues found.\n");
-            return;
-        }
-
-        try writer.print("Found {d} issue(s):\n", .{self.diagnostics.items.len});
-        var file_cache = std.StringHashMap([]const u8).init(self.allocator);
-        defer {
-            var value_iter = file_cache.valueIterator();
-            while (value_iter.next()) |value| {
-                self.allocator.free(value.*);
-            }
-            file_cache.deinit();
-        }
-
-        for (self.diagnostics.items) |diag| {
-            try diag.format(writer);
-
-            const content = file_cache.get(diag.file_path) orelse blk: {
-                const file = if (std.fs.path.isAbsolute(diag.file_path))
-                    std.fs.openFileAbsolute(diag.file_path, .{})
-                else
-                    std.fs.cwd().openFile(diag.file_path, .{});
-                const opened_file = file catch break :blk null;
-                defer opened_file.close();
-
-                const max_size = 10 * 1024 * 1024;
-                const loaded = opened_file.readToEndAllocOptions(
-                    self.allocator,
-                    max_size,
-                    null,
-                    std.mem.Alignment.of(u8),
-                    0,
-                ) catch break :blk null;
-                file_cache.put(diag.file_path, loaded) catch {
-                    self.allocator.free(loaded);
-                    break :blk null;
-                };
-                break :blk loaded;
-            };
-
-            if (content) |file_content| {
-                if (lineSliceFor(file_content, diag.range.start.line)) |line| {
-                    try writer.print("  {s}\n", .{line});
-
-                    const line_len = line.len;
-                    var start_col = diag.range.start.column;
-                    if (start_col == 0) {
-                        start_col = 1;
-                    }
-                    if (line_len > 0 and start_col > line_len) {
-                        start_col = line_len;
-                    }
-
-                    var end_col: usize = start_col;
-                    if (diag.range.end.line == diag.range.start.line) {
-                        end_col = diag.range.end.column;
-                    }
-                    if (end_col < start_col) {
-                        end_col = start_col;
-                    }
-                    if (line_len > 0 and end_col > line_len) {
-                        end_col = line_len;
-                    }
-
-                    const caret_len = if (line_len == 0) 1 else @max(end_col - start_col + 1, 1);
-                    try writer.writeAll("  ");
-                    var space_index: usize = 1;
-                    while (space_index < start_col) : (space_index += 1) {
-                        try writer.writeByte(' ');
-                    }
-                    var caret_index: usize = 0;
-                    while (caret_index < caret_len) : (caret_index += 1) {
-                        try writer.writeByte('^');
-                    }
-                    try writer.writeByte('\n');
-                }
-            }
-        }
-    }
-
-    fn lineSliceFor(content: []const u8, line_number: usize) ?[]const u8 {
-        var line_iter = std.mem.splitScalar(u8, content, '\n');
-        var current_line: usize = 1;
-        while (line_iter.next()) |line| : (current_line += 1) {
-            if (current_line == line_number) {
-                if (line.len > 0 and line[line.len - 1] == '\r') {
-                    return line[0 .. line.len - 1];
-                }
-                return line;
-            }
-        }
-        return null;
     }
 
     fn printJsonResults(self: *Analyzer, writer: anytype) !void {
@@ -501,94 +417,6 @@ pub const Analyzer = struct {
 
         try writer.writeAll("  ],\n");
         try writer.print("  \"total\": {d}\n", .{self.diagnostics.items.len});
-        try writer.writeAll("}\n");
-    }
-
-    fn writeJsonString(writer: anytype, s: []const u8) !void {
-        try writer.writeByte('"');
-        for (s) |c| {
-            switch (c) {
-                '"' => try writer.writeAll("\\\""),
-                '\\' => try writer.writeAll("\\\\"),
-                '\n' => try writer.writeAll("\\n"),
-                '\r' => try writer.writeAll("\\r"),
-                '\t' => try writer.writeAll("\\t"),
-                0x00...0x08, 0x0B, 0x0C, 0x0E...0x1F => try writer.print("\\u{x:0>4}", .{c}),
-                else => try writer.writeByte(c),
-            }
-        }
-        try writer.writeByte('"');
-    }
-
-    fn printSarifResults(self: *Analyzer, writer: anytype) !void {
-        try writer.writeAll("{\n");
-        try writer.writeAll("  \"version\": \"2.1.0\",\n");
-        try writer.writeAll("  \"$schema\": \"https://raw.githubusercontent.com/oasis-tcs/sarif-spec/master/Schemata/sarif-schema-2.1.0.json\",\n");
-        try writer.writeAll("  \"runs\": [\n");
-        try writer.writeAll("    {\n");
-        try writer.writeAll("      \"tool\": {\n");
-        try writer.writeAll("        \"driver\": {\n");
-        try writer.writeAll("          \"name\": \"Zwanzig\",\n");
-        try writer.writeAll("          \"informationUri\": \"https://github.com/forketyfork/zwanzig\",\n");
-        try writer.writeAll("          \"version\": ");
-        try writeJsonString(writer, self.tool_version);
-        try writer.writeAll(",\n");
-        try writer.writeAll("          \"rules\": [\n");
-
-        var first = true;
-        for (self.checker_manager.checkers.items) |checker| {
-            if (!first) try writer.writeAll(",\n");
-            first = false;
-            try writer.writeAll("            {\n");
-            try writer.writeAll("              \"id\": ");
-            try writeJsonString(writer, checker.name);
-            try writer.writeAll(",\n");
-            try writer.writeAll("              \"shortDescription\": {\n");
-            try writer.writeAll("                \"text\": ");
-            try writeJsonString(writer, checker.name);
-            try writer.writeAll("\n");
-            try writer.writeAll("              },\n");
-            try writer.writeAll("              \"defaultConfiguration\": {\n");
-            try writer.writeAll("                \"level\": ");
-            try writeJsonString(writer, checker.default_severity.toSarifLevel());
-            try writer.writeAll("\n");
-            try writer.writeAll("              }\n");
-            try writer.writeAll("            }");
-        }
-
-        for (self.checker_manager.adapted_rules.items) |rule| {
-            if (!first) try writer.writeAll(",\n");
-            first = false;
-            try writer.writeAll("            {\n");
-            try writer.writeAll("              \"id\": ");
-            try writeJsonString(writer, rule.name);
-            try writer.writeAll(",\n");
-            try writer.writeAll("              \"shortDescription\": {\n");
-            try writer.writeAll("                \"text\": ");
-            try writeJsonString(writer, rule.name);
-            try writer.writeAll("\n");
-            try writer.writeAll("              }\n");
-            try writer.writeAll("            }");
-        }
-
-        try writer.writeAll("\n");
-        try writer.writeAll("          ]\n");
-        try writer.writeAll("        }\n");
-        try writer.writeAll("      },\n");
-        try writer.writeAll("      \"results\": [\n");
-
-        for (self.diagnostics.items, 0..) |diag, i| {
-            try diag.writeSarif(writer);
-            if (i < self.diagnostics.items.len - 1) {
-                try writer.writeAll(",\n");
-            } else {
-                try writer.writeAll("\n");
-            }
-        }
-
-        try writer.writeAll("      ]\n");
-        try writer.writeAll("    }\n");
-        try writer.writeAll("  ]\n");
         try writer.writeAll("}\n");
     }
 
@@ -669,7 +497,8 @@ test "Analyzer text output format" {
 
     var buffer: [512]u8 = undefined;
     var stream = std.io.fixedBufferStream(&buffer);
-    try analyzer.printTextResults(stream.writer());
+    var formatter = ConsoleFormatter.init(allocator);
+    try formatter.write(stream.writer(), analyzer.diagnostics.items);
 
     const output = stream.getWritten();
     try testing.expect(std.mem.indexOf(u8, output, "Found 1 issue(s):") != null);
@@ -709,7 +538,8 @@ test "Analyzer SARIF output format" {
 
     var buffer: [2048]u8 = undefined;
     var stream = std.io.fixedBufferStream(&buffer);
-    try analyzer.printSarifResults(stream.writer());
+    var formatter = SarifFormatter.init(&analyzer.checker_manager, analyzer.tool_version, analyzer.diagnostics.items);
+    try formatter.write(stream.writer());
 
     const output = stream.getWritten();
     try testing.expect(std.mem.indexOf(u8, output, "\"version\": \"2.1.0\"") != null);

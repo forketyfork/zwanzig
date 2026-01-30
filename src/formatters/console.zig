@@ -1,0 +1,115 @@
+const std = @import("std");
+const Diagnostic = @import("../rule.zig").Diagnostic;
+
+pub const ConsoleFormatter = struct {
+    allocator: std.mem.Allocator,
+    file_cache: std.StringHashMap([]const u8),
+
+    pub fn init(allocator: std.mem.Allocator) ConsoleFormatter {
+        return .{
+            .allocator = allocator,
+            .file_cache = std.StringHashMap([]const u8).init(allocator),
+        };
+    }
+
+    pub fn deinit(self: *ConsoleFormatter) void {
+        var value_iter = self.file_cache.valueIterator();
+        while (value_iter.next()) |value| {
+            self.allocator.free(value.*);
+        }
+        self.file_cache.deinit();
+    }
+
+    pub fn write(self: *ConsoleFormatter, writer: anytype, diagnostics: []const Diagnostic) !void {
+        defer self.deinit();
+
+        if (diagnostics.len == 0) {
+            try writer.writeAll("No issues found.\n");
+            return;
+        }
+
+        try writer.print("Found {d} issue(s):\n", .{diagnostics.len});
+        for (diagnostics) |diag| {
+            try diag.format(writer);
+
+            const content = self.getFileContent(diag.file_path) orelse continue;
+            const line = lineSliceFor(content, diag.range.start.line) orelse continue;
+
+            try writer.print("  {s}\n", .{line});
+
+            const line_len = line.len;
+            var start_col = diag.range.start.column;
+            if (start_col == 0) {
+                start_col = 1;
+            }
+            if (line_len > 0 and start_col > line_len) {
+                start_col = line_len;
+            }
+
+            var end_col: usize = start_col;
+            if (diag.range.end.line == diag.range.start.line) {
+                end_col = diag.range.end.column;
+            }
+            if (end_col < start_col) {
+                end_col = start_col;
+            }
+            if (line_len > 0 and end_col > line_len) {
+                end_col = line_len;
+            }
+
+            const caret_len = if (line_len == 0) 1 else @max(end_col - start_col + 1, 1);
+            try writer.writeAll("  ");
+            var space_index: usize = 1;
+            while (space_index < start_col) : (space_index += 1) {
+                try writer.writeByte(' ');
+            }
+            var caret_index: usize = 0;
+            while (caret_index < caret_len) : (caret_index += 1) {
+                try writer.writeByte('^');
+            }
+            try writer.writeByte('\n');
+        }
+    }
+
+    fn getFileContent(self: *ConsoleFormatter, file_path: []const u8) ?[]const u8 {
+        if (self.file_cache.get(file_path)) |cached| {
+            return cached;
+        }
+
+        const file = if (std.fs.path.isAbsolute(file_path))
+            std.fs.openFileAbsolute(file_path, .{})
+        else
+            std.fs.cwd().openFile(file_path, .{});
+        const opened_file = file catch return null;
+        defer opened_file.close();
+
+        const max_size = 10 * 1024 * 1024;
+        const loaded = opened_file.readToEndAllocOptions(
+            self.allocator,
+            max_size,
+            null,
+            std.mem.Alignment.of(u8),
+            0,
+        ) catch return null;
+
+        self.file_cache.put(file_path, loaded) catch {
+            self.allocator.free(loaded);
+            return null;
+        };
+        return loaded;
+    }
+};
+
+fn lineSliceFor(content: []const u8, line_number: usize) ?[]const u8 {
+    var line_iter = std.mem.splitScalar(u8, content, '\n');
+    var current_line: usize = 1;
+    while (line_iter.next()) |line| : (current_line += 1) {
+        if (current_line == line_number) {
+            if (line.len > 0 and line[line.len - 1] == '\r') {
+                return line[0 .. line.len - 1];
+            }
+            return line;
+        }
+    }
+    return null;
+}
