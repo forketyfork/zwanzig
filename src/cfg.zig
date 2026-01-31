@@ -1,5 +1,6 @@
 const graph = @import("cfg/graph.zig");
 const builder = @import("cfg/builder.zig");
+pub const dot = @import("cfg/dot.zig");
 
 pub const IrNode = graph.IrNode;
 pub const IrTag = graph.IrTag;

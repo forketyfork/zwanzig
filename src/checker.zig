@@ -13,6 +13,9 @@ pub const TypeContext = type_context_mod.TypeContext;
 pub const TypeInfo = type_context_mod.TypeInfo;
 const config_mod = @import("config.zig");
 pub const Config = config_mod.Config;
+const cfg_mod = @import("cfg.zig");
+pub const Cfg = cfg_mod.Cfg;
+pub const CfgBuilder = cfg_mod.CfgBuilder;
 
 pub const AnalysisStats = struct {
     total_runs: u64 = 0,
@@ -60,6 +63,9 @@ pub const CheckerContext = struct {
     analysis_limits: AnalysisLimits = .{},
     /// Config for resource models and other analyzer settings.
     config: ?*const Config = null,
+    /// Directory to dump CFG DOT files for visualization.
+    /// When set, checkers write CFG DOT files to this directory.
+    dump_cfg_dir: ?[]const u8 = null,
 
     /// Check if type information is available.
     pub fn hasTypeInfo(self: *const CheckerContext) bool {
@@ -96,6 +102,14 @@ pub const CheckerContext = struct {
     pub fn classifyIdentifier(self: *const CheckerContext, name: []const u8) TypeContext.IdentifierKind {
         const ctx = self.type_context orelse return .unknown;
         return ctx.classifyIdentifier(name);
+    }
+
+    /// Create a CfgBuilder pre-configured with the context's dump directory.
+    /// The builder will automatically dump CFG DOT files when buildFromFn succeeds.
+    pub fn createCfgBuilder(self: *const CheckerContext, allocator: std.mem.Allocator) CfgBuilder {
+        var builder = CfgBuilder.init(allocator);
+        builder.setDumpCfgDir(self.dump_cfg_dir);
+        return builder;
     }
 };
 

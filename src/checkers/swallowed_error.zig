@@ -6,7 +6,6 @@ const Diagnostic = checker_mod.Diagnostic;
 const Source = @import("../source.zig").Source;
 const ids = @import("../ids.zig");
 const cfg_mod = @import("../cfg.zig");
-const CfgBuilder = cfg_mod.CfgBuilder;
 const Cfg = cfg_mod.Cfg;
 const CfgNodeId = ids.CfgNodeId;
 const AstNodeId = ids.AstNodeId;
@@ -54,12 +53,13 @@ pub const SwallowedErrorChecker = struct {
         diagnostics: *std.ArrayList(Diagnostic),
         context: checker_mod.CheckerContext,
     ) CheckerError!void {
-        var builder = CfgBuilder.init(allocator);
+        var builder = context.createCfgBuilder(allocator);
 
         // Build CFG for the function
         var cfg_opt = builder.buildFromFn(src, fn_node) catch return;
         if (cfg_opt) |*cfg| {
             defer cfg.deinit();
+
             const tree = src.ast() catch return;
             const data = tree.nodes.items(.data);
 

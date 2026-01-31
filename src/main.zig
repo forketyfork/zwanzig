@@ -61,6 +61,7 @@ pub const CliArgs = struct {
     max_worklist_steps: ?usize,
     max_states_per_point: ?u32,
     use_widening: ?bool,
+    dump_cfg_dir: ?[]const u8,
 };
 
 pub const CliError = error{
@@ -89,6 +90,7 @@ pub fn parseArgs(allocator: std.mem.Allocator, args: []const []const u8) CliErro
     var max_worklist_steps: ?usize = null;
     var max_states_per_point: ?u32 = null;
     var use_widening: ?bool = null;
+    var dump_cfg_dir: ?[]const u8 = null;
     var build_meta: ?BuildMetadata = null;
     errdefer {
         if (build_meta) |*meta| {
@@ -156,6 +158,12 @@ pub fn parseArgs(allocator: std.mem.Allocator, args: []const []const u8) CliErro
             max_states_per_point = parsed;
         } else if (std.mem.eql(u8, arg, "--use-widening")) {
             use_widening = true;
+        } else if (std.mem.eql(u8, arg, "--dump-cfg")) {
+            if (i + 1 >= args.len or std.mem.startsWith(u8, args[i + 1], "--")) {
+                return CliError.MissingFlagValue;
+            }
+            i += 1;
+            dump_cfg_dir = args[i];
         } else if (std.mem.startsWith(u8, arg, "--")) {
             continue;
         } else {
@@ -193,6 +201,7 @@ pub fn parseArgs(allocator: std.mem.Allocator, args: []const []const u8) CliErro
         .max_worklist_steps = max_worklist_steps,
         .max_states_per_point = max_states_per_point,
         .use_widening = use_widening,
+        .dump_cfg_dir = dump_cfg_dir,
     };
 }
 
@@ -445,6 +454,10 @@ pub fn main() !void {
         try analyzer.enableCache();
     }
 
+    if (cli_args.dump_cfg_dir) |dir| {
+        analyzer.setDumpCfgDir(dir);
+    }
+
     log.info("analyzing with {d} rule(s)", .{analyzer.totalCheckerCount()});
     for (files) |file_path| {
         try analyzer.analyzeFile(file_path);
@@ -476,6 +489,7 @@ fn printUsage() !void {
     try stdout.writeAll("  --max-states-per-point <n> Max unique states per CFG point\n");
     try stdout.writeAll("  --use-widening    Enable loop-header widening for convergence\n");
     try stdout.writeAll("  --cache           Enable incremental caching\n");
+    try stdout.writeAll("  --dump-cfg <dir>  Dump CFG DOT files to directory for visualization\n");
     try stdout.writeAll("\n  Note: --do and --skip are mutually exclusive and override config file.\n");
     try stdout.writeAll("\nArguments:\n");
     try stdout.writeAll("  [path...]         Files or directories to analyze (default: current directory)\n");
@@ -802,6 +816,7 @@ test "mergeConfig: CLI overrides config allowlist" {
         .max_worklist_steps = null,
         .max_states_per_point = null,
         .use_widening = null,
+        .dump_cfg_dir = null,
     };
 
     const result = try mergeConfig(allocator, cli_args);
@@ -844,6 +859,7 @@ test "mergeConfig: uses config when no CLI filter" {
         .max_worklist_steps = null,
         .max_states_per_point = null,
         .use_widening = null,
+        .dump_cfg_dir = null,
     };
 
     const result = try mergeConfig(allocator, cli_args);
@@ -885,6 +901,7 @@ test "mergeConfig: no config file and no CLI filter" {
         .max_worklist_steps = null,
         .max_states_per_point = null,
         .use_widening = null,
+        .dump_cfg_dir = null,
     };
 
     const result = try mergeConfig(allocator, cli_args);
