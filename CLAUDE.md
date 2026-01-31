@@ -78,35 +78,14 @@ See existing rules in `src/rules/` for patterns. For CFG-based checkers, see `sr
 - `--do <rule>`: Run only specified rules (allowlist, repeatable)
 - `--skip <rule>`: Skip specified rules (blocklist, repeatable)
 - `--do` and `--skip` are mutually exclusive
-- `--dump-cfg <dir>`: Dump CFG DOT files for visualization (see Debugging section)
+- `--dump-cfg <dir>`: Dump CFG DOT files for visualization
+- `--dump-exploded-graph <dir>`: Dump exploded graph showing all (CFG node, state) pairs
+- `--dump-annotated-cfg <dir>`: Dump CFG with state annotations overlaid
+- `--dump-path-trace <dir>`: Dump path traces to violations
+
+See [docs/VISUALIZATION.md](docs/VISUALIZATION.md) for detailed visualization documentation.
 
 ## Debugging
-
-### CFG Visualization
-
-Engine-based checkers use Control Flow Graphs (CFGs) for analysis. To visualize CFGs:
-
-```bash
-# Dump CFG DOT files to a directory
-zig build run -- --dump-cfg ./cfg_output src/myfile.zig
-
-# Convert DOT to PNG with Graphviz
-dot -Tpng ./cfg_output/myfile_functionName.dot -o cfg.png
-
-# Or use online viewers: https://edotor.net or https://viz-js.com
-```
-
-DOT output features:
-- Entry nodes (`fn_entry`) in green, exit nodes (`fn_exit`) in red
-- Branch/loop headers shown as diamonds
-- Edge colors indicate control flow type:
-  - Green: `branch_true`, `try_success`, `catch_success`
-  - Red: `branch_false`, `try_error`, `catch_error`, `errdefer_edge`
-  - Blue dashed: `loop_back`
-  - Orange: `loop_exit`
-  - Purple dashed: `defer_edge`
-
-The `Cfg` struct also provides `dumpDot(allocator)` for quick stderr output during development.
 
 ### Debug Logging
 

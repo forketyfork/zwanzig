@@ -66,6 +66,15 @@ pub const CheckerContext = struct {
     /// Directory to dump CFG DOT files for visualization.
     /// When set, checkers write CFG DOT files to this directory.
     dump_cfg_dir: ?[]const u8 = null,
+    /// Directory to dump exploded graph DOT files.
+    /// Shows all (CFG node, state) pairs from the analysis.
+    dump_exploded_graph_dir: ?[]const u8 = null,
+    /// Directory to dump annotated CFG DOT files.
+    /// Shows CFG with state information overlaid on nodes.
+    dump_annotated_cfg_dir: ?[]const u8 = null,
+    /// Directory to dump path trace DOT files.
+    /// Shows paths to violations with state evolution.
+    dump_path_trace_dir: ?[]const u8 = null,
 
     /// Check if type information is available.
     pub fn hasTypeInfo(self: *const CheckerContext) bool {

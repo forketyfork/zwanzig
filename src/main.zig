@@ -62,6 +62,9 @@ pub const CliArgs = struct {
     max_states_per_point: ?u32,
     use_widening: ?bool,
     dump_cfg_dir: ?[]const u8,
+    dump_exploded_graph_dir: ?[]const u8,
+    dump_annotated_cfg_dir: ?[]const u8,
+    dump_path_trace_dir: ?[]const u8,
 };
 
 pub const CliError = error{
@@ -91,6 +94,9 @@ pub fn parseArgs(allocator: std.mem.Allocator, args: []const []const u8) CliErro
     var max_states_per_point: ?u32 = null;
     var use_widening: ?bool = null;
     var dump_cfg_dir: ?[]const u8 = null;
+    var dump_exploded_graph_dir: ?[]const u8 = null;
+    var dump_annotated_cfg_dir: ?[]const u8 = null;
+    var dump_path_trace_dir: ?[]const u8 = null;
     var build_meta: ?BuildMetadata = null;
     errdefer {
         if (build_meta) |*meta| {
@@ -164,6 +170,24 @@ pub fn parseArgs(allocator: std.mem.Allocator, args: []const []const u8) CliErro
             }
             i += 1;
             dump_cfg_dir = args[i];
+        } else if (std.mem.eql(u8, arg, "--dump-exploded-graph")) {
+            if (i + 1 >= args.len or std.mem.startsWith(u8, args[i + 1], "--")) {
+                return CliError.MissingFlagValue;
+            }
+            i += 1;
+            dump_exploded_graph_dir = args[i];
+        } else if (std.mem.eql(u8, arg, "--dump-annotated-cfg")) {
+            if (i + 1 >= args.len or std.mem.startsWith(u8, args[i + 1], "--")) {
+                return CliError.MissingFlagValue;
+            }
+            i += 1;
+            dump_annotated_cfg_dir = args[i];
+        } else if (std.mem.eql(u8, arg, "--dump-path-trace")) {
+            if (i + 1 >= args.len or std.mem.startsWith(u8, args[i + 1], "--")) {
+                return CliError.MissingFlagValue;
+            }
+            i += 1;
+            dump_path_trace_dir = args[i];
         } else if (std.mem.startsWith(u8, arg, "--")) {
             continue;
         } else {
@@ -202,6 +226,9 @@ pub fn parseArgs(allocator: std.mem.Allocator, args: []const []const u8) CliErro
         .max_states_per_point = max_states_per_point,
         .use_widening = use_widening,
         .dump_cfg_dir = dump_cfg_dir,
+        .dump_exploded_graph_dir = dump_exploded_graph_dir,
+        .dump_annotated_cfg_dir = dump_annotated_cfg_dir,
+        .dump_path_trace_dir = dump_path_trace_dir,
     };
 }
 
@@ -457,6 +484,15 @@ pub fn main() !void {
     if (cli_args.dump_cfg_dir) |dir| {
         analyzer.setDumpCfgDir(dir);
     }
+    if (cli_args.dump_exploded_graph_dir) |dir| {
+        analyzer.setDumpExplodedGraphDir(dir);
+    }
+    if (cli_args.dump_annotated_cfg_dir) |dir| {
+        analyzer.setDumpAnnotatedCfgDir(dir);
+    }
+    if (cli_args.dump_path_trace_dir) |dir| {
+        analyzer.setDumpPathTraceDir(dir);
+    }
 
     log.info("analyzing with {d} rule(s)", .{analyzer.totalCheckerCount()});
     for (files) |file_path| {
@@ -490,6 +526,9 @@ fn printUsage() !void {
     try stdout.writeAll("  --use-widening    Enable loop-header widening for convergence\n");
     try stdout.writeAll("  --cache           Enable incremental caching\n");
     try stdout.writeAll("  --dump-cfg <dir>  Dump CFG DOT files to directory for visualization\n");
+    try stdout.writeAll("  --dump-exploded-graph <dir>  Dump exploded graph (all states) as DOT\n");
+    try stdout.writeAll("  --dump-annotated-cfg <dir>   Dump CFG with state annotations as DOT\n");
+    try stdout.writeAll("  --dump-path-trace <dir>      Dump path traces to violations as DOT\n");
     try stdout.writeAll("\n  Note: --do and --skip are mutually exclusive and override config file.\n");
     try stdout.writeAll("\nArguments:\n");
     try stdout.writeAll("  [path...]         Files or directories to analyze (default: current directory)\n");
@@ -817,6 +856,9 @@ test "mergeConfig: CLI overrides config allowlist" {
         .max_states_per_point = null,
         .use_widening = null,
         .dump_cfg_dir = null,
+        .dump_exploded_graph_dir = null,
+        .dump_annotated_cfg_dir = null,
+        .dump_path_trace_dir = null,
     };
 
     const result = try mergeConfig(allocator, cli_args);
@@ -860,6 +902,9 @@ test "mergeConfig: uses config when no CLI filter" {
         .max_states_per_point = null,
         .use_widening = null,
         .dump_cfg_dir = null,
+        .dump_exploded_graph_dir = null,
+        .dump_annotated_cfg_dir = null,
+        .dump_path_trace_dir = null,
     };
 
     const result = try mergeConfig(allocator, cli_args);
@@ -902,6 +947,9 @@ test "mergeConfig: no config file and no CLI filter" {
         .max_states_per_point = null,
         .use_widening = null,
         .dump_cfg_dir = null,
+        .dump_exploded_graph_dir = null,
+        .dump_annotated_cfg_dir = null,
+        .dump_path_trace_dir = null,
     };
 
     const result = try mergeConfig(allocator, cli_args);
