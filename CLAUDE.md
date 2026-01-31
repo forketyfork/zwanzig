@@ -78,71 +78,14 @@ See existing rules in `src/rules/` for patterns. For CFG-based checkers, see `sr
 - `--do <rule>`: Run only specified rules (allowlist, repeatable)
 - `--skip <rule>`: Skip specified rules (blocklist, repeatable)
 - `--do` and `--skip` are mutually exclusive
-- `--dump-cfg <dir>`: Dump CFG DOT files for visualization (see Debugging section)
+- `--dump-cfg <dir>`: Dump CFG DOT files for visualization
 - `--dump-exploded-graph <dir>`: Dump exploded graph showing all (CFG node, state) pairs
 - `--dump-annotated-cfg <dir>`: Dump CFG with state annotations overlaid
 - `--dump-path-trace <dir>`: Dump path traces to violations
 
+See [docs/VISUALIZATION.md](docs/VISUALIZATION.md) for detailed visualization documentation.
+
 ## Debugging
-
-### CFG Visualization
-
-Engine-based checkers use Control Flow Graphs (CFGs) for analysis. To visualize CFGs:
-
-```bash
-# Dump CFG DOT files to a directory
-zig build run -- --dump-cfg ./cfg_output src/myfile.zig
-
-# Convert DOT to PNG with Graphviz
-dot -Tpng ./cfg_output/myfile_functionName.dot -o cfg.png
-
-# Or use online viewers: https://edotor.net or https://viz-js.com
-```
-
-DOT output features:
-- Entry nodes (`fn_entry`) in green, exit nodes (`fn_exit`) in red
-- Branch/loop headers shown as diamonds
-- Edge colors indicate control flow type:
-  - Green: `branch_true`, `try_success`, `catch_success`
-  - Red: `branch_false`, `try_error`, `catch_error`, `errdefer_edge`
-  - Blue dashed: `loop_back`
-  - Orange: `loop_exit`
-  - Purple dashed: `defer_edge`
-
-The `Cfg` struct also provides `dumpDot(allocator)` for quick stderr output during development.
-
-### Lattice Flow Visualization
-
-Engine-based checkers build exploded graphs showing all reachable (CFG node, state) pairs during abstract interpretation. Three visualization options are available:
-
-```bash
-# Dump full exploded graph (can be large for complex functions)
-zig build run -- --dump-exploded-graph ./eg_output src/myfile.zig
-
-# Dump CFG with state counts overlaid on each node
-zig build run -- --dump-annotated-cfg ./acfg_output src/myfile.zig
-
-# Dump path traces to violations (useful for debugging false positives)
-zig build run -- --dump-path-trace ./traces src/myfile.zig
-```
-
-**Exploded Graph** (`--dump-exploded-graph`):
-- Each node shows: CFG index, IR tag, pre/post state, state hash, env size, constraint count
-- Green fill: entry states; Red fill: exit states; Yellow fill: states with violations
-- Edges show transitions between (CFG node, state) pairs
-
-**Annotated CFG** (`--dump-annotated-cfg`):
-- Same structure as regular CFG visualization
-- Each node shows the count of unique states that reached it
-- Yellow fill indicates nodes where a violation was detected
-
-**Path Traces** (`--dump-path-trace`):
-- One subgraph per detected violation
-- Shows the path from function entry to the violation
-- Each node shows step number, CFG index, IR tag, env size, and error state
-- Red fill marks the violation location; green fill marks the entry
-
-Output files are named: `<source_basename>_<fn_name>_<suffix>.dot`
 
 ### Debug Logging
 
