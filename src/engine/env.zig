@@ -79,7 +79,7 @@ pub const Environment = struct {
     }
 
     /// Widening operator for environments.
-    /// Used at loop headers to ensure convergence.
+    /// Used at widening points to ensure convergence.
     /// - Union of variables from both environments.
     /// - For variables in both: widen the values.
     /// - For variables in only one side: set to `unknown`.
@@ -113,6 +113,19 @@ pub const Environment = struct {
         }
 
         return result;
+    }
+
+    /// Returns true if `self` is at least as general as `other`.
+    /// Missing bindings in `self` are treated as `unknown`.
+    pub fn subsumes(self: *const Environment, other: *const Environment) bool {
+        var iter = self.bindings.iterator();
+        while (iter.next()) |entry| {
+            const var_id = entry.key_ptr.*;
+            const self_val = entry.value_ptr.*;
+            const other_val = other.bindings.get(var_id) orelse .unknown;
+            if (!self_val.subsumes(other_val)) return false;
+        }
+        return true;
     }
 };
 
@@ -248,4 +261,20 @@ test "Environment widen with empty environments" {
     const val = widened2.get(ids.varId(1));
     try testing.expect(val != null);
     try testing.expect(val.?.isUnknown());
+}
+
+test "Environment subsumes respects missing bindings as unknown" {
+    const testing = std.testing;
+    const allocator = testing.allocator;
+
+    var general = Environment.init(allocator);
+    defer general.deinit();
+
+    var specific = Environment.init(allocator);
+    defer specific.deinit();
+
+    try specific.set(ids.varId(1), .{ .concrete_int = 42 });
+
+    try testing.expect(general.subsumes(&specific));
+    try testing.expect(!specific.subsumes(&general));
 }

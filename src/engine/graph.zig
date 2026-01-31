@@ -7,7 +7,7 @@ const EngineError = @import("base.zig").EngineError;
 const state_mod = @import("state.zig");
 const ProgramPoint = state_mod.ProgramPoint;
 const ProgramState = state_mod.ProgramState;
-const LoopHeaderKey = state_mod.LoopHeaderKey;
+const WideningKey = state_mod.WideningKey;
 
 /// Default maximum number of unique states per program point.
 /// Beyond this, new states at the same point are dropped (widening approximation).
@@ -68,14 +68,16 @@ pub const ExplodedGraph = struct {
     cfg: *const Cfg,
     /// Count of states per program point (for widening)
     point_state_counts: std.AutoHashMap(u64, u32),
+    /// Node indices per program point (for subsumption and cap widening)
+    point_nodes: std.AutoHashMap(u64, std.ArrayList(u32)),
     /// Maximum number of unique states per program point before dropping
     max_states_per_point: u32,
     /// Count of states dropped due to per-point limit
     dropped_state_count: u32,
-    /// Stored states at loop headers for widening (keyed by LoopHeaderKey)
-    loop_header_states: std.HashMap(LoopHeaderKey, ProgramState, LoopHeaderKey.HashContext, std.hash_map.default_max_load_percentage),
-    /// Visit count at loop headers for delayed widening (keyed by LoopHeaderKey)
-    loop_header_visits: std.HashMap(LoopHeaderKey, u32, LoopHeaderKey.HashContext, std.hash_map.default_max_load_percentage),
+    /// Stored states at widening points (keyed by WideningKey)
+    widening_states: std.HashMap(WideningKey, ProgramState, WideningKey.HashContext, std.hash_map.default_max_load_percentage),
+    /// Visit count at widening points for delayed widening (keyed by WideningKey)
+    widening_visits: std.HashMap(WideningKey, u32, WideningKey.HashContext, std.hash_map.default_max_load_percentage),
     /// Count of nodes created after widening
     widened_nodes: u32,
     /// Count of times widening converged (widened state equals previous)
@@ -88,10 +90,11 @@ pub const ExplodedGraph = struct {
             .node_map = std.AutoHashMap(u64, u32).init(allocator),
             .cfg = cfg,
             .point_state_counts = std.AutoHashMap(u64, u32).init(allocator),
+            .point_nodes = std.AutoHashMap(u64, std.ArrayList(u32)).init(allocator),
             .max_states_per_point = default_max_states_per_point,
             .dropped_state_count = 0,
-            .loop_header_states = std.HashMap(LoopHeaderKey, ProgramState, LoopHeaderKey.HashContext, std.hash_map.default_max_load_percentage).init(allocator),
-            .loop_header_visits = std.HashMap(LoopHeaderKey, u32, LoopHeaderKey.HashContext, std.hash_map.default_max_load_percentage).init(allocator),
+            .widening_states = std.HashMap(WideningKey, ProgramState, WideningKey.HashContext, std.hash_map.default_max_load_percentage).init(allocator),
+            .widening_visits = std.HashMap(WideningKey, u32, WideningKey.HashContext, std.hash_map.default_max_load_percentage).init(allocator),
             .widened_nodes = 0,
             .widening_converged = 0,
         };
@@ -104,21 +107,26 @@ pub const ExplodedGraph = struct {
         self.nodes.deinit(self.allocator);
         self.node_map.deinit();
         self.point_state_counts.deinit();
-        // Deinit stored loop header states
-        var it = self.loop_header_states.valueIterator();
+        var point_iter = self.point_nodes.valueIterator();
+        while (point_iter.next()) |list_ptr| {
+            list_ptr.deinit(self.allocator);
+        }
+        self.point_nodes.deinit();
+        // Deinit stored widening states
+        var it = self.widening_states.valueIterator();
         while (it.next()) |state_ptr| {
             state_ptr.deinit();
         }
-        self.loop_header_states.deinit();
-        self.loop_header_visits.deinit();
+        self.widening_states.deinit();
+        self.widening_visits.deinit();
     }
 
-    /// Options for widening at loop headers.
+    /// Options for widening at program points.
     pub const WideningOptions = struct {
-        /// Whether to apply widening at this loop header
-        widen_at_header: bool = false,
-        /// The loop header key (must be provided if widen_at_header is true)
-        header_key: ?LoopHeaderKey = null,
+        /// Whether to apply widening at this point
+        apply_widening: bool = false,
+        /// The widening key (must be provided if apply_widening is true)
+        widening_key: ?WideningKey = null,
     };
 
     /// Result of getOrCreateNode operation.
@@ -131,11 +139,106 @@ pub const ExplodedGraph = struct {
         widening_applied: bool = false,
         /// Whether widening converged (state unchanged after widening)
         converged: bool = false,
+        /// Whether an existing node's state was updated (reprocess needed)
+        state_updated: bool = false,
         /// Whether the caller should deinit the input state.
         /// True when: (1) node already exists (is_new == false), or
         ///            (2) widening was applied (the widened state, not input, was consumed)
         caller_should_deinit: bool = false,
     };
+
+    const CapWideningResult = struct {
+        index: u32,
+        applied: bool,
+        converged: bool,
+        state_updated: bool,
+    };
+
+    fn ensurePointNodes(self: *ExplodedGraph, point_key: u64) EngineError!*std.ArrayList(u32) {
+        const entry = self.point_nodes.getOrPut(point_key) catch |err| switch (err) {
+            error.OutOfMemory => return EngineError.OutOfMemory,
+        };
+        if (!entry.found_existing) {
+            entry.value_ptr.* = .empty;
+        }
+        return entry.value_ptr;
+    }
+
+    fn findSubsumingNode(self: *ExplodedGraph, point_key: u64, state: *const ProgramState) ?u32 {
+        if (self.point_nodes.getPtr(point_key)) |list| {
+            for (list.items) |index| {
+                const existing_state = &self.nodes.items[index].state;
+                if (existing_state.subsumes(state)) return index;
+            }
+        }
+        return null;
+    }
+
+    fn sameContext(a: *const ProgramState, b: *const ProgramState) bool {
+        if (a.inline_depth != b.inline_depth) return false;
+        if (a.call_stack.items.len != b.call_stack.items.len) return false;
+        for (a.call_stack.items, b.call_stack.items) |call_site, other_site| {
+            if (call_site.call_node != other_site.call_node or
+                call_site.return_node != other_site.return_node or
+                call_site.caller_cfg != other_site.caller_cfg)
+            {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    fn widenOnCap(self: *ExplodedGraph, point_key: u64, state: *ProgramState) EngineError!CapWideningResult {
+        const list = self.point_nodes.getPtr(point_key) orelse
+            return .{ .index = std.math.maxInt(u32), .applied = false, .converged = false, .state_updated = false };
+        if (list.items.len == 0) {
+            return .{ .index = std.math.maxInt(u32), .applied = false, .converged = false, .state_updated = false };
+        }
+
+        var target_index: ?u32 = null;
+        for (list.items) |index| {
+            const existing_state = &self.nodes.items[index].state;
+            if (sameContext(existing_state, state)) {
+                target_index = index;
+                break;
+            }
+        }
+
+        const cap_index = target_index orelse
+            return .{ .index = std.math.maxInt(u32), .applied = false, .converged = false, .state_updated = false };
+        var target_node = &self.nodes.items[cap_index];
+
+        var widened = target_node.state.widen(state) catch |err| switch (err) {
+            error.OutOfMemory => return EngineError.OutOfMemory,
+        };
+        if (widened.eql(&target_node.state)) {
+            widened.deinit();
+            self.widening_converged += 1;
+            return .{ .index = cap_index, .applied = true, .converged = true, .state_updated = false };
+        }
+
+        const new_key = ExplodedNode.computeKey(target_node.point, &widened);
+        if (self.node_map.get(new_key)) |existing_index| {
+            if (existing_index != cap_index) {
+                widened.deinit();
+                return .{ .index = existing_index, .applied = true, .converged = true, .state_updated = false };
+            }
+        }
+
+        const old_key = ExplodedNode.computeKey(target_node.point, &target_node.state);
+        target_node.state.deinit();
+        target_node.state = widened;
+
+        if (new_key != old_key) {
+            _ = self.node_map.remove(old_key);
+            self.node_map.put(new_key, cap_index) catch |err| switch (err) {
+                error.OutOfMemory => return EngineError.OutOfMemory,
+            };
+        }
+
+        self.widened_nodes += 1;
+        return .{ .index = cap_index, .applied = true, .converged = false, .state_updated = true };
+    }
 
     /// Get or create a node for the given point and state.
     /// Returns the node index and whether it was newly created.
@@ -148,11 +251,11 @@ pub const ExplodedGraph = struct {
     /// Get or create a node for the given point and state, with optional widening support.
     ///
     /// Flow:
-    /// 1. Deduplicate by (point, state) hash as usual.
-    /// 2. If widen_at_header is true:
-    ///    - If first visit: store clone of state and continue.
-    ///    - Else: widen incoming state with stored state and check for convergence.
-    /// 3. Apply max_states_per_point **after** widening as safety net.
+    /// 1. Apply optional widening at the current program point.
+    /// 2. Deduplicate by (point, state) hash as usual.
+    /// 3. Drop states subsumed by an existing node at this point.
+    /// 4. If max_states_per_point is reached, widen into an existing node.
+    /// 5. Otherwise, create a new node.
     pub fn getOrCreateNodeWithWidening(
         self: *ExplodedGraph,
         point: ProgramPoint,
@@ -164,25 +267,25 @@ pub const ExplodedGraph = struct {
         var widening_applied = false;
         var converged = false;
 
-        // Step 2: Apply widening if at a loop header via loop_back edge
-        if (options.widen_at_header) {
-            if (options.header_key) |header_key| {
-                const visit_count = self.loop_header_visits.get(header_key) orelse 0;
+        // Step 1: Apply optional widening at this point.
+        if (options.apply_widening) {
+            if (options.widening_key) |widening_key| {
+                const visit_count = self.widening_visits.get(widening_key) orelse 0;
 
                 if (visit_count == 0) {
                     // First visit: store a clone of the state for future widening
                     const state_clone = state.clone(self.allocator) catch |err| switch (err) {
                         error.OutOfMemory => return EngineError.OutOfMemory,
                     };
-                    self.loop_header_states.put(header_key, state_clone) catch |err| switch (err) {
+                    self.widening_states.put(widening_key, state_clone) catch |err| switch (err) {
                         error.OutOfMemory => return EngineError.OutOfMemory,
                     };
-                    self.loop_header_visits.put(header_key, 1) catch |err| switch (err) {
+                    self.widening_visits.put(widening_key, 1) catch |err| switch (err) {
                         error.OutOfMemory => return EngineError.OutOfMemory,
                     };
                 } else {
                     // Subsequent visits: widen incoming state with stored state
-                    if (self.loop_header_states.getPtr(header_key)) |stored_state| {
+                    if (self.widening_states.getPtr(widening_key)) |stored_state| {
                         widened_state = stored_state.widen(state) catch |err| switch (err) {
                             error.OutOfMemory => return EngineError.OutOfMemory,
                         };
@@ -203,7 +306,7 @@ pub const ExplodedGraph = struct {
                             var old_state = stored_state.*;
                             // put() for existing key replaces value without allocation failure
                             // (capacity already exists), but we handle it defensively
-                            self.loop_header_states.put(header_key, new_clone) catch |err| switch (err) {
+                            self.widening_states.put(widening_key, new_clone) catch |err| switch (err) {
                                 error.OutOfMemory => return EngineError.OutOfMemory,
                             };
                             // Deinit old state after successful replacement
@@ -211,7 +314,7 @@ pub const ExplodedGraph = struct {
                         }
 
                         // Increment visit count
-                        self.loop_header_visits.put(header_key, visit_count + 1) catch |err| switch (err) {
+                        self.widening_visits.put(widening_key, visit_count + 1) catch |err| switch (err) {
                             error.OutOfMemory => return EngineError.OutOfMemory,
                         };
                     }
@@ -230,27 +333,56 @@ pub const ExplodedGraph = struct {
             }
         }
 
-        // Step 1: Deduplicate by (point, state) hash
+        // Step 2: Deduplicate by (point, state) hash
         const key = ExplodedNode.computeKey(point, current_state);
-
         if (self.node_map.get(key)) |existing_index| {
             if (widened_state) |*ws| {
                 ws.deinit();
             }
-            return .{ .index = existing_index, .is_new = false, .widening_applied = widening_applied, .converged = converged, .caller_should_deinit = true };
+            return .{
+                .index = existing_index,
+                .is_new = false,
+                .widening_applied = widening_applied,
+                .converged = converged,
+                .state_updated = false,
+                .caller_should_deinit = true,
+            };
         }
 
-        // Step 3: Check per-point state limit (safety net after widening)
         const point_key = point.hash();
-        const current_count = self.point_state_counts.get(point_key) orelse 0;
-        if (current_count >= self.max_states_per_point) {
-            // Too many states at this point - approximate by not exploring further.
-            // Use maxInt as sentinel; addEdge will reject it via bounds check.
-            self.dropped_state_count += 1;
+
+        // Step 3: Subsumption check against existing nodes at this point
+        if (self.findSubsumingNode(point_key, current_state)) |existing_index| {
             if (widened_state) |*ws| {
                 ws.deinit();
             }
-            return .{ .index = std.math.maxInt(u32), .is_new = false, .widening_applied = widening_applied, .converged = converged, .caller_should_deinit = true };
+            return .{
+                .index = existing_index,
+                .is_new = false,
+                .widening_applied = widening_applied,
+                .converged = converged,
+                .state_updated = false,
+                .caller_should_deinit = true,
+            };
+        }
+
+        // Step 4: Check per-point state limit and widen into existing node if needed
+        const current_count = self.point_state_counts.get(point_key) orelse 0;
+        if (current_count >= self.max_states_per_point) {
+            const cap_result = try self.widenOnCap(point_key, current_state);
+            if (cap_result.applied) {
+                if (widened_state) |*ws| {
+                    ws.deinit();
+                }
+                return .{
+                    .index = cap_result.index,
+                    .is_new = false,
+                    .widening_applied = widening_applied or cap_result.applied,
+                    .converged = converged or cap_result.converged,
+                    .state_updated = cap_result.state_updated,
+                    .caller_should_deinit = true,
+                };
+            }
         }
 
         const index: u32 = @intCast(self.nodes.items.len);
@@ -274,12 +406,22 @@ pub const ExplodedGraph = struct {
             error.OutOfMemory => return EngineError.OutOfMemory,
         };
 
+        var point_list = try self.ensurePointNodes(point_key);
+        try point_list.append(self.allocator, index);
+
         if (widening_applied) {
             self.widened_nodes += 1;
         }
 
         // Caller should deinit the input state if widening was applied (the widened state was consumed, not the input)
-        return .{ .index = index, .is_new = true, .widening_applied = widening_applied, .converged = converged, .caller_should_deinit = widening_applied };
+        return .{
+            .index = index,
+            .is_new = true,
+            .widening_applied = widening_applied,
+            .converged = converged,
+            .state_updated = false,
+            .caller_should_deinit = widening_applied,
+        };
     }
 
     /// Add an edge between two exploded graph nodes
@@ -321,10 +463,10 @@ pub const ExplodedGraph = struct {
         return self.widening_converged;
     }
 
-    /// Get the count of distinct loop headers being tracked for widening.
-    /// Each loop header in a unique calling context is counted separately.
-    pub fn getTrackedLoopHeaderCount(self: *const ExplodedGraph) u32 {
-        return @intCast(self.loop_header_states.count());
+    /// Get the count of distinct widening points being tracked.
+    /// Each point in a unique calling context is counted separately.
+    pub fn getTrackedWideningPointCount(self: *const ExplodedGraph) u32 {
+        return @intCast(self.widening_states.count());
     }
 };
 
@@ -368,6 +510,36 @@ test "ExplodedGraph node creation and deduplication" {
     try testing.expect(result3.is_new);
     try testing.expectEqual(@as(u32, 1), result3.index);
     try testing.expectEqual(@as(usize, 2), graph.nodeCount());
+}
+
+test "ExplodedGraph subsumption avoids redundant states" {
+    const testing = std.testing;
+    const allocator = testing.allocator;
+
+    var cfg = Cfg.init(allocator);
+    defer cfg.deinit();
+
+    _ = try cfg.addNode(IrNode.init(.fn_entry));
+
+    var graph = ExplodedGraph.init(allocator, &cfg);
+    defer graph.deinit();
+
+    const point = ProgramPoint.initPre(ids.cfgId(0), &cfg);
+
+    var general = ProgramState.init(allocator);
+    try general.setVar(ids.varId(1), .unknown);
+    const result1 = try graph.getOrCreateNode(point, &general);
+    try testing.expect(result1.is_new);
+
+    var specific = ProgramState.init(allocator);
+    try specific.setVar(ids.varId(1), .{ .concrete_int = 42 });
+
+    const result2 = try graph.getOrCreateNode(point, &specific);
+    try testing.expect(!result2.is_new);
+    try testing.expectEqual(result1.index, result2.index);
+    try testing.expectEqual(@as(usize, 1), graph.nodeCount());
+
+    specific.deinit();
 }
 
 test "ExplodedGraph edge operations" {
@@ -418,11 +590,11 @@ test "ExplodedGraph widening first visit stores state" {
     var state = ProgramState.init(allocator);
     try state.setVar(ids.varId(1), .{ .concrete_int = 10 });
 
-    const header_key = LoopHeaderKey.init(point, &state);
+    const widening_key = WideningKey.init(point, &state);
 
     const result = try graph.getOrCreateNodeWithWidening(point, &state, .{
-        .widen_at_header = true,
-        .header_key = header_key,
+        .apply_widening = true,
+        .widening_key = widening_key,
     });
 
     try testing.expect(result.is_new);
@@ -432,8 +604,8 @@ test "ExplodedGraph widening first visit stores state" {
     try testing.expectEqual(@as(u32, 0), graph.getWideningConvergedCount());
 
     // Verify state was stored
-    try testing.expect(graph.loop_header_states.get(header_key) != null);
-    try testing.expectEqual(@as(?u32, 1), graph.loop_header_visits.get(header_key));
+    try testing.expect(graph.widening_states.get(widening_key) != null);
+    try testing.expectEqual(@as(?u32, 1), graph.widening_visits.get(widening_key));
 }
 
 test "ExplodedGraph widening subsequent visit applies widening" {
@@ -454,11 +626,11 @@ test "ExplodedGraph widening subsequent visit applies widening" {
     var state1 = ProgramState.init(allocator);
     try state1.setVar(ids.varId(1), .{ .concrete_int = 10 });
 
-    const header_key = LoopHeaderKey.init(point, &state1);
+    const widening_key = WideningKey.init(point, &state1);
 
     _ = try graph.getOrCreateNodeWithWidening(point, &state1, .{
-        .widen_at_header = true,
-        .header_key = header_key,
+        .apply_widening = true,
+        .widening_key = widening_key,
     });
 
     // Second visit: different state should be widened
@@ -466,15 +638,15 @@ test "ExplodedGraph widening subsequent visit applies widening" {
     try state2.setVar(ids.varId(1), .{ .concrete_int = 20 }); // different value
 
     const result = try graph.getOrCreateNodeWithWidening(point, &state2, .{
-        .widen_at_header = true,
-        .header_key = header_key,
+        .apply_widening = true,
+        .widening_key = widening_key,
     });
 
     try testing.expect(result.is_new);
     try testing.expect(result.widening_applied);
     try testing.expect(!result.converged); // widened to unknown, different from stored
     try testing.expectEqual(@as(u32, 1), graph.getWidenedNodeCount());
-    try testing.expectEqual(@as(?u32, 2), graph.loop_header_visits.get(header_key));
+    try testing.expectEqual(@as(?u32, 2), graph.widening_visits.get(widening_key));
     // Caller needs to clean up state2 since it wasn't consumed (widened state was used instead)
     state2.deinit();
 }
@@ -497,11 +669,11 @@ test "ExplodedGraph widening convergence detection" {
     var state1 = ProgramState.init(allocator);
     try state1.setVar(ids.varId(1), .unknown);
 
-    const header_key = LoopHeaderKey.init(point, &state1);
+    const widening_key = WideningKey.init(point, &state1);
 
     _ = try graph.getOrCreateNodeWithWidening(point, &state1, .{
-        .widen_at_header = true,
-        .header_key = header_key,
+        .apply_widening = true,
+        .widening_key = widening_key,
     });
 
     // Second visit: same unknown value should converge
@@ -509,8 +681,8 @@ test "ExplodedGraph widening convergence detection" {
     try state2.setVar(ids.varId(1), .unknown);
 
     const result = try graph.getOrCreateNodeWithWidening(point, &state2, .{
-        .widen_at_header = true,
-        .header_key = header_key,
+        .apply_widening = true,
+        .widening_key = widening_key,
     });
 
     // Should deduplicate since widened state equals stored state
@@ -539,7 +711,7 @@ test "ExplodedGraph widening stats tracking" {
     try testing.expectEqual(@as(u32, 0), graph.getDroppedStateCount());
 }
 
-test "ExplodedGraph widening respects max_states_per_point as fallback" {
+test "ExplodedGraph widen-on-cap updates existing node" {
     const testing = std.testing;
     const allocator = testing.allocator;
 
@@ -555,31 +727,68 @@ test "ExplodedGraph widening respects max_states_per_point as fallback" {
 
     const point = ProgramPoint.initPre(ids.cfgId(0), &cfg);
 
-    // Create first state (no widening)
     var state1 = ProgramState.init(allocator);
-    _ = try graph.getOrCreateNode(point, &state1);
+    try state1.setVar(ids.varId(1), .{ .concrete_int = 10 });
+    const result1 = try graph.getOrCreateNode(point, &state1);
+    try testing.expect(result1.is_new);
 
-    // Create second state (no widening)
     var state2 = ProgramState.init(allocator);
-    try state2.setVar(ids.varId(1), .{ .concrete_int = 10 });
-    _ = try graph.getOrCreateNode(point, &state2);
+    try state2.setVar(ids.varId(1), .{ .concrete_int = 20 });
+    const result2 = try graph.getOrCreateNode(point, &state2);
+    try testing.expect(result2.is_new);
 
-    // Third state should be dropped even with widening enabled
     var state3 = ProgramState.init(allocator);
-    try state3.setVar(ids.varId(1), .{ .concrete_int = 20 });
+    try state3.setVar(ids.varId(1), .{ .concrete_int = 30 });
 
-    const header_key = LoopHeaderKey.init(point, &state3);
-
-    const result = try graph.getOrCreateNodeWithWidening(point, &state3, .{
-        .widen_at_header = true,
-        .header_key = header_key,
-    });
+    const result = try graph.getOrCreateNodeWithWidening(point, &state3, .{});
 
     try testing.expect(!result.is_new);
-    try testing.expectEqual(std.math.maxInt(u32), result.index);
-    try testing.expectEqual(@as(u32, 1), graph.getDroppedStateCount());
-    // Cleanup state3 since it wasn't consumed
+    try testing.expect(result.widening_applied);
+    try testing.expect(result.state_updated);
+    try testing.expectEqual(@as(u32, 0), graph.getDroppedStateCount());
+
+    const node = graph.getNode(result.index).?;
+    const val = node.state.getVar(ids.varId(1)).?;
+    try testing.expect(val.isUnknown());
+
     state3.deinit();
+}
+
+test "ExplodedGraph widen-on-cap respects context" {
+    const testing = std.testing;
+    const allocator = testing.allocator;
+
+    var cfg = Cfg.init(allocator);
+    defer cfg.deinit();
+
+    _ = try cfg.addNode(IrNode.init(.fn_entry));
+    _ = try cfg.addNode(IrNode.init(.fn_entry));
+
+    var graph = ExplodedGraph.init(allocator, &cfg);
+    defer graph.deinit();
+
+    graph.setMaxStatesPerPoint(1);
+
+    const point = ProgramPoint.initPre(ids.cfgId(0), &cfg);
+
+    var state1 = ProgramState.init(allocator);
+    try state1.setVar(ids.varId(1), .{ .concrete_int = 10 });
+    const result1 = try graph.getOrCreateNode(point, &state1);
+    try testing.expect(result1.is_new);
+
+    var state2 = ProgramState.init(allocator);
+    try state2.setVar(ids.varId(1), .{ .concrete_int = 20 });
+    try state2.pushCallSite(state_mod.CallSite{ .call_node = ids.cfgId(0), .caller_cfg = &cfg, .return_node = ids.cfgId(1) });
+
+    const result2 = try graph.getOrCreateNodeWithWidening(point, &state2, .{});
+    try testing.expect(result2.is_new);
+    try testing.expect(!result2.widening_applied);
+    try testing.expectEqual(@as(usize, 2), graph.nodeCount());
+    try testing.expectEqual(@as(u32, 0), graph.getDroppedStateCount());
+
+    if (result2.caller_should_deinit) {
+        state2.deinit();
+    }
 }
 
 test "ExplodedGraph without widening options works as before" {

@@ -253,24 +253,34 @@ const MergedConfig = struct {
     use_widening: ?bool,
     resource_models: []const config.ResourceModel = &.{},
 };
+fn defaultRuleFilter(allocator: std.mem.Allocator) !RuleFilter {
+    var rule_names = try allocator.alloc([]const u8, 1);
+    errdefer allocator.free(rule_names);
+    rule_names[0] = try allocator.dupe(u8, "sentinel-alloc");
+    return .{ .blocklist = rule_names };
+}
 
 fn mergeConfig(allocator: std.mem.Allocator, cli_args: CliArgs) !MergedConfig {
     const config_path = cli_args.config_path orelse ".zwanzig.json";
 
     var loaded_config = config.loadConfig(allocator, config_path) catch |err| {
         if (err == config.ConfigError.FileNotFound and cli_args.config_path == null) {
+            const rule_filter = switch (cli_args.rule_filter) {
+                .none => try defaultRuleFilter(allocator),
+                else => cli_args.rule_filter,
+            };
             return .{
-                .rule_filter = cli_args.rule_filter,
+                .rule_filter = rule_filter,
                 .max_worklist_steps = cli_args.max_worklist_steps,
                 .max_states_per_point = cli_args.max_states_per_point,
-                .use_widening = cli_args.use_widening,
+                .use_widening = cli_args.use_widening orelse true,
             };
         }
         return err;
     };
     const max_worklist_steps = cli_args.max_worklist_steps orelse loaded_config.max_worklist_steps;
     const max_states_per_point = cli_args.max_states_per_point orelse loaded_config.max_states_per_point;
-    const use_widening = cli_args.use_widening orelse loaded_config.use_widening;
+    const use_widening = cli_args.use_widening orelse loaded_config.use_widening orelse true;
     const resource_models = loaded_config.resource_models;
 
     switch (cli_args.rule_filter) {
@@ -624,7 +634,7 @@ fn printUsage() !void {
     try stdout.writeAll("  --format <format> Output format: 'text', 'json', or 'sarif' (default: text)\n");
     try stdout.writeAll("  --max-steps <n>   Max worklist steps per engine run\n");
     try stdout.writeAll("  --max-states-per-point <n> Max unique states per CFG point\n");
-    try stdout.writeAll("  --use-widening    Enable widening for convergence (default: off)\n");
+    try stdout.writeAll("  --use-widening    Enable widening for convergence (default: on)\n");
     try stdout.writeAll("  --cache           Enable incremental caching\n");
     try stdout.writeAll("  --threads <n>     Number of threads for parallel analysis (default: CPU count)\n");
     try stdout.writeAll("  --dump-cfg <dir>  Dump CFG DOT files to directory for visualization\n");
@@ -1059,12 +1069,28 @@ test "mergeConfig: no config file and no CLI filter" {
 
     const result = try mergeConfig(allocator, cli_args);
     defer switch (result.rule_filter) {
-        .allowlist => |list| allocator.free(list),
-        .blocklist => |list| allocator.free(list),
+        .allowlist => |list| {
+            for (list) |name| {
+                allocator.free(name);
+            }
+            allocator.free(list);
+        },
+        .blocklist => |list| {
+            for (list) |name| {
+                allocator.free(name);
+            }
+            allocator.free(list);
+        },
         .none => {},
     };
 
-    try std.testing.expectEqual(RuleFilter.none, result.rule_filter);
+    switch (result.rule_filter) {
+        .blocklist => |list| {
+            try std.testing.expectEqual(@as(usize, 1), list.len);
+            try std.testing.expectEqualStrings("sentinel-alloc", list[0]);
+        },
+        else => return error.UnexpectedFilterType,
+    }
 }
 
 test "parseArgs: --format text" {

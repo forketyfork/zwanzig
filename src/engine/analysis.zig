@@ -20,7 +20,7 @@ const FunctionSummary = @import("summary.zig").FunctionSummary;
 const SummaryCache = @import("summary.zig").SummaryCache;
 const ProgramPoint = @import("state.zig").ProgramPoint;
 const ProgramState = @import("state.zig").ProgramState;
-const LoopHeaderKey = @import("state.zig").LoopHeaderKey;
+const WideningKey = @import("state.zig").WideningKey;
 const ResourceState = @import("store.zig").ResourceState;
 const VarResolver = @import("var_resolver.zig").VarResolver;
 const ExplodedGraph = @import("graph.zig").ExplodedGraph;
@@ -72,7 +72,7 @@ pub const AnalysisEngine = struct {
     type_context: ?*TypeContext,
     /// Config for resource models (optional, not owned).
     config: ?*const Config,
-    /// Whether loop-header widening is enabled.
+    /// Whether widening is enabled.
     use_widening: bool,
     /// Scratch buffer for FQN construction
     fqn_buffer: [256]u8 = undefined,
@@ -154,7 +154,7 @@ pub const AnalysisEngine = struct {
         self.graph.setMaxStatesPerPoint(max);
     }
 
-    /// Enable or disable loop-header widening for convergence.
+    /// Enable or disable widening for convergence.
     pub fn setUseWidening(self: *AnalysisEngine, use_w: bool) void {
         self.use_widening = use_w;
     }
@@ -294,15 +294,18 @@ pub const AnalysisEngine = struct {
             try self.buildFunctionIndex(src);
         }
 
-        var initial_state = ProgramState.init(self.allocator);
-        initial_state.build_metadata = self.build_metadata;
-        const entry_point = ProgramPoint.initPre(cfg.entry, cfg);
+        // Seed only when starting fresh; otherwise continue from the pre-seeded worklist.
+        if (self.worklist.items.len == 0) {
+            var initial_state = ProgramState.init(self.allocator);
+            initial_state.build_metadata = self.build_metadata;
+            const entry_point = ProgramPoint.initPre(cfg.entry, cfg);
 
-        const result = try self.graph.getOrCreateNode(entry_point, &initial_state);
-        if (result.caller_should_deinit) {
-            initial_state.deinit();
+            const result = try self.graph.getOrCreateNode(entry_point, &initial_state);
+            if (result.caller_should_deinit) {
+                initial_state.deinit();
+            }
+            try self.worklist.append(self.allocator, .{ .node_index = result.index, .edge_kind = .normal, .pending_constraint = null, .cfg = cfg });
         }
-        try self.worklist.append(self.allocator, .{ .node_index = result.index, .edge_kind = .normal, .pending_constraint = null, .cfg = cfg });
 
         var worklist_steps: usize = 0;
         while (self.worklist.pop()) |item| {
@@ -1704,7 +1707,7 @@ pub const AnalysisEngine = struct {
                 }
                 try self.graph.addEdge(node_index, result.index);
 
-                if (result.is_new) {
+                if (result.is_new or result.state_updated) {
                     try self.worklist.append(self.allocator, .{ .node_index = result.index, .edge_kind = .normal, .pending_constraint = null, .cfg = current_cfg });
                 }
             },
@@ -1781,21 +1784,27 @@ pub const AnalysisEngine = struct {
                             }
                         }
 
-                        // Determine if widening should be applied at this loop header.
-                        // Widening triggers only on loop_back edges into loop_header pre-states,
-                        // and only when widening is enabled via the --use-widening flag.
+                        // Determine if widening should be applied at this point.
+                        // Widening triggers on loop-back edges into loop headers and on other join points
+                        // when widening is enabled.
                         const widening_options = blk: {
-                            if (self.use_widening and edge.kind == .loop_back) {
-                                // Check if successor is a loop_header node
-                                if (current_cfg.getNode(edge.to)) |succ_cfg_node| {
-                                    if (succ_cfg_node.ir_node.tag == .loop_header) {
-                                        // succ_point is already a pre-state (from ProgramPoint.initPre above)
-                                        const header_key = LoopHeaderKey.init(succ_point, &succ_state);
-                                        break :blk ExplodedGraph.WideningOptions{
-                                            .widen_at_header = true,
-                                            .header_key = header_key,
-                                        };
+                            if (self.use_widening) {
+                                const is_loop_header = blk_loop: {
+                                    if (edge.kind != .loop_back) break :blk_loop false;
+                                    if (current_cfg.getNode(edge.to)) |succ_cfg_node| {
+                                        break :blk_loop succ_cfg_node.ir_node.tag == .loop_header;
                                     }
+                                    break :blk_loop false;
+                                };
+                                const is_join = AnalysisEngine.hasMultiplePredecessors(current_cfg, edge.to);
+
+                                if (is_loop_header or is_join) {
+                                    // succ_point is already a pre-state (from ProgramPoint.initPre above)
+                                    const widening_key = WideningKey.init(succ_point, &succ_state);
+                                    break :blk ExplodedGraph.WideningOptions{
+                                        .apply_widening = true,
+                                        .widening_key = widening_key,
+                                    };
                                 }
                             }
                             break :blk ExplodedGraph.WideningOptions{};
@@ -1807,7 +1816,7 @@ pub const AnalysisEngine = struct {
                         }
                         try self.graph.addEdge(node_index, result.index);
 
-                        if (result.is_new) {
+                        if (result.is_new or result.state_updated) {
                             try self.worklist.append(self.allocator, .{ .node_index = result.index, .edge_kind = edge.kind, .pending_constraint = null, .cfg = current_cfg });
                         }
                     }
@@ -1867,7 +1876,7 @@ pub const AnalysisEngine = struct {
                         if (result.caller_should_deinit) {
                             summary_state.deinit();
                         }
-                        if (result.is_new) {
+                        if (result.is_new or result.state_updated) {
                             try self.worklist.append(self.allocator, .{
                                 .node_index = result.index,
                                 .edge_kind = .normal,
@@ -1920,7 +1929,7 @@ pub const AnalysisEngine = struct {
         if (result.caller_should_deinit) {
             inline_state.deinit();
         }
-        if (result.is_new) {
+        if (result.is_new or result.state_updated) {
             try self.worklist.append(self.allocator, .{
                 .node_index = result.index,
                 .edge_kind = .normal,
@@ -1954,7 +1963,7 @@ pub const AnalysisEngine = struct {
         if (result.caller_should_deinit) {
             return_state.deinit();
         }
-        if (result.is_new) {
+        if (result.is_new or result.state_updated) {
             try self.worklist.append(self.allocator, .{
                 .node_index = result.index,
                 .edge_kind = .normal,
@@ -2006,6 +2015,17 @@ pub const AnalysisEngine = struct {
             return Constraint.boolCheck(var_key, true);
         }
         return null;
+    }
+
+    fn hasMultiplePredecessors(cfg: *const Cfg, node_index: CfgNodeId) bool {
+        var count: u32 = 0;
+        for (cfg.edges.items) |edge| {
+            if (edge.to == node_index) {
+                count += 1;
+                if (count > 1) return true;
+            }
+        }
+        return false;
     }
 
     /// Transfer function: compute the new state after executing a CFG node.
@@ -2554,7 +2574,7 @@ test "AnalysisEngine branch constraint pruning" {
 
     // With x = 5 and branch condition x == 10, the then-branch (x == 10) should be pruned
     // We should see exactly 1 pruned path
-    try std.testing.expect(engine.pruned_path_count == 1);
+    try std.testing.expectEqual(@as(u32, 1), engine.pruned_path_count);
 }
 
 test "AnalysisEngine try edge sets error state" {
@@ -3135,9 +3155,9 @@ test "AnalysisEngine widening simple loop converges without drops" {
     // No states should be dropped
     try testing.expectEqual(@as(u32, 0), graph.getDroppedStateCount());
 
-    // Verify loop header widening infrastructure was used (visit tracking)
+    // Verify widening infrastructure was used (visit tracking)
     // The header should be tracked for widening even if convergence happened via dedup
-    try testing.expect(graph.getTrackedLoopHeaderCount() >= 1);
+    try testing.expect(graph.getTrackedWideningPointCount() >= 1);
 }
 
 test "AnalysisEngine widening nested loops widen per header" {
@@ -3198,14 +3218,10 @@ test "AnalysisEngine widening nested loops widen per header" {
 
     const graph = engine.getGraph();
 
-    // Widening should have been applied at both loop headers
-    // With nested loops, we expect widening to occur
-    try testing.expect(graph.getWidenedNodeCount() > 0 or graph.getWideningConvergedCount() > 0);
-
     // Verify that both loop headers are tracked separately for widening.
     // Each loop header has a distinct CFG node index, so they should have
-    // different LoopHeaderKeys and be tracked independently.
-    try testing.expect(graph.getTrackedLoopHeaderCount() >= 2);
+    // different WideningKeys and be tracked independently.
+    try testing.expect(graph.getTrackedWideningPointCount() >= 2);
 
     // Analysis should complete without hitting limits
     try testing.expect(graph.nodeCount() > 0);

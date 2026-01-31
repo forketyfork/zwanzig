@@ -597,7 +597,7 @@ pub const Store = struct {
     }
 
     /// Widening operator for stores.
-    /// Used at loop headers to ensure convergence.
+    /// Used at widening points to ensure convergence.
     /// - Resources: keep only if both agree, else set to `unknown`.
     /// - Aliases/owners/deferred/errdeferred: keep only if both agree, else drop.
     /// - Violations: union with dedup (never lose observed violations).
@@ -712,6 +712,63 @@ pub const Store = struct {
         }
 
         return result;
+    }
+
+    /// Returns true if `self` is at least as general as `other`.
+    /// Missing entries in `self` are treated as unknown/no-info.
+    pub fn subsumes(self: *const Store, other: *const Store) bool {
+        var res_iter = self.resources.iterator();
+        while (res_iter.next()) |entry| {
+            const region = entry.key_ptr.*;
+            const self_state = entry.value_ptr.*;
+            const other_state = other.resources.get(region) orelse .unknown;
+            if (self_state != .unknown and self_state != other_state) return false;
+        }
+
+        var alias_iter = self.aliases.iterator();
+        while (alias_iter.next()) |entry| {
+            const alias = entry.key_ptr.*;
+            const self_target = entry.value_ptr.*;
+            const other_target = other.aliases.get(alias) orelse return false;
+            if (self_target != other_target) return false;
+        }
+
+        var deferred_iter = self.deferred.iterator();
+        while (deferred_iter.next()) |entry| {
+            const region = entry.key_ptr.*;
+            const self_action = entry.value_ptr.*;
+            const other_action = other.deferred.get(region) orelse return false;
+            if (self_action != other_action) return false;
+        }
+
+        var errdeferred_iter = self.errdeferred.iterator();
+        while (errdeferred_iter.next()) |entry| {
+            const region = entry.key_ptr.*;
+            const self_action = entry.value_ptr.*;
+            const other_action = other.errdeferred.get(region) orelse return false;
+            if (self_action != other_action) return false;
+        }
+
+        var owners_iter = self.owners.iterator();
+        while (owners_iter.next()) |entry| {
+            const resource = entry.key_ptr.*;
+            const self_owner = entry.value_ptr.*;
+            const other_owner = other.owners.get(resource) orelse return false;
+            if (self_owner != other_owner) return false;
+        }
+
+        for (other.violations.items) |violation| {
+            var found = false;
+            for (self.violations.items) |existing| {
+                if (existing.eql(violation)) {
+                    found = true;
+                    break;
+                }
+            }
+            if (!found) return false;
+        }
+
+        return true;
     }
 };
 
@@ -983,4 +1040,31 @@ test "Store widen empty stores" {
     try testing.expectEqual(@as(usize, 0), widened.resources.count());
     try testing.expectEqual(@as(usize, 0), widened.aliases.count());
     try testing.expectEqual(@as(usize, 0), widened.violationCount());
+}
+
+test "Store subsumes preserves violations" {
+    const testing = std.testing;
+    const allocator = testing.allocator;
+
+    var general = Store.init(allocator);
+    defer general.deinit();
+
+    var specific = Store.init(allocator);
+    defer specific.deinit();
+
+    const region = ids.varId(99);
+    try specific.markAllocated(region);
+
+    try testing.expect(general.subsumes(&specific));
+
+    try specific.markFreed(region, 1);
+    try specific.markFreed(region, 2);
+
+    try testing.expect(!general.subsumes(&specific));
+
+    try general.markAllocated(region);
+    try general.markFreed(region, 1);
+    try general.markFreed(region, 2);
+
+    try testing.expect(general.subsumes(&specific));
 }

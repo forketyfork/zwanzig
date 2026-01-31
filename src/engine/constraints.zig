@@ -388,8 +388,25 @@ pub const ConstraintManager = struct {
         return combined_hash;
     }
 
+    /// Returns true if `self` is at least as general as `other`.
+    /// For constraints, fewer constraints means more general, so we require
+    /// that every constraint in `self` is present in `other`.
+    pub fn subsumes(self: *const ConstraintManager, other: *const ConstraintManager) bool {
+        for (self.constraints.items) |c1| {
+            var found = false;
+            for (other.constraints.items) |c2| {
+                if (c1.eql(c2)) {
+                    found = true;
+                    break;
+                }
+            }
+            if (!found) return false;
+        }
+        return true;
+    }
+
     /// Widening operator for constraint managers.
-    /// Used at loop headers to ensure convergence.
+    /// Used at widening points to ensure convergence.
     /// This implements a sound but simple policy: keep only constraints that appear in both.
     /// This is the intersection of constraints, which is sound (over-approximation).
     pub fn widen(self: *const ConstraintManager, other: *const ConstraintManager) !ConstraintManager {
@@ -937,4 +954,20 @@ test "isValueCompatibleWithBoolCheck" {
 
     // Ints are not compatible with bool checks
     try testing.expect(!isValueCompatibleWithBoolCheck(.{ .concrete_int = 1 }, true));
+}
+
+test "ConstraintManager subsumes ordering" {
+    const testing = std.testing;
+    const allocator = testing.allocator;
+
+    var general = ConstraintManager.init(allocator);
+    defer general.deinit();
+
+    var specific = ConstraintManager.init(allocator);
+    defer specific.deinit();
+
+    try specific.addConstraint(.{ .null_check = .{ .var_id = ids.varId(1), .is_null = false } });
+
+    try testing.expect(general.subsumes(&specific));
+    try testing.expect(!specific.subsumes(&general));
 }
