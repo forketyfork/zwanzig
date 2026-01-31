@@ -2,6 +2,8 @@ const std = @import("std");
 const analyzer_mod = @import("analyzer.zig");
 const Analyzer = analyzer_mod.Analyzer;
 const OutputFormat = analyzer_mod.Analyzer.OutputFormat;
+const diagnostic_mod = @import("diagnostic.zig");
+const Diagnostic = diagnostic_mod.Diagnostic;
 const DupeImportRule = @import("rules/dupe_import.zig").DupeImportRule;
 const TodoCommentRule = @import("rules/todo_comment.zig").TodoCommentRule;
 const FileAsStructRule = @import("rules/file_as_struct.zig").FileAsStructRule;
@@ -388,6 +390,9 @@ fn analyzeFilesParallel(analyzer: *Analyzer, files: []const []const u8, thread_c
             try analyzer.mergeResult(result);
         }
     }
+
+    // Sort diagnostics for deterministic output ordering
+    std.mem.sort(Diagnostic, analyzer.diagnostics.items, {}, Diagnostic.lessThan);
 
     if (first_error) |err| {
         return err;

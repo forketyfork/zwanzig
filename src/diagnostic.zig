@@ -175,6 +175,44 @@ pub const Diagnostic = struct {
     }
 
     /// Write SARIF result using std.json.Stringify for proper JSON encoding.
+    /// Comparator for deterministic diagnostic ordering.
+    /// Order: file_path, start line, start column, rule_id, message.
+    pub fn lessThan(_: void, a: Diagnostic, b: Diagnostic) bool {
+        // First compare by file path
+        const file_cmp = stringLessThan(a.file_path, b.file_path);
+        if (file_cmp != .eq) return file_cmp == .lt;
+
+        // Then by start line
+        if (a.range.start.line != b.range.start.line) {
+            return a.range.start.line < b.range.start.line;
+        }
+
+        // Then by start column
+        if (a.range.start.column != b.range.start.column) {
+            return a.range.start.column < b.range.start.column;
+        }
+
+        // Then by rule id
+        const rule_cmp = stringLessThan(a.rule_id, b.rule_id);
+        if (rule_cmp != .eq) return rule_cmp == .lt;
+
+        // Finally by message
+        return stringLessThan(a.message, b.message) == .lt;
+    }
+
+    const CompareResult = enum { lt, eq, gt };
+
+    fn stringLessThan(a: []const u8, b: []const u8) CompareResult {
+        const min_len = @min(a.len, b.len);
+        for (0..min_len) |i| {
+            if (a[i] < b[i]) return .lt;
+            if (a[i] > b[i]) return .gt;
+        }
+        if (a.len < b.len) return .lt;
+        if (a.len > b.len) return .gt;
+        return .eq;
+    }
+
     pub fn writeSarifJson(self: Diagnostic, jw: *std.json.Stringify) !void {
         try jw.beginObject();
 
@@ -534,4 +572,218 @@ test "Diagnostic writeSarif" {
     try testing.expect(std.mem.indexOf(u8, result, "\"startColumn\": 10") != null);
     try testing.expect(std.mem.indexOf(u8, result, "\"endLine\": 5") != null);
     try testing.expect(std.mem.indexOf(u8, result, "\"endColumn\": 15") != null);
+}
+
+test "Diagnostic lessThan by file path" {
+    const testing = std.testing;
+
+    var diag_a = try Diagnostic.init(
+        testing.allocator,
+        "a.zig",
+        "rule",
+        .err,
+        "message",
+        SourceRange.init(Location.init(1, 1), Location.init(1, 1)),
+    );
+    defer diag_a.deinit(testing.allocator);
+
+    var diag_b = try Diagnostic.init(
+        testing.allocator,
+        "b.zig",
+        "rule",
+        .err,
+        "message",
+        SourceRange.init(Location.init(1, 1), Location.init(1, 1)),
+    );
+    defer diag_b.deinit(testing.allocator);
+
+    try testing.expect(Diagnostic.lessThan({}, diag_a, diag_b));
+    try testing.expect(!Diagnostic.lessThan({}, diag_b, diag_a));
+}
+
+test "Diagnostic lessThan by line" {
+    const testing = std.testing;
+
+    var diag_a = try Diagnostic.init(
+        testing.allocator,
+        "test.zig",
+        "rule",
+        .err,
+        "message",
+        SourceRange.init(Location.init(1, 1), Location.init(1, 1)),
+    );
+    defer diag_a.deinit(testing.allocator);
+
+    var diag_b = try Diagnostic.init(
+        testing.allocator,
+        "test.zig",
+        "rule",
+        .err,
+        "message",
+        SourceRange.init(Location.init(2, 1), Location.init(2, 1)),
+    );
+    defer diag_b.deinit(testing.allocator);
+
+    try testing.expect(Diagnostic.lessThan({}, diag_a, diag_b));
+    try testing.expect(!Diagnostic.lessThan({}, diag_b, diag_a));
+}
+
+test "Diagnostic lessThan by column" {
+    const testing = std.testing;
+
+    var diag_a = try Diagnostic.init(
+        testing.allocator,
+        "test.zig",
+        "rule",
+        .err,
+        "message",
+        SourceRange.init(Location.init(1, 1), Location.init(1, 1)),
+    );
+    defer diag_a.deinit(testing.allocator);
+
+    var diag_b = try Diagnostic.init(
+        testing.allocator,
+        "test.zig",
+        "rule",
+        .err,
+        "message",
+        SourceRange.init(Location.init(1, 5), Location.init(1, 5)),
+    );
+    defer diag_b.deinit(testing.allocator);
+
+    try testing.expect(Diagnostic.lessThan({}, diag_a, diag_b));
+    try testing.expect(!Diagnostic.lessThan({}, diag_b, diag_a));
+}
+
+test "Diagnostic lessThan by rule id" {
+    const testing = std.testing;
+
+    var diag_a = try Diagnostic.init(
+        testing.allocator,
+        "test.zig",
+        "alpha-rule",
+        .err,
+        "message",
+        SourceRange.init(Location.init(1, 1), Location.init(1, 1)),
+    );
+    defer diag_a.deinit(testing.allocator);
+
+    var diag_b = try Diagnostic.init(
+        testing.allocator,
+        "test.zig",
+        "beta-rule",
+        .err,
+        "message",
+        SourceRange.init(Location.init(1, 1), Location.init(1, 1)),
+    );
+    defer diag_b.deinit(testing.allocator);
+
+    try testing.expect(Diagnostic.lessThan({}, diag_a, diag_b));
+    try testing.expect(!Diagnostic.lessThan({}, diag_b, diag_a));
+}
+
+test "Diagnostic lessThan by message" {
+    const testing = std.testing;
+
+    var diag_a = try Diagnostic.init(
+        testing.allocator,
+        "test.zig",
+        "rule",
+        .err,
+        "alpha message",
+        SourceRange.init(Location.init(1, 1), Location.init(1, 1)),
+    );
+    defer diag_a.deinit(testing.allocator);
+
+    var diag_b = try Diagnostic.init(
+        testing.allocator,
+        "test.zig",
+        "rule",
+        .err,
+        "beta message",
+        SourceRange.init(Location.init(1, 1), Location.init(1, 1)),
+    );
+    defer diag_b.deinit(testing.allocator);
+
+    try testing.expect(Diagnostic.lessThan({}, diag_a, diag_b));
+    try testing.expect(!Diagnostic.lessThan({}, diag_b, diag_a));
+}
+
+test "Diagnostic lessThan equal diagnostics" {
+    const testing = std.testing;
+
+    var diag_a = try Diagnostic.init(
+        testing.allocator,
+        "test.zig",
+        "rule",
+        .err,
+        "message",
+        SourceRange.init(Location.init(1, 1), Location.init(1, 1)),
+    );
+    defer diag_a.deinit(testing.allocator);
+
+    var diag_b = try Diagnostic.init(
+        testing.allocator,
+        "test.zig",
+        "rule",
+        .err,
+        "message",
+        SourceRange.init(Location.init(1, 1), Location.init(1, 1)),
+    );
+    defer diag_b.deinit(testing.allocator);
+
+    try testing.expect(!Diagnostic.lessThan({}, diag_a, diag_b));
+    try testing.expect(!Diagnostic.lessThan({}, diag_b, diag_a));
+}
+
+test "Diagnostic sorting produces deterministic order" {
+    const testing = std.testing;
+
+    var diagnostics = [_]Diagnostic{
+        try Diagnostic.init(
+            testing.allocator,
+            "z.zig",
+            "rule",
+            .err,
+            "message",
+            SourceRange.init(Location.init(1, 1), Location.init(1, 1)),
+        ),
+        try Diagnostic.init(
+            testing.allocator,
+            "a.zig",
+            "rule",
+            .err,
+            "message",
+            SourceRange.init(Location.init(1, 1), Location.init(1, 1)),
+        ),
+        try Diagnostic.init(
+            testing.allocator,
+            "a.zig",
+            "rule",
+            .err,
+            "message",
+            SourceRange.init(Location.init(5, 1), Location.init(5, 1)),
+        ),
+        try Diagnostic.init(
+            testing.allocator,
+            "a.zig",
+            "rule",
+            .err,
+            "message",
+            SourceRange.init(Location.init(5, 10), Location.init(5, 10)),
+        ),
+    };
+    defer for (&diagnostics) |*d| d.deinit(testing.allocator);
+
+    std.mem.sort(Diagnostic, &diagnostics, {}, Diagnostic.lessThan);
+
+    try testing.expectEqualStrings("a.zig", diagnostics[0].file_path);
+    try testing.expectEqual(@as(usize, 1), diagnostics[0].range.start.line);
+    try testing.expectEqualStrings("a.zig", diagnostics[1].file_path);
+    try testing.expectEqual(@as(usize, 5), diagnostics[1].range.start.line);
+    try testing.expectEqual(@as(usize, 1), diagnostics[1].range.start.column);
+    try testing.expectEqualStrings("a.zig", diagnostics[2].file_path);
+    try testing.expectEqual(@as(usize, 5), diagnostics[2].range.start.line);
+    try testing.expectEqual(@as(usize, 10), diagnostics[2].range.start.column);
+    try testing.expectEqualStrings("z.zig", diagnostics[3].file_path);
 }
