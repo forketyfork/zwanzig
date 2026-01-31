@@ -42,7 +42,9 @@ The `Cfg` struct provides `dumpDot(allocator)` for quick stderr output during de
 
 ## Lattice Flow Visualization
 
-Engine-based checkers build exploded graphs showing all reachable (CFG node, state) pairs during abstract interpretation. Three visualization options are available:
+Engine-based checkers build exploded graphs showing all reachable (CFG node, state) pairs during abstract interpretation. Three visualization options are available.
+
+> **Note:** These visualizations only show data from engine-based checkers (`store-violations-engine`, `empty-catch-engine`, `swallowed-error`). Violations from AST-based rules (like `unused-decl`) won't appear in path traces.
 
 ### Exploded Graph
 
@@ -71,6 +73,24 @@ zig build run -- --dump-exploded-graph ./eg_output src/myfile.zig
 - Debugging convergence issues
 - Visualizing path sensitivity
 
+#### Example
+
+Source file (`test/fixtures/store_violations_engine/arraylist_append_ok.zig`):
+```zig
+const std = @import("std");
+
+fn build(allocator: std.mem.Allocator) !std.ArrayList([]u8) {
+    var list: std.ArrayList([]u8) = .empty;
+    const item = try allocator.alloc(u8, 1);
+    try list.append(allocator, item);
+    return list;
+}
+```
+
+Generated exploded graph:
+
+![Exploded Graph Example](images/exploded_graph_example.png)
+
 ### Annotated CFG
 
 **Flag:** `--dump-annotated-cfg <dir>`
@@ -94,6 +114,24 @@ zig build run -- --dump-annotated-cfg ./acfg_output src/myfile.zig
 - Identifying hot spots with many states
 - Quick overview without full state explosion detail
 - Locating violation points in the CFG
+
+#### Example
+
+Source file (`test/fixtures/store_violations_engine/arraylist_append_ok.zig`):
+```zig
+const std = @import("std");
+
+fn build(allocator: std.mem.Allocator) !std.ArrayList([]u8) {
+    var list: std.ArrayList([]u8) = .empty;
+    const item = try allocator.alloc(u8, 1);
+    try list.append(allocator, item);
+    return list;
+}
+```
+
+Generated annotated CFG:
+
+![Annotated CFG Example](images/annotated_cfg_example.png)
 
 ### Path Traces
 
@@ -125,6 +163,23 @@ zig build run -- --dump-path-trace ./traces src/myfile.zig
 - Understanding root cause of violations
 - Debugging false positives
 - Tracing error propagation paths
+
+#### Example
+
+Source file (`test/fixtures/store_violations_engine/use_after_free.zig`):
+```zig
+const std = @import("std");
+
+fn foo(allocator: std.mem.Allocator) !void {
+    var ptr = try allocator.alloc(u8, 1);
+    allocator.free(ptr);
+    _ = ptr;  // use after free!
+}
+```
+
+Generated path trace showing the path to the `use_after_free` violation:
+
+![Path Traces Example](images/path_traces_example.png)
 
 ## Output File Naming
 
