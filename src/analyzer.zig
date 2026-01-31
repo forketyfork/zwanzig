@@ -15,6 +15,8 @@ const Cache = cache_mod.Cache;
 const CacheKey = cache_mod.CacheKey;
 const cached_artifacts_mod = @import("cached_artifacts.zig");
 const CachedArtifacts = cached_artifacts_mod.CachedArtifacts;
+const ConsoleFormatter = @import("formatters/console.zig").ConsoleFormatter;
+const SarifFormatter = @import("formatters/sarif.zig").SarifFormatter;
 const log = std.log.scoped(.analyzer);
 const diagnostic_mod = @import("diagnostic.zig");
 const suppression = @import("suppression.zig");
@@ -214,6 +216,8 @@ pub const Analyzer = struct {
         defer file.close();
 
         const max_size = 10 * 1024 * 1024;
+        // Sentinel needed for Source.init; free accounts for sentinel byte below
+        // zwanzig-disable-next-line: sentinel-alloc
         const content = try file.readToEndAllocOptions(
             self.allocator,
             max_size,
@@ -221,7 +225,7 @@ pub const Analyzer = struct {
             std.mem.Alignment.of(u8),
             0,
         );
-        defer self.allocator.free(content);
+        defer self.allocator.free(content.ptr[0 .. content.len + 1]);
 
         var source = Source.init(self.allocator, file_path, content);
         defer source.deinit();
@@ -385,20 +389,19 @@ pub const Analyzer = struct {
 
         switch (format) {
             .json => try self.printJsonResults(stdout),
-            .text => try self.printTextResults(stdout),
-            .sarif => try self.printSarifResults(stdout),
-        }
-    }
-
-    fn printTextResults(self: *Analyzer, writer: anytype) !void {
-        if (self.diagnostics.items.len == 0) {
-            try writer.writeAll("No issues found.\n");
-            return;
-        }
-
-        try writer.print("Found {d} issue(s):\n", .{self.diagnostics.items.len});
-        for (self.diagnostics.items) |diag| {
-            try diag.format(writer);
+            .text => {
+                var formatter = ConsoleFormatter.init(self.allocator);
+                try formatter.write(stdout, self.diagnostics.items);
+            },
+            .sarif => {
+                var formatter = SarifFormatter.init(
+                    self.allocator,
+                    &self.checker_manager,
+                    self.tool_version,
+                    self.diagnostics.items,
+                );
+                try formatter.write(stdout);
+            },
         }
     }
 
@@ -417,94 +420,6 @@ pub const Analyzer = struct {
 
         try writer.writeAll("  ],\n");
         try writer.print("  \"total\": {d}\n", .{self.diagnostics.items.len});
-        try writer.writeAll("}\n");
-    }
-
-    fn writeJsonString(writer: anytype, s: []const u8) !void {
-        try writer.writeByte('"');
-        for (s) |c| {
-            switch (c) {
-                '"' => try writer.writeAll("\\\""),
-                '\\' => try writer.writeAll("\\\\"),
-                '\n' => try writer.writeAll("\\n"),
-                '\r' => try writer.writeAll("\\r"),
-                '\t' => try writer.writeAll("\\t"),
-                0x00...0x08, 0x0B, 0x0C, 0x0E...0x1F => try writer.print("\\u{x:0>4}", .{c}),
-                else => try writer.writeByte(c),
-            }
-        }
-        try writer.writeByte('"');
-    }
-
-    fn printSarifResults(self: *Analyzer, writer: anytype) !void {
-        try writer.writeAll("{\n");
-        try writer.writeAll("  \"version\": \"2.1.0\",\n");
-        try writer.writeAll("  \"$schema\": \"https://raw.githubusercontent.com/oasis-tcs/sarif-spec/master/Schemata/sarif-schema-2.1.0.json\",\n");
-        try writer.writeAll("  \"runs\": [\n");
-        try writer.writeAll("    {\n");
-        try writer.writeAll("      \"tool\": {\n");
-        try writer.writeAll("        \"driver\": {\n");
-        try writer.writeAll("          \"name\": \"Zwanzig\",\n");
-        try writer.writeAll("          \"informationUri\": \"https://github.com/forketyfork/zwanzig\",\n");
-        try writer.writeAll("          \"version\": ");
-        try writeJsonString(writer, self.tool_version);
-        try writer.writeAll(",\n");
-        try writer.writeAll("          \"rules\": [\n");
-
-        var first = true;
-        for (self.checker_manager.checkers.items) |checker| {
-            if (!first) try writer.writeAll(",\n");
-            first = false;
-            try writer.writeAll("            {\n");
-            try writer.writeAll("              \"id\": ");
-            try writeJsonString(writer, checker.name);
-            try writer.writeAll(",\n");
-            try writer.writeAll("              \"shortDescription\": {\n");
-            try writer.writeAll("                \"text\": ");
-            try writeJsonString(writer, checker.name);
-            try writer.writeAll("\n");
-            try writer.writeAll("              },\n");
-            try writer.writeAll("              \"defaultConfiguration\": {\n");
-            try writer.writeAll("                \"level\": ");
-            try writeJsonString(writer, checker.default_severity.toSarifLevel());
-            try writer.writeAll("\n");
-            try writer.writeAll("              }\n");
-            try writer.writeAll("            }");
-        }
-
-        for (self.checker_manager.adapted_rules.items) |rule| {
-            if (!first) try writer.writeAll(",\n");
-            first = false;
-            try writer.writeAll("            {\n");
-            try writer.writeAll("              \"id\": ");
-            try writeJsonString(writer, rule.name);
-            try writer.writeAll(",\n");
-            try writer.writeAll("              \"shortDescription\": {\n");
-            try writer.writeAll("                \"text\": ");
-            try writeJsonString(writer, rule.name);
-            try writer.writeAll("\n");
-            try writer.writeAll("              }\n");
-            try writer.writeAll("            }");
-        }
-
-        try writer.writeAll("\n");
-        try writer.writeAll("          ]\n");
-        try writer.writeAll("        }\n");
-        try writer.writeAll("      },\n");
-        try writer.writeAll("      \"results\": [\n");
-
-        for (self.diagnostics.items, 0..) |diag, i| {
-            try diag.writeSarif(writer);
-            if (i < self.diagnostics.items.len - 1) {
-                try writer.writeAll(",\n");
-            } else {
-                try writer.writeAll("\n");
-            }
-        }
-
-        try writer.writeAll("      ]\n");
-        try writer.writeAll("    }\n");
-        try writer.writeAll("  ]\n");
         try writer.writeAll("}\n");
     }
 
@@ -585,7 +500,8 @@ test "Analyzer text output format" {
 
     var buffer: [512]u8 = undefined;
     var stream = std.io.fixedBufferStream(&buffer);
-    try analyzer.printTextResults(stream.writer());
+    var formatter = ConsoleFormatter.init(allocator);
+    try formatter.write(stream.writer(), analyzer.diagnostics.items);
 
     const output = stream.getWritten();
     try testing.expect(std.mem.indexOf(u8, output, "Found 1 issue(s):") != null);
@@ -623,23 +539,24 @@ test "Analyzer SARIF output format" {
     try analyzer.diagnostics.append(allocator, diag1);
     try analyzer.diagnostics.append(allocator, diag2);
 
-    var buffer: [2048]u8 = undefined;
-    var stream = std.io.fixedBufferStream(&buffer);
-    try analyzer.printSarifResults(stream.writer());
+    var output: std.ArrayList(u8) = .empty;
+    defer output.deinit(allocator);
+    var formatter = SarifFormatter.init(allocator, &analyzer.checker_manager, analyzer.tool_version, analyzer.diagnostics.items);
+    try formatter.write(output.writer(allocator));
 
-    const output = stream.getWritten();
-    try testing.expect(std.mem.indexOf(u8, output, "\"version\": \"2.1.0\"") != null);
-    try testing.expect(std.mem.indexOf(u8, output, "\"$schema\":") != null);
-    try testing.expect(std.mem.indexOf(u8, output, "\"runs\":") != null);
-    try testing.expect(std.mem.indexOf(u8, output, "\"tool\":") != null);
-    try testing.expect(std.mem.indexOf(u8, output, "\"driver\":") != null);
-    try testing.expect(std.mem.indexOf(u8, output, "\"name\": \"Zwanzig\"") != null);
-    try testing.expect(std.mem.indexOf(u8, output, "\"rules\":") != null);
-    try testing.expect(std.mem.indexOf(u8, output, "\"results\":") != null);
-    try testing.expect(std.mem.indexOf(u8, output, "test1.zig") != null);
-    try testing.expect(std.mem.indexOf(u8, output, "test2.zig") != null);
-    try testing.expect(std.mem.indexOf(u8, output, "test-rule") != null);
-    try testing.expect(std.mem.indexOf(u8, output, "other-rule") != null);
+    const result = output.items;
+    try testing.expect(std.mem.indexOf(u8, result, "\"version\": \"2.1.0\"") != null);
+    try testing.expect(std.mem.indexOf(u8, result, "\"$schema\":") != null);
+    try testing.expect(std.mem.indexOf(u8, result, "\"runs\":") != null);
+    try testing.expect(std.mem.indexOf(u8, result, "\"tool\":") != null);
+    try testing.expect(std.mem.indexOf(u8, result, "\"driver\":") != null);
+    try testing.expect(std.mem.indexOf(u8, result, "\"name\": \"Zwanzig\"") != null);
+    try testing.expect(std.mem.indexOf(u8, result, "\"rules\":") != null);
+    try testing.expect(std.mem.indexOf(u8, result, "\"results\":") != null);
+    try testing.expect(std.mem.indexOf(u8, result, "test1.zig") != null);
+    try testing.expect(std.mem.indexOf(u8, result, "test2.zig") != null);
+    try testing.expect(std.mem.indexOf(u8, result, "test-rule") != null);
+    try testing.expect(std.mem.indexOf(u8, result, "other-rule") != null);
 }
 
 test "Analyzer cache enabled" {

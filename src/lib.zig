@@ -20,6 +20,7 @@ pub const rules = struct {
     pub const unused_decl = @import("rules/unused_decl.zig");
     pub const shadowed_variable = @import("rules/shadowed_variable.zig");
     pub const identifier_style = @import("rules/identifier_style.zig");
+    pub const sentinel_alloc = @import("rules/sentinel_alloc.zig");
 };
 
 pub const checkers = struct {

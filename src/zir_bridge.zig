@@ -29,6 +29,19 @@ pub const TypeInfo = struct {
     is_comptime: bool = false,
     /// Original type string (if available, for debugging)
     type_str: ?[]const u8 = null,
+    /// Sentinel information for sentinel-terminated types (e.g., [:0]u8)
+    sentinel: ?SentinelInfo = null,
+
+    /// Sentinel value information for sentinel-terminated types.
+    pub const SentinelInfo = struct {
+        /// The sentinel value (e.g., 0 for [:0]u8)
+        value: i64,
+    };
+
+    /// Returns true if this type has a sentinel terminator.
+    pub fn hasSentinel(self: TypeInfo) bool {
+        return self.sentinel != null;
+    }
 
     pub const TypeKind = enum {
         unknown,
@@ -362,23 +375,8 @@ pub const ZirBridge = struct {
             return TypeInfo.initUnknown();
         }
 
-        const token_tags = tree.tokens.items(.tag);
-        const token_starts = tree.tokens.items(.start);
-        const node_tag = tree.nodes.items(.tag)[type_idx];
-        const main_token = tree.nodes.items(.main_token)[type_idx];
-
-        if (node_tag == .identifier) {
-            if (main_token < token_tags.len and token_tags[main_token] == .identifier) {
-                const type_name = extractIdentifier(source, token_starts[main_token]);
-                const builtin = parseBuiltinType(type_name, zir);
-                if (builtin.kind == .unknown) {
-                    return .{ .kind = .unknown, .type_str = type_name };
-                }
-                return builtin;
-            }
-        }
-
-        return TypeInfo.initUnknown();
+        // Delegate to the more comprehensive extractTypeFromAstNode
+        return extractTypeFromAstNode(tree, zir, type_idx, source) orelse TypeInfo.initUnknown();
     }
 
     /// Infer type information from an initializer AST node when no explicit type annotation is provided.
@@ -1090,6 +1088,78 @@ pub const ZirBridge = struct {
         return extractTypeFromAstNode(tree, zir, ast_node, source_content);
     }
 
+    /// Extract sentinel value from a fullPtrType result.
+    fn extractSentinelValueFromPtrType(
+        tree: *const Ast,
+        data: []const Ast.Node.Data,
+        main_tokens: []const Ast.TokenIndex,
+        token_starts: []const u32,
+        pt: Ast.full.PtrType,
+        source: []const u8,
+    ) ?i64 {
+        if (pt.ast.sentinel != .none) {
+            const sentinel_node: u32 = @intFromEnum(pt.ast.sentinel);
+            return extractNumberFromNode(tree, data, main_tokens, token_starts, sentinel_node, source);
+        }
+        return null;
+    }
+
+    /// Extract sentinel value from a slice_sentinel node (expression context).
+    fn extractSentinelValueFromSlice(
+        tree: *const Ast,
+        data: []const Ast.Node.Data,
+        main_tokens: []const Ast.TokenIndex,
+        token_starts: []const u32,
+        type_node: u32,
+        source: []const u8,
+    ) ?i64 {
+        const slice = tree.fullSlice(@enumFromInt(type_node));
+        if (slice) |s| {
+            if (s.ast.sentinel != .none) {
+                const sentinel_node: u32 = @intFromEnum(s.ast.sentinel);
+                return extractNumberFromNode(tree, data, main_tokens, token_starts, sentinel_node, source);
+            }
+        }
+        return null;
+    }
+
+    /// Extract a numeric value from an AST node (for sentinel values).
+    fn extractNumberFromNode(
+        tree: *const Ast,
+        data: []const Ast.Node.Data,
+        main_tokens: []const Ast.TokenIndex,
+        token_starts: []const u32,
+        node: u32,
+        source: []const u8,
+    ) ?i64 {
+        _ = data;
+        const tags = tree.nodes.items(.tag);
+        if (node >= tags.len) return null;
+
+        switch (tags[node]) {
+            .number_literal => {
+                const token = main_tokens[node];
+                const start = token_starts[token];
+                var end = start;
+                while (end < source.len and (std.ascii.isDigit(source[end]) or source[end] == '_')) {
+                    end += 1;
+                }
+                const num_str = source[start..end];
+                return std.fmt.parseInt(i64, num_str, 10) catch null;
+            },
+            .char_literal => {
+                // Character literal like '0'
+                const token = main_tokens[node];
+                const start = token_starts[token];
+                if (start + 2 < source.len and source[start] == '\'') {
+                    return @intCast(source[start + 1]);
+                }
+                return null;
+            },
+            else => return null,
+        }
+    }
+
     /// Extract type information from an AST node representing a type expression.
     fn extractTypeFromAstNode(tree: *const Ast, zir: Zir, type_node: u32, source: []const u8) ?TypeInfo {
         const tags = tree.nodes.items(.tag);
@@ -1121,13 +1191,37 @@ pub const ZirBridge = struct {
                 // Optional type: ?T
                 return TypeInfo.initOptional();
             },
-            .ptr_type_aligned, .ptr_type_sentinel, .ptr_type_bit_range, .ptr_type => {
+            .ptr_type_aligned, .ptr_type_bit_range, .ptr_type => {
                 // Pointer type: *T, [*]T, etc.
+                const ptr_type = tree.fullPtrType(@enumFromInt(type_node));
+                if (ptr_type) |pt| {
+                    return .{ .kind = if (pt.size == .slice) .slice else .pointer };
+                }
                 return TypeInfo.initPointer();
             },
-            .slice_open, .slice, .slice_sentinel => {
+            .ptr_type_sentinel => {
+                // Sentinel-terminated pointer or slice type: [*:0]T or [:0]T
+                const ptr_type = tree.fullPtrType(@enumFromInt(type_node));
+                if (ptr_type) |pt| {
+                    const sentinel_value = extractSentinelValueFromPtrType(tree, data, main_tokens, token_starts, pt, source);
+                    return .{
+                        .kind = if (pt.size == .slice) .slice else .pointer,
+                        .sentinel = if (sentinel_value) |v| .{ .value = v } else null,
+                    };
+                }
+                return TypeInfo.initPointer();
+            },
+            .slice_open, .slice => {
                 // Slice type: []T
                 return .{ .kind = .slice };
+            },
+            .slice_sentinel => {
+                // Sentinel-terminated slice type: [:0]T (expression context)
+                const sentinel_value = extractSentinelValueFromSlice(tree, data, main_tokens, token_starts, type_node, source);
+                return .{
+                    .kind = .slice,
+                    .sentinel = if (sentinel_value) |v| .{ .value = v } else null,
+                };
             },
             .field_access => {
                 // Qualified type like std.fs.File
@@ -1392,5 +1486,48 @@ test "findZirInstForNode with function declaration" {
     if (fn_decl) |f| {
         try std.testing.expect(f.is_fn);
         try std.testing.expect(f.ast_node != null);
+    }
+}
+
+test "TypeInfo hasSentinel returns true for sentinel-terminated slice" {
+    const allocator = std.testing.allocator;
+
+    const code: [:0]const u8 = "const x: [:0]u8 = undefined;";
+    var source = Source.init(allocator, "test.zig", code);
+    defer source.deinit();
+
+    var bridge = ZirBridge.init(allocator);
+    defer bridge.deinit();
+
+    try bridge.loadFromSource(&source);
+
+    const decl = bridge.findDeclByName("x");
+    try std.testing.expect(decl != null);
+    if (decl) |d| {
+        try std.testing.expectEqual(TypeInfo.TypeKind.slice, d.type_info.kind);
+        try std.testing.expect(d.type_info.hasSentinel());
+        if (d.type_info.sentinel) |s| {
+            try std.testing.expectEqual(@as(i64, 0), s.value);
+        }
+    }
+}
+
+test "TypeInfo hasSentinel returns false for non-sentinel slice" {
+    const allocator = std.testing.allocator;
+
+    const code: [:0]const u8 = "const x: []u8 = undefined;";
+    var source = Source.init(allocator, "test.zig", code);
+    defer source.deinit();
+
+    var bridge = ZirBridge.init(allocator);
+    defer bridge.deinit();
+
+    try bridge.loadFromSource(&source);
+
+    const decl = bridge.findDeclByName("x");
+    try std.testing.expect(decl != null);
+    if (decl) |d| {
+        try std.testing.expectEqual(TypeInfo.TypeKind.slice, d.type_info.kind);
+        try std.testing.expect(!d.type_info.hasSentinel());
     }
 }

@@ -14,6 +14,7 @@ const FileAsStructRule = src.rules.file_as_struct.FileAsStructRule;
 const UnusedDeclRule = src.rules.unused_decl.UnusedDeclRule;
 const ShadowedVariableRule = src.rules.shadowed_variable.ShadowedVariableRule;
 const IdentifierStyleRule = src.rules.identifier_style.IdentifierStyleRule;
+const SentinelAllocRule = src.rules.sentinel_alloc.SentinelAllocRule;
 const UnreachableCodeChecker = src.checkers.unreachable_code_checker.UnreachableCodeChecker;
 const StoreViolationsEngineChecker = src.checkers.store_violations_engine.StoreViolationsEngineChecker;
 
@@ -51,6 +52,10 @@ test "shadowed_variable fixtures" {
 
 test "identifier_style fixtures" {
     try runFixturesInDir(std.testing.allocator, &IdentifierStyleRule.rule, "test/fixtures/identifier_style");
+}
+
+test "sentinel_alloc fixtures" {
+    try runFixturesInDir(std.testing.allocator, &SentinelAllocRule.rule, "test/fixtures/sentinel_alloc");
 }
 
 test "unreachable_code_engine fixtures" {

@@ -173,6 +173,54 @@ pub const Diagnostic = struct {
         try writer.writeAll("          ]\n");
         try writer.writeAll("        }");
     }
+
+    /// Write SARIF result using std.json.Stringify for proper JSON encoding.
+    pub fn writeSarifJson(self: Diagnostic, jw: *std.json.Stringify) !void {
+        try jw.beginObject();
+
+        try jw.objectField("ruleId");
+        try jw.write(self.rule_id);
+
+        try jw.objectField("level");
+        try jw.write(self.severity.toSarifLevel());
+
+        try jw.objectField("message");
+        try jw.beginObject();
+        try jw.objectField("text");
+        try jw.write(self.message);
+        try jw.endObject();
+
+        try jw.objectField("locations");
+        try jw.beginArray();
+        try jw.beginObject();
+
+        try jw.objectField("physicalLocation");
+        try jw.beginObject();
+
+        try jw.objectField("artifactLocation");
+        try jw.beginObject();
+        try jw.objectField("uri");
+        try jw.write(self.file_path);
+        try jw.endObject();
+
+        try jw.objectField("region");
+        try jw.beginObject();
+        try jw.objectField("startLine");
+        try jw.write(self.range.start.line);
+        try jw.objectField("startColumn");
+        try jw.write(self.range.start.column);
+        try jw.objectField("endLine");
+        try jw.write(self.range.end.line);
+        try jw.objectField("endColumn");
+        try jw.write(self.range.end.column);
+        try jw.endObject(); // region
+
+        try jw.endObject(); // physicalLocation
+        try jw.endObject(); // location item
+        try jw.endArray(); // locations
+
+        try jw.endObject(); // result
+    }
 };
 
 /// Maps byte offsets in source content to line/column locations.
