@@ -297,7 +297,7 @@ fn mergeConfig(allocator: std.mem.Allocator, cli_args: CliArgs) !MergedConfig {
 }
 
 pub fn main() !void {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    var gpa = std.heap.GeneralPurposeAllocator(.{ .thread_safe = true }){};
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 

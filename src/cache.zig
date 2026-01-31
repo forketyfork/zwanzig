@@ -137,6 +137,7 @@ pub const CacheEntry = struct {
 pub const Cache = struct {
     allocator: std.mem.Allocator,
     cache_dir: ?std.fs.Dir,
+    mutex: std.Thread.Mutex = .{},
 
     pub fn init(allocator: std.mem.Allocator) !Cache {
         const cache_dir = std.fs.cwd().makeOpenPath(cache_dir_name, .{ .iterate = true }) catch |err| {
@@ -185,6 +186,9 @@ pub const Cache = struct {
             return null;
         }
 
+        self.mutex.lock();
+        defer self.mutex.unlock();
+
         var path_buf: [256]u8 = undefined;
         const cache_path = try Cache.getCachePath(key, &path_buf);
 
@@ -225,6 +229,9 @@ pub const Cache = struct {
             return;
         }
 
+        self.mutex.lock();
+        defer self.mutex.unlock();
+
         var path_buf: [256]u8 = undefined;
         const cache_path = try Cache.getCachePath(key, &path_buf);
 
@@ -241,6 +248,9 @@ pub const Cache = struct {
             return;
         }
 
+        self.mutex.lock();
+        defer self.mutex.unlock();
+
         var path_buf: [256]u8 = undefined;
         const cache_path = try Cache.getCachePath(key, &path_buf);
 
@@ -255,6 +265,9 @@ pub const Cache = struct {
         if (self.cache_dir == null) {
             return;
         }
+
+        self.mutex.lock();
+        defer self.mutex.unlock();
 
         var files_to_delete: std.ArrayList([]const u8) = .empty;
         defer {
