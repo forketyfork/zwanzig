@@ -15,6 +15,7 @@ const UnusedDeclRule = src.rules.unused_decl.UnusedDeclRule;
 const ShadowedVariableRule = src.rules.shadowed_variable.ShadowedVariableRule;
 const IdentifierStyleRule = src.rules.identifier_style.IdentifierStyleRule;
 const SentinelAllocRule = src.rules.sentinel_alloc.SentinelAllocRule;
+const UnusedParameterRule = src.rules.unused_parameter.UnusedParameterRule;
 const UnreachableCodeChecker = src.checkers.unreachable_code_checker.UnreachableCodeChecker;
 const StoreViolationsEngineChecker = src.checkers.store_violations_engine.StoreViolationsEngineChecker;
 
@@ -56,6 +57,10 @@ test "identifier_style fixtures" {
 
 test "sentinel_alloc fixtures" {
     try runFixturesInDir(std.testing.allocator, &SentinelAllocRule.rule, "test/fixtures/sentinel_alloc");
+}
+
+test "unused_parameter fixtures" {
+    try runFixturesInDir(std.testing.allocator, &UnusedParameterRule.rule, "test/fixtures/unused_parameter");
 }
 
 test "unreachable_code_engine fixtures" {
