@@ -24,6 +24,11 @@ just lint     # Format check + shellcheck
 just ci       # Full CI: build + test + lint
 ```
 
+## Skills
+
+- use zig-best-practices skill for writing or reviewing Zig code
+- use zig-compiler-skill for any work related to the Zig compiler or its internals
+
 ## Requirements
 
 For any code changes, run both tests and linting:
