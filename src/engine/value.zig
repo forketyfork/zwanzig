@@ -13,6 +13,8 @@ pub const AbstractValue = union(enum) {
     int_range: IntRange,
     /// Value is a known concrete integer
     concrete_int: i64,
+    /// Value is a known concrete boolean
+    concrete_bool: bool,
 
     pub const IntRange = struct {
         min: i64,
@@ -59,6 +61,10 @@ pub const AbstractValue = union(enum) {
                 .concrete_int => |v2| v1 == v2,
                 else => false,
             },
+            .concrete_bool => |b1| switch (other) {
+                .concrete_bool => |b2| b1 == b2,
+                else => false,
+            },
         };
     }
 
@@ -70,6 +76,7 @@ pub const AbstractValue = union(enum) {
             .non_null => 2,
             .int_range => 3,
             .concrete_int => 4,
+            .concrete_bool => 5,
         };
         hasher.update(&[_]u8{tag_byte});
         switch (self) {
@@ -79,6 +86,9 @@ pub const AbstractValue = union(enum) {
             },
             .concrete_int => |v| {
                 hasher.update(std.mem.asBytes(&v));
+            },
+            .concrete_bool => |b| {
+                hasher.update(&[_]u8{if (b) 1 else 0});
             },
             else => {},
         }
@@ -98,7 +108,18 @@ pub const AbstractValue = union(enum) {
     }
 
     pub fn isConcrete(self: AbstractValue) bool {
-        return self == .concrete_int;
+        return self == .concrete_int or self == .concrete_bool;
+    }
+
+    pub fn isBool(self: AbstractValue) bool {
+        return self == .concrete_bool;
+    }
+
+    pub fn toBool(self: AbstractValue) ?bool {
+        return switch (self) {
+            .concrete_bool => |b| b,
+            else => null,
+        };
     }
 
     pub fn toConcreteInt(self: AbstractValue) ?i64 {
@@ -131,6 +152,10 @@ pub const AbstractValue = union(enum) {
             .int_range => |r1| switch (other) {
                 .int_range => |r2| .{ .int_range = r1.merge(r2) },
                 .concrete_int => |v| .{ .int_range = r1.merge(IntRange.single(v)) },
+                else => .unknown,
+            },
+            .concrete_bool => switch (other) {
+                .concrete_bool => .unknown, // Different bool values (same would have returned early)
                 else => .unknown,
             },
         };
@@ -182,9 +207,40 @@ pub const AbstractValue = union(enum) {
                 },
                 else => .unknown,
             },
+            .concrete_bool => |b1| switch (other) {
+                .concrete_bool => |b2| if (b1 == b2) self else .unknown,
+                else => .unknown,
+            },
         };
     }
 };
+
+/// Evaluate whether an AST node is a boolean literal (true or false).
+/// This is a standalone utility for use by checkers that don't use the full analysis engine.
+pub fn evaluateBoolLiteral(tree: *const std.zig.Ast, node: u32) ?bool {
+    const tags = tree.nodes.items(.tag);
+    const main_tokens = tree.nodes.items(.main_token);
+    const token_tags = tree.tokens.items(.tag);
+    const token_starts = tree.tokens.items(.start);
+
+    if (node >= tags.len) return null;
+    if (tags[node] != .identifier) return null;
+
+    const token = main_tokens[node];
+    if (token >= token_tags.len or token_tags[token] != .identifier) return null;
+
+    const start = token_starts[token];
+    var len: u32 = 0;
+    while (start + len < tree.source.len) {
+        const c = tree.source[start + len];
+        if (!std.ascii.isAlphanumeric(c) and c != '_') break;
+        len += 1;
+    }
+
+    if (len == 5 and std.mem.eql(u8, tree.source[start .. start + 5], "false")) return false;
+    if (len == 4 and std.mem.eql(u8, tree.source[start .. start + 4], "true")) return true;
+    return null;
+}
 
 test "AbstractValue basic operations" {
     const testing = std.testing;
@@ -206,8 +262,20 @@ test "AbstractValue basic operations" {
     try testing.expect(concrete.isConcrete());
     try testing.expectEqual(@as(?i64, 42), concrete.toConcreteInt());
 
+    const bool_true: AbstractValue = .{ .concrete_bool = true };
+    const bool_false: AbstractValue = .{ .concrete_bool = false };
+    try testing.expect(bool_true.isConcrete());
+    try testing.expect(bool_true.isBool());
+    try testing.expectEqual(@as(?bool, true), bool_true.toBool());
+    try testing.expectEqual(@as(?bool, false), bool_false.toBool());
+    try testing.expect(!concrete.isBool());
+    try testing.expectEqual(@as(?bool, null), concrete.toBool());
+
     try testing.expect(!unknown.eql(null_val));
     try testing.expect(unknown.eql(.unknown));
+    try testing.expect(bool_true.eql(.{ .concrete_bool = true }));
+    try testing.expect(!bool_true.eql(bool_false));
+    try testing.expect(!bool_true.eql(concrete));
 }
 
 test "AbstractValue IntRange operations" {
@@ -317,4 +385,48 @@ test "AbstractValue widen operations" {
 
     // Widening concrete_int with int_range widens to unknown
     try testing.expect(concrete1.widen(range1).isUnknown());
+}
+
+test "AbstractValue concrete_bool merge and widen" {
+    const testing = std.testing;
+
+    const bool_true: AbstractValue = .{ .concrete_bool = true };
+    const bool_false: AbstractValue = .{ .concrete_bool = false };
+    const unknown: AbstractValue = .unknown;
+    const concrete_int: AbstractValue = .{ .concrete_int = 1 };
+
+    // Merging identical booleans returns the same value
+    try testing.expect(bool_true.merge(bool_true).eql(bool_true));
+    try testing.expect(bool_false.merge(bool_false).eql(bool_false));
+
+    // Merging different booleans returns unknown
+    try testing.expect(bool_true.merge(bool_false).isUnknown());
+    try testing.expect(bool_false.merge(bool_true).isUnknown());
+
+    // Merging bool with unknown returns unknown
+    try testing.expect(bool_true.merge(unknown).isUnknown());
+    try testing.expect(unknown.merge(bool_true).isUnknown());
+
+    // Merging bool with int returns unknown (incompatible types)
+    try testing.expect(bool_true.merge(concrete_int).isUnknown());
+    try testing.expect(concrete_int.merge(bool_true).isUnknown());
+
+    // Widening identical booleans returns the same value
+    try testing.expect(bool_true.widen(bool_true).eql(bool_true));
+    try testing.expect(bool_false.widen(bool_false).eql(bool_false));
+
+    // Widening different booleans returns unknown
+    try testing.expect(bool_true.widen(bool_false).isUnknown());
+    try testing.expect(bool_false.widen(bool_true).isUnknown());
+
+    // Widening bool with unknown returns unknown
+    try testing.expect(bool_true.widen(unknown).isUnknown());
+    try testing.expect(unknown.widen(bool_true).isUnknown());
+
+    // Widening bool with int returns unknown
+    try testing.expect(bool_true.widen(concrete_int).isUnknown());
+    try testing.expect(concrete_int.widen(bool_true).isUnknown());
+
+    // Hash should be different for true vs false
+    try testing.expect(bool_true.hash() != bool_false.hash());
 }

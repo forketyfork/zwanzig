@@ -15,6 +15,7 @@ const EngineError = base.EngineError;
 const default_max_inline_depth = base.default_max_inline_depth;
 const default_max_worklist_steps = base.default_max_worklist_steps;
 const Constraint = @import("constraints.zig").Constraint;
+const AbstractValue = @import("value.zig").AbstractValue;
 const FunctionSummary = @import("summary.zig").FunctionSummary;
 const SummaryCache = @import("summary.zig").SummaryCache;
 const ProgramPoint = @import("state.zig").ProgramPoint;
@@ -865,6 +866,81 @@ pub const AnalysisEngine = struct {
             return @intFromEnum(init_node);
         }
         return null;
+    }
+
+    /// Evaluate a literal expression to an AbstractValue.
+    /// Returns null if the node is not a literal or cannot be evaluated.
+    /// Handles:
+    /// - Boolean literals (true/false identifiers)
+    /// - Integer literals (number_literal nodes)
+    fn evaluateLiteral(self: *AnalysisEngine, node: u32) ?AbstractValue {
+        const src = self.source orelse return null;
+        const tree = src.ast() catch return null;
+        const tags = tree.nodes.items(.tag);
+        const main_tokens = tree.nodes.items(.main_token);
+        const token_tags = tree.tokens.items(.tag);
+        const token_starts = tree.tokens.items(.start);
+
+        if (node >= tags.len) return null;
+
+        switch (tags[node]) {
+            .identifier => {
+                // Check for true/false boolean literals using shared utility
+                const value_mod = @import("value.zig");
+                if (value_mod.evaluateBoolLiteral(tree, node)) |b| {
+                    return .{ .concrete_bool = b };
+                }
+                return null;
+            },
+            .number_literal => {
+                // Parse integer literal
+                const token = main_tokens[node];
+                if (token >= token_tags.len) return null;
+                const start = token_starts[token];
+                var end = start;
+                while (end < tree.source.len) {
+                    const c = tree.source[end];
+                    if (!std.ascii.isDigit(c) and c != '_' and c != 'x' and c != 'X' and
+                        c != 'b' and c != 'B' and c != 'o' and c != 'O' and
+                        !(c >= 'a' and c <= 'f') and !(c >= 'A' and c <= 'F'))
+                    {
+                        break;
+                    }
+                    end += 1;
+                }
+                const num_str = tree.source[start..end];
+                // Remove underscores for parsing
+                var clean_buf: [64]u8 = undefined;
+                var clean_len: usize = 0;
+                for (num_str) |c| {
+                    if (c != '_' and clean_len < clean_buf.len) {
+                        clean_buf[clean_len] = c;
+                        clean_len += 1;
+                    }
+                }
+                const clean_str = clean_buf[0..clean_len];
+                // Detect base and parse
+                if (clean_len >= 2 and clean_buf[0] == '0') {
+                    if (clean_buf[1] == 'x' or clean_buf[1] == 'X') {
+                        // Hex
+                        const value = std.fmt.parseInt(i64, clean_str[2..], 16) catch return null;
+                        return .{ .concrete_int = value };
+                    } else if (clean_buf[1] == 'b' or clean_buf[1] == 'B') {
+                        // Binary
+                        const value = std.fmt.parseInt(i64, clean_str[2..], 2) catch return null;
+                        return .{ .concrete_int = value };
+                    } else if (clean_buf[1] == 'o' or clean_buf[1] == 'O') {
+                        // Octal
+                        const value = std.fmt.parseInt(i64, clean_str[2..], 8) catch return null;
+                        return .{ .concrete_int = value };
+                    }
+                }
+                // Decimal
+                const value = std.fmt.parseInt(i64, clean_str, 10) catch return null;
+                return .{ .concrete_int = value };
+            },
+            else => return null,
+        }
     }
 
     fn isDefinitelyNonAllocExpr(self: *AnalysisEngine, tree: *const std.zig.Ast, expr_node: u32) bool {
@@ -1904,19 +1980,30 @@ pub const AnalysisEngine = struct {
         // This is a placeholder that can be enhanced when the CFG builder provides
         // more detailed information about branch conditions.
         const ir_node = cfg_node.ir_node;
-        if (ir_node.operand_node) |var_id| {
+        if (ir_node.operand_node) |cond_node| {
+            // First check if the condition is a literal boolean
+            if (self.evaluateLiteral(cond_node)) |literal_val| {
+                if (literal_val.toBool()) |bool_val| {
+                    // Literal true/false - create a constraint on a synthetic var
+                    // that will be checked against the known literal value
+                    const var_key = ids.varId(cond_node);
+                    return Constraint.boolCheck(var_key, bool_val);
+                }
+            }
+
             const var_key = if (self.source != null)
-                (self.resolveVarIdFromExpr(var_id, current_cfg) orelse ids.varId(var_id))
+                (self.resolveVarIdFromExpr(cond_node, current_cfg) orelse ids.varId(cond_node))
             else
-                ids.varId(var_id);
+                ids.varId(cond_node);
             if (ir_node.operand2_node) |cmp_info| {
                 // Interpret operand2_node as encoded comparison info:
                 // High 32 bits of the value represent the comparison constant
                 // This is a simplified encoding for now
                 return Constraint.intCompare(var_key, .eq, @as(i64, cmp_info));
             }
-            // If we only have a variable and no comparison info, assume null check
-            return Constraint.nullCheck(var_key, true);
+            // If we only have a variable and no comparison info, assume it's a boolean check
+            // (for branches like `if (flag) ...` where flag is a boolean)
+            return Constraint.boolCheck(var_key, true);
         }
         return null;
     }
@@ -1935,7 +2022,12 @@ pub const AnalysisEngine = struct {
                 if (ir_node.ast_node) |ast_node| {
                     const var_id = self.resolveVarIdFromVarDecl(ast_node) orelse ids.varId(ast_node);
                     new_state.resetRegion(var_id);
-                    try new_state.setVar(var_id, .unknown);
+                    // Try to evaluate literal value from init expression, fall back to unknown
+                    const init_value = if (self.resolveVarDeclInitNode(ast_node)) |init_node|
+                        self.evaluateLiteral(init_node)
+                    else
+                        null;
+                    try new_state.setVar(var_id, init_value orelse .unknown);
                     if (self.resolveVarDeclInitNode(ast_node)) |init_node| {
                         if (self.resolveResourceCall(init_node)) |call_info| {
                             switch (call_info.kind) {
@@ -1968,10 +2060,14 @@ pub const AnalysisEngine = struct {
                     }
 
                     if (lhs_is_identifier) {
-                        // For now, set to unknown. Future enhancement: evaluate RHS literals
                         const var_id = self.resolveVarIdFromIdentifier(lhs_node, current_cfg) orelse ids.varId(lhs_node);
                         new_state.resetRegion(var_id);
-                        try new_state.setVar(var_id, .unknown);
+                        // Try to evaluate literal value from RHS, fall back to unknown
+                        const rhs_value = if (ir_node.operand2_node) |rhs|
+                            self.evaluateLiteral(rhs)
+                        else
+                            null;
+                        try new_state.setVar(var_id, rhs_value orelse .unknown);
                         if (ir_node.operand2_node) |rhs_node| {
                             if (self.resolveResourceCall(rhs_node)) |call_info| {
                                 switch (call_info.kind) {

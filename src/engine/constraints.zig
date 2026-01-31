@@ -38,6 +38,11 @@ pub const Constraint = union(enum) {
         op: CompareOp,
         var2_id: VarId,
     },
+    /// Variable expected to be a boolean value: var == true or var == false
+    bool_check: struct {
+        var_id: VarId,
+        expected: bool, // true = var must be true, false = var must be false
+    },
 
     pub fn eql(self: Constraint, other: Constraint) bool {
         return switch (self) {
@@ -53,6 +58,10 @@ pub const Constraint = union(enum) {
                 .var_compare => |vc2| vc1.var1_id == vc2.var1_id and vc1.op == vc2.op and vc1.var2_id == vc2.var2_id,
                 else => false,
             },
+            .bool_check => |bc1| switch (other) {
+                .bool_check => |bc2| bc1.var_id == bc2.var_id and bc1.expected == bc2.expected,
+                else => false,
+            },
         };
     }
 
@@ -62,6 +71,7 @@ pub const Constraint = union(enum) {
             .int_compare => 0,
             .null_check => 1,
             .var_compare => 2,
+            .bool_check => 3,
         };
         hasher.update(&[_]u8{tag_byte});
         switch (self) {
@@ -83,6 +93,11 @@ pub const Constraint = union(enum) {
                 hasher.update(std.mem.asBytes(&vc.op));
                 hasher.update(std.mem.asBytes(&var2_id));
             },
+            .bool_check => |bc| {
+                const var_id = ids.varIndex(bc.var_id);
+                hasher.update(std.mem.asBytes(&var_id));
+                hasher.update(&[_]u8{if (bc.expected) 1 else 0});
+            },
         }
         return hasher.final();
     }
@@ -102,6 +117,11 @@ pub const Constraint = union(enum) {
         return .{ .var_compare = .{ .var1_id = var1_id, .op = op, .var2_id = var2_id } };
     }
 
+    /// Create a boolean check constraint.
+    pub fn boolCheck(var_id: VarId, expected: bool) Constraint {
+        return .{ .bool_check = .{ .var_id = var_id, .expected = expected } };
+    }
+
     /// Get the negation of this constraint (for else branches).
     pub fn negate(self: Constraint) Constraint {
         return switch (self) {
@@ -118,6 +138,10 @@ pub const Constraint = union(enum) {
                 .var1_id = vc.var1_id,
                 .op = negateOp(vc.op),
                 .var2_id = vc.var2_id,
+            } },
+            .bool_check => |bc| .{ .bool_check = .{
+                .var_id = bc.var_id,
+                .expected = !bc.expected,
             } },
         };
     }
@@ -148,10 +172,12 @@ pub const ConstraintManager = struct {
     const VarConstraintLists = struct {
         int_constraints: std.ArrayList(Constraint) = .empty,
         null_constraints: std.ArrayList(Constraint) = .empty,
+        bool_constraints: std.ArrayList(Constraint) = .empty,
 
         fn deinit(self: *VarConstraintLists, allocator: std.mem.Allocator) void {
             self.int_constraints.deinit(allocator);
             self.null_constraints.deinit(allocator);
+            self.bool_constraints.deinit(allocator);
         }
     };
 
@@ -252,6 +278,23 @@ pub const ConstraintManager = struct {
                     self.has_contradiction = true;
                 }
             },
+            .bool_check => |bc| {
+                const entry = try self.per_var_constraints.getOrPut(bc.var_id);
+                if (!entry.found_existing) {
+                    entry.value_ptr.* = .{};
+                }
+                var contradiction = false;
+                for (entry.value_ptr.bool_constraints.items) |existing| {
+                    if (self.areContradictory(existing, constraint)) {
+                        contradiction = true;
+                        break;
+                    }
+                }
+                try entry.value_ptr.bool_constraints.append(self.allocator, constraint);
+                if (contradiction) {
+                    self.has_contradiction = true;
+                }
+            },
             .var_compare => {},
         }
     }
@@ -268,6 +311,12 @@ pub const ConstraintManager = struct {
             .null_check => |nc| {
                 if (env.get(nc.var_id)) |val| {
                     return isValueCompatibleWithNullCheck(val, nc.is_null);
+                }
+                return true;
+            },
+            .bool_check => |bc| {
+                if (env.get(bc.var_id)) |val| {
+                    return isValueCompatibleWithBoolCheck(val, bc.expected);
                 }
                 return true;
             },
@@ -295,6 +344,15 @@ pub const ConstraintManager = struct {
                     .null_check => |nc2| {
                         // x == null AND x != null is contradictory
                         return nc1.var_id == nc2.var_id and nc1.is_null != nc2.is_null;
+                    },
+                    else => return false,
+                }
+            },
+            .bool_check => |bc1| {
+                switch (c2) {
+                    .bool_check => |bc2| {
+                        // x == true AND x == false is contradictory
+                        return bc1.var_id == bc2.var_id and bc1.expected != bc2.expected;
                     },
                     else => return false,
                 }
@@ -365,7 +423,7 @@ pub const ConstraintManager = struct {
                         .null_val => .null_val,
                         .non_null => null, // Contradiction
                         .unknown => .null_val,
-                        else => null, // Concrete int or range can't be null
+                        else => null, // Concrete int, range, or bool can't be null
                     };
                 } else {
                     // Constraint: variable is non-null
@@ -373,9 +431,12 @@ pub const ConstraintManager = struct {
                         .null_val => null, // Contradiction
                         .non_null => .non_null,
                         .unknown => .non_null,
-                        .int_range, .concrete_int => value, // Ints are non-null
+                        .int_range, .concrete_int, .concrete_bool => value, // Ints and bools are non-null
                     };
                 }
+            },
+            .bool_check => |bc| {
+                return refineValueWithBoolCheck(value, bc.expected);
             },
             .var_compare => return value, // No refinement for var-var comparisons yet
         }
@@ -414,7 +475,7 @@ fn isValueCompatibleWithNullCheck(val: AbstractValue, is_null: bool) bool {
         return switch (val) {
             .null_val => true,
             .non_null => false,
-            .concrete_int, .int_range => false, // Ints are not null
+            .concrete_int, .int_range, .concrete_bool => false, // Ints and bools are not null
             .unknown => true,
         };
     } else {
@@ -422,10 +483,26 @@ fn isValueCompatibleWithNullCheck(val: AbstractValue, is_null: bool) bool {
         return switch (val) {
             .null_val => false,
             .non_null => true,
-            .concrete_int, .int_range => true,
+            .concrete_int, .int_range, .concrete_bool => true,
             .unknown => true,
         };
     }
+}
+
+fn isValueCompatibleWithBoolCheck(val: AbstractValue, expected: bool) bool {
+    return switch (val) {
+        .concrete_bool => |b| b == expected,
+        .unknown => true, // Conservatively compatible
+        else => false, // Ints, ranges, null, non_null are not boolean values
+    };
+}
+
+fn refineValueWithBoolCheck(value: AbstractValue, expected: bool) ?AbstractValue {
+    return switch (value) {
+        .unknown => .{ .concrete_bool = expected },
+        .concrete_bool => |b| if (b == expected) value else null, // Contradiction if different
+        else => null, // Can't refine int/null to boolean - contradiction
+    };
 }
 
 fn areIntConstraintsContradictory(op1: CompareOp, val1: i64, op2: CompareOp, val2: i64) bool {
@@ -519,7 +596,7 @@ fn refineValueWithIntConstraint(value: AbstractValue, op: CompareOp, constraint_
             };
             return .{ .int_range = new_range };
         },
-        .null_val, .non_null => return value,
+        .null_val, .non_null, .concrete_bool => return value,
     }
 }
 
@@ -757,4 +834,107 @@ test "ConstraintManager widen with identical constraints" {
 
     // All constraints should remain
     try testing.expectEqual(@as(usize, 2), widened.size());
+}
+
+test "bool_check constraint creation and equality" {
+    const testing = std.testing;
+
+    const c1 = Constraint.boolCheck(ids.varId(1), true);
+    const c2 = Constraint.boolCheck(ids.varId(1), true);
+    const c3 = Constraint.boolCheck(ids.varId(1), false);
+
+    try testing.expect(c1.eql(c2));
+    try testing.expect(!c1.eql(c3));
+}
+
+test "bool_check constraint negation" {
+    const testing = std.testing;
+
+    const c1 = Constraint.boolCheck(ids.varId(1), true);
+    const neg = c1.negate();
+    try testing.expect(neg.eql(Constraint.boolCheck(ids.varId(1), false)));
+
+    const c2 = Constraint.boolCheck(ids.varId(2), false);
+    const neg2 = c2.negate();
+    try testing.expect(neg2.eql(Constraint.boolCheck(ids.varId(2), true)));
+}
+
+test "bool_check satisfiability with environment" {
+    const testing = std.testing;
+    const allocator = testing.allocator;
+
+    var env = Environment.init(allocator);
+    defer env.deinit();
+
+    try env.set(ids.varId(1), .{ .concrete_bool = true });
+
+    var cm = ConstraintManager.init(allocator);
+    defer cm.deinit();
+
+    try cm.addConstraint(Constraint.boolCheck(ids.varId(1), true));
+    try testing.expect(cm.isSatisfiable(&env));
+
+    try cm.addConstraint(Constraint.boolCheck(ids.varId(1), false));
+    try testing.expect(!cm.isSatisfiable(&env));
+}
+
+test "bool_check contradictory constraints" {
+    const testing = std.testing;
+    const allocator = testing.allocator;
+
+    var env = Environment.init(allocator);
+    defer env.deinit();
+
+    var cm = ConstraintManager.init(allocator);
+    defer cm.deinit();
+
+    try cm.addConstraint(Constraint.boolCheck(ids.varId(1), true));
+    try cm.addConstraint(Constraint.boolCheck(ids.varId(1), false));
+
+    try testing.expect(!cm.isSatisfiable(&env));
+}
+
+test "refineValue for bool_check constraint" {
+    const testing = std.testing;
+
+    // Refine unknown to concrete bool
+    const refined_true = ConstraintManager.refineValue(.unknown, Constraint.boolCheck(ids.varId(1), true));
+    try testing.expect(refined_true != null);
+    try testing.expect(refined_true.?.eql(.{ .concrete_bool = true }));
+
+    const refined_false = ConstraintManager.refineValue(.unknown, Constraint.boolCheck(ids.varId(1), false));
+    try testing.expect(refined_false != null);
+    try testing.expect(refined_false.?.eql(.{ .concrete_bool = false }));
+
+    // Compatible bool value returns unchanged
+    const same = ConstraintManager.refineValue(.{ .concrete_bool = true }, Constraint.boolCheck(ids.varId(1), true));
+    try testing.expect(same != null);
+    try testing.expect(same.?.eql(.{ .concrete_bool = true }));
+
+    // Incompatible bool value returns null (contradiction)
+    const contradiction = ConstraintManager.refineValue(.{ .concrete_bool = true }, Constraint.boolCheck(ids.varId(1), false));
+    try testing.expect(contradiction == null);
+
+    // Non-bool value with bool constraint returns null (contradiction)
+    const int_with_bool = ConstraintManager.refineValue(.{ .concrete_int = 42 }, Constraint.boolCheck(ids.varId(1), true));
+    try testing.expect(int_with_bool == null);
+}
+
+test "isValueCompatibleWithBoolCheck" {
+    const testing = std.testing;
+
+    const bool_true: AbstractValue = .{ .concrete_bool = true };
+    const bool_false: AbstractValue = .{ .concrete_bool = false };
+
+    try testing.expect(isValueCompatibleWithBoolCheck(bool_true, true));
+    try testing.expect(!isValueCompatibleWithBoolCheck(bool_true, false));
+    try testing.expect(isValueCompatibleWithBoolCheck(bool_false, false));
+    try testing.expect(!isValueCompatibleWithBoolCheck(bool_false, true));
+
+    // Unknown is conservatively compatible
+    try testing.expect(isValueCompatibleWithBoolCheck(.unknown, true));
+    try testing.expect(isValueCompatibleWithBoolCheck(.unknown, false));
+
+    // Ints are not compatible with bool checks
+    try testing.expect(!isValueCompatibleWithBoolCheck(.{ .concrete_int = 1 }, true));
 }
