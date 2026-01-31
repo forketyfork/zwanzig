@@ -7,7 +7,6 @@ const Diagnostic = checker_mod.Diagnostic;
 const Source = @import("../source.zig").Source;
 const ids = @import("../ids.zig");
 const cfg_mod = @import("../cfg.zig");
-const CfgBuilder = cfg_mod.CfgBuilder;
 const Cfg = cfg_mod.Cfg;
 const CfgNodeId = ids.CfgNodeId;
 const AstNodeId = ids.AstNodeId;
@@ -158,15 +157,12 @@ pub const EmptyCatchEngineChecker = struct {
         diagnostics: *std.ArrayList(Diagnostic),
         context: checker_mod.CheckerContext,
     ) CheckerError!void {
-        var builder = CfgBuilder.init(allocator);
+        var builder = context.createCfgBuilder(allocator);
 
         // Build CFG for the function
         var cfg_opt = builder.buildFromFn(src, fn_node) catch return;
         if (cfg_opt) |*cfg| {
             defer cfg.deinit();
-
-            // Dump CFG if requested
-            context.dumpCfg(allocator, cfg, src.getFilePath());
 
             // Run the analysis engine with a worklist limit to avoid pathological cases
             var engine = AnalysisEngine.initWithSource(allocator, cfg, src);

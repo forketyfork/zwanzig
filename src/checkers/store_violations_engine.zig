@@ -10,8 +10,6 @@ const config_mod = @import("../config.zig");
 const Config = config_mod.Config;
 const ResourceModel = config_mod.ResourceModel;
 const ids = @import("../ids.zig");
-const cfg_mod = @import("../cfg.zig");
-const CfgBuilder = cfg_mod.CfgBuilder;
 const engine_mod = @import("../engine.zig");
 const AnalysisEngine = engine_mod.AnalysisEngine;
 const store_mod = @import("../engine/store.zig");
@@ -48,13 +46,10 @@ pub const StoreViolationsEngineChecker = struct {
         diagnostics: *std.ArrayList(Diagnostic),
         context: checker_mod.CheckerContext,
     ) CheckerError!void {
-        var builder = CfgBuilder.init(allocator);
+        var builder = context.createCfgBuilder(allocator);
         var cfg_opt = builder.buildFromFn(src, fn_node) catch return;
         if (cfg_opt) |*cfg| {
             defer cfg.deinit();
-
-            // Dump CFG if requested
-            context.dumpCfg(allocator, cfg, src.getFilePath());
 
             // Create a TypeContext for type-aware analysis
             var type_ctx = TypeContext.init(allocator, src);

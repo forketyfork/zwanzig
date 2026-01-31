@@ -15,9 +15,7 @@ const config_mod = @import("config.zig");
 pub const Config = config_mod.Config;
 const cfg_mod = @import("cfg.zig");
 pub const Cfg = cfg_mod.Cfg;
-const ids = @import("ids.zig");
-
-const log = std.log.scoped(.checker);
+pub const CfgBuilder = cfg_mod.CfgBuilder;
 
 pub const AnalysisStats = struct {
     total_runs: u64 = 0,
@@ -106,50 +104,12 @@ pub const CheckerContext = struct {
         return ctx.classifyIdentifier(name);
     }
 
-    /// Dump a CFG to a DOT file in the configured dump directory.
-    /// Does nothing if dump_cfg_dir is not set.
-    /// The filename is based on the source file and function name.
-    pub fn dumpCfg(self: *const CheckerContext, allocator: std.mem.Allocator, cfg: *const Cfg, source_path: []const u8) void {
-        const dir = self.dump_cfg_dir orelse return;
-
-        const dot = cfg.toDot(allocator) catch |err| {
-            log.warn("failed to generate CFG DOT: {}", .{err});
-            return;
-        };
-        defer allocator.free(dot);
-
-        // Build filename: <source_basename>_<fn_name>_<ast_idx>.dot
-        // The AST index suffix guarantees uniqueness for functions with the same name
-        const basename = std.fs.path.basename(source_path);
-        const stem = if (std.mem.lastIndexOf(u8, basename, ".")) |idx| basename[0..idx] else basename;
-        const fn_name = cfg.fn_name orelse "anonymous";
-        const ast_idx = if (cfg.fn_ast_node) |node| ids.astIndex(node) else 0;
-
-        var path_buf: [std.fs.max_path_bytes]u8 = undefined;
-        const file_path = std.fmt.bufPrint(&path_buf, "{s}/{s}_{s}_{d}.dot", .{ dir, stem, fn_name, ast_idx }) catch {
-            log.warn("CFG DOT path too long", .{});
-            return;
-        };
-
-        // Create directory if needed
-        std.fs.cwd().makePath(dir) catch |err| {
-            log.warn("failed to create CFG dump directory {s}: {}", .{ dir, err });
-            return;
-        };
-
-        // Write the file
-        const file = std.fs.cwd().createFile(file_path, .{}) catch |err| {
-            log.warn("failed to create CFG DOT file {s}: {}", .{ file_path, err });
-            return;
-        };
-        defer file.close();
-
-        file.writeAll(dot) catch |err| {
-            log.warn("failed to write CFG DOT file {s}: {}", .{ file_path, err });
-            return;
-        };
-
-        log.debug("dumped CFG to {s}", .{file_path});
+    /// Create a CfgBuilder pre-configured with the context's dump directory.
+    /// The builder will automatically dump CFG DOT files when buildFromFn succeeds.
+    pub fn createCfgBuilder(self: *const CheckerContext, allocator: std.mem.Allocator) CfgBuilder {
+        var builder = CfgBuilder.init(allocator);
+        builder.setDumpCfgDir(self.dump_cfg_dir);
+        return builder;
     }
 };
 
