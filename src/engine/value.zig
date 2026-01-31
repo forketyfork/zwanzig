@@ -162,8 +162,8 @@ pub const AbstractValue = union(enum) {
     }
 
     /// Widening operator for abstract values.
-    /// Used at loop headers to ensure convergence by over-approximating.
-    /// Unlike merge, widen is not symmetric: `self` is the previous state at the loop header,
+    /// Used at widening points to ensure convergence by over-approximating.
+    /// Unlike merge, widen is not symmetric: `self` is the previous state at the widening point,
     /// `other` is the new incoming state from a back-edge.
     ///
     /// Widening rules:
@@ -210,6 +210,38 @@ pub const AbstractValue = union(enum) {
             .concrete_bool => |b1| switch (other) {
                 .concrete_bool => |b2| if (b1 == b2) self else .unknown,
                 else => .unknown,
+            },
+        };
+    }
+
+    /// Returns true if `self` is at least as general as `other`.
+    /// Used for subsumption checks to avoid adding redundant states.
+    pub fn subsumes(self: AbstractValue, other: AbstractValue) bool {
+        if (self.eql(other)) return true;
+
+        return switch (self) {
+            .unknown => true,
+            .null_val => other == .null_val,
+            .non_null => switch (other) {
+                .non_null,
+                .concrete_int,
+                .int_range,
+                .concrete_bool,
+                => true,
+                else => false,
+            },
+            .concrete_int => |v1| switch (other) {
+                .concrete_int => |v2| v1 == v2,
+                else => false,
+            },
+            .int_range => |r1| switch (other) {
+                .int_range => |r2| r2.min >= r1.min and r2.max <= r1.max,
+                .concrete_int => |v| v >= r1.min and v <= r1.max,
+                else => false,
+            },
+            .concrete_bool => |b1| switch (other) {
+                .concrete_bool => |b2| b1 == b2,
+                else => false,
             },
         };
     }
@@ -429,4 +461,33 @@ test "AbstractValue concrete_bool merge and widen" {
 
     // Hash should be different for true vs false
     try testing.expect(bool_true.hash() != bool_false.hash());
+}
+
+test "AbstractValue subsumes ordering" {
+    const testing = std.testing;
+
+    const unknown: AbstractValue = .unknown;
+    const null_val: AbstractValue = .null_val;
+    const non_null: AbstractValue = .non_null;
+    const int_one: AbstractValue = .{ .concrete_int = 1 };
+    const int_two: AbstractValue = .{ .concrete_int = 2 };
+    const int_outside: AbstractValue = .{ .concrete_int = 10 };
+    const range_small: AbstractValue = .{ .int_range = .{ .min = 0, .max = 3 } };
+    const range_big: AbstractValue = .{ .int_range = .{ .min = -10, .max = 10 } };
+    const bool_true: AbstractValue = .{ .concrete_bool = true };
+
+    try testing.expect(unknown.subsumes(int_one));
+    try testing.expect(unknown.subsumes(null_val));
+
+    try testing.expect(non_null.subsumes(int_one));
+    try testing.expect(non_null.subsumes(bool_true));
+    try testing.expect(!non_null.subsumes(null_val));
+
+    try testing.expect(range_big.subsumes(range_small));
+    try testing.expect(range_big.subsumes(int_one));
+    try testing.expect(!range_small.subsumes(range_big));
+    try testing.expect(!range_small.subsumes(int_outside));
+
+    try testing.expect(int_one.subsumes(int_one));
+    try testing.expect(!int_one.subsumes(int_two));
 }

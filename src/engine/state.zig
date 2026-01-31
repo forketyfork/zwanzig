@@ -86,29 +86,28 @@ pub const CallSite = struct {
     return_node: CfgNodeId,
 };
 
-/// Key for identifying a loop header in a specific interprocedural context.
-/// Used to track states at loop headers for widening.
-/// Widening should only occur when traversing a loop_back edge into a loop_header
-/// pre-state, and states from different calling contexts must not be merged.
-pub const LoopHeaderKey = struct {
-    /// Hash of the ProgramPoint (loop header node + CFG + pre/post)
+/// Key for identifying a widening point in a specific interprocedural context.
+/// Used to track states at loop headers and other join points for widening.
+/// States from different calling contexts must not be merged.
+pub const WideningKey = struct {
+    /// Hash of the ProgramPoint (node + CFG + pre/post)
     point_hash: u64,
     /// Hash of the calling context (inline depth + call stack)
     context_hash: u64,
 
-    pub fn init(point: ProgramPoint, state: *const ProgramState) LoopHeaderKey {
+    pub fn init(point: ProgramPoint, state: *const ProgramState) WideningKey {
         return .{
             .point_hash = point.hash(),
             .context_hash = state.contextHash(),
         };
     }
 
-    pub fn eql(self: LoopHeaderKey, other: LoopHeaderKey) bool {
+    pub fn eql(self: WideningKey, other: WideningKey) bool {
         return self.point_hash == other.point_hash and
             self.context_hash == other.context_hash;
     }
 
-    pub fn hash(self: LoopHeaderKey) u64 {
+    pub fn hash(self: WideningKey) u64 {
         var hasher = std.hash.Wyhash.init(0);
         hasher.update(std.mem.asBytes(&self.point_hash));
         hasher.update(std.mem.asBytes(&self.context_hash));
@@ -116,11 +115,11 @@ pub const LoopHeaderKey = struct {
     }
 
     pub const HashContext = struct {
-        pub fn hash(_: HashContext, key: LoopHeaderKey) u64 {
+        pub fn hash(_: HashContext, key: WideningKey) u64 {
             return key.hash();
         }
 
-        pub fn eql(_: HashContext, a: LoopHeaderKey, b: LoopHeaderKey) bool {
+        pub fn eql(_: HashContext, a: WideningKey, b: WideningKey) bool {
             return a.eql(b);
         }
     };
@@ -454,7 +453,7 @@ pub const ProgramState = struct {
     }
 
     /// Compute a hash of the calling context (inline depth + call stack).
-    /// Used to distinguish loop header states from different interprocedural contexts.
+    /// Used to distinguish widening point states from different interprocedural contexts.
     pub fn contextHash(self: *const ProgramState) u64 {
         var hasher = std.hash.Wyhash.init(0);
         hasher.update(std.mem.asBytes(&self.inline_depth));
@@ -469,7 +468,7 @@ pub const ProgramState = struct {
     }
 
     /// Widening operator for program states.
-    /// Used at loop headers to ensure convergence by over-approximating.
+    /// Used at widening points to ensure convergence by over-approximating.
     /// This should only be called on states with the same loop-header key
     /// (same ProgramPoint + same calling context).
     ///
@@ -515,6 +514,25 @@ pub const ProgramState = struct {
             .call_stack = new_call_stack,
             .build_metadata = self.build_metadata,
         };
+    }
+
+    /// Returns true if `self` is at least as general as `other`.
+    /// Requires the same calling context to avoid cross-context subsumption.
+    pub fn subsumes(self: *const ProgramState, other: *const ProgramState) bool {
+        if (self.inline_depth != other.inline_depth) return false;
+        if (self.call_stack.items.len != other.call_stack.items.len) return false;
+        for (self.call_stack.items, other.call_stack.items) |self_cs, other_cs| {
+            if (self_cs.call_node != other_cs.call_node) return false;
+            if (self_cs.return_node != other_cs.return_node) return false;
+            if (@intFromPtr(self_cs.caller_cfg) != @intFromPtr(other_cs.caller_cfg)) return false;
+        }
+
+        if (self.error_state != other.error_state) return false;
+        if (!self.env.subsumes(&other.env)) return false;
+        if (!self.constraints.subsumes(&other.constraints)) return false;
+        if (!self.store.subsumes(&other.store)) return false;
+
+        return true;
     }
 };
 
@@ -896,7 +914,7 @@ test "ProgramState contextHash is stable" {
     try testing.expectEqual(hash1, hash2);
 }
 
-test "LoopHeaderKey basic operations" {
+test "WideningKey basic operations" {
     const testing = std.testing;
     const allocator = testing.allocator;
 
@@ -909,9 +927,9 @@ test "LoopHeaderKey basic operations" {
     const point1 = ProgramPoint.initPre(ids.cfgId(5), &cfg);
     const point2 = ProgramPoint.initPre(ids.cfgId(6), &cfg);
 
-    const key1 = LoopHeaderKey.init(point1, &state);
-    const key2 = LoopHeaderKey.init(point1, &state);
-    const key3 = LoopHeaderKey.init(point2, &state);
+    const key1 = WideningKey.init(point1, &state);
+    const key2 = WideningKey.init(point1, &state);
+    const key3 = WideningKey.init(point2, &state);
 
     try testing.expect(key1.eql(key2));
     try testing.expect(!key1.eql(key3));
@@ -919,7 +937,7 @@ test "LoopHeaderKey basic operations" {
     try testing.expect(key1.hash() != key3.hash());
 }
 
-test "LoopHeaderKey distinguishes calling contexts" {
+test "WideningKey distinguishes calling contexts" {
     const testing = std.testing;
     const allocator = testing.allocator;
 
@@ -937,14 +955,14 @@ test "LoopHeaderKey distinguishes calling contexts" {
 
     const point = ProgramPoint.initPre(ids.cfgId(5), &cfg);
 
-    const key1 = LoopHeaderKey.init(point, &state1);
-    const key2 = LoopHeaderKey.init(point, &state2);
+    const key1 = WideningKey.init(point, &state1);
+    const key2 = WideningKey.init(point, &state2);
 
     try testing.expect(!key1.eql(key2));
     try testing.expect(key1.hash() != key2.hash());
 }
 
-test "LoopHeaderKey HashContext works with HashMap" {
+test "WideningKey HashContext works with HashMap" {
     const testing = std.testing;
     const allocator = testing.allocator;
 
@@ -957,10 +975,10 @@ test "LoopHeaderKey HashContext works with HashMap" {
     const point1 = ProgramPoint.initPre(ids.cfgId(5), &cfg);
     const point2 = ProgramPoint.initPre(ids.cfgId(6), &cfg);
 
-    const key1 = LoopHeaderKey.init(point1, &state);
-    const key2 = LoopHeaderKey.init(point2, &state);
+    const key1 = WideningKey.init(point1, &state);
+    const key2 = WideningKey.init(point2, &state);
 
-    var map = std.HashMap(LoopHeaderKey, u32, LoopHeaderKey.HashContext, std.hash_map.default_max_load_percentage).init(allocator);
+    var map = std.HashMap(WideningKey, u32, WideningKey.HashContext, std.hash_map.default_max_load_percentage).init(allocator);
     defer map.deinit();
 
     try map.put(key1, 100);
@@ -1137,6 +1155,23 @@ test "ProgramState widen with empty states" {
     try testing.expectEqual(@as(usize, 0), widened.constraintCount());
     try testing.expectEqual(ErrorState.normal, widened.getErrorState());
     try testing.expectEqual(@as(u32, 0), widened.getInlineDepth());
+}
+
+test "ProgramState subsumes respects precision ordering" {
+    const testing = std.testing;
+    const allocator = testing.allocator;
+
+    var general = ProgramState.init(allocator);
+    defer general.deinit();
+
+    var specific = ProgramState.init(allocator);
+    defer specific.deinit();
+
+    try specific.setVar(ids.varId(1), .{ .concrete_int = 1 });
+    try specific.addConstraint(.{ .null_check = .{ .var_id = ids.varId(2), .is_null = false } });
+
+    try testing.expect(general.subsumes(&specific));
+    try testing.expect(!specific.subsumes(&general));
 }
 
 test "ProgramState widen store violations union" {

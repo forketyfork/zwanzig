@@ -263,14 +263,14 @@ fn mergeConfig(allocator: std.mem.Allocator, cli_args: CliArgs) !MergedConfig {
                 .rule_filter = cli_args.rule_filter,
                 .max_worklist_steps = cli_args.max_worklist_steps,
                 .max_states_per_point = cli_args.max_states_per_point,
-                .use_widening = cli_args.use_widening,
+                .use_widening = cli_args.use_widening orelse true,
             };
         }
         return err;
     };
     const max_worklist_steps = cli_args.max_worklist_steps orelse loaded_config.max_worklist_steps;
     const max_states_per_point = cli_args.max_states_per_point orelse loaded_config.max_states_per_point;
-    const use_widening = cli_args.use_widening orelse loaded_config.use_widening;
+    const use_widening = cli_args.use_widening orelse loaded_config.use_widening orelse true;
     const resource_models = loaded_config.resource_models;
 
     switch (cli_args.rule_filter) {
@@ -624,7 +624,7 @@ fn printUsage() !void {
     try stdout.writeAll("  --format <format> Output format: 'text', 'json', or 'sarif' (default: text)\n");
     try stdout.writeAll("  --max-steps <n>   Max worklist steps per engine run\n");
     try stdout.writeAll("  --max-states-per-point <n> Max unique states per CFG point\n");
-    try stdout.writeAll("  --use-widening    Enable widening for convergence (default: off)\n");
+    try stdout.writeAll("  --use-widening    Enable widening for convergence (default: on)\n");
     try stdout.writeAll("  --cache           Enable incremental caching\n");
     try stdout.writeAll("  --threads <n>     Number of threads for parallel analysis (default: CPU count)\n");
     try stdout.writeAll("  --dump-cfg <dir>  Dump CFG DOT files to directory for visualization\n");

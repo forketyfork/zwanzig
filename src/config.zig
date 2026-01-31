@@ -27,7 +27,7 @@ pub const Config = struct {
     rule_filter: RuleFilter,
     max_worklist_steps: ?usize = null,
     max_states_per_point: ?u32 = null,
-    /// Enable loop-header widening for convergence
+    /// Enable widening for convergence (loop headers and join points)
     use_widening: ?bool = null,
     /// Custom resource models for resource tracking
     resource_models: []const ResourceModel = &.{},
