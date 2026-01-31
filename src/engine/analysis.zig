@@ -2213,7 +2213,8 @@ pub const AnalysisEngine = struct {
                 if (current_cfg.fn_ast_node) |fn_node| {
                     try self.escapeReturnedVars(&new_state, fn_node, current_cfg);
                 }
-                if (!new_state.isErrorPath()) {
+                // Only record leaks at the exit of the top-level function, not inlined functions
+                if (new_state.getInlineDepth() == 0 and !new_state.isErrorPath()) {
                     try new_state.trackLeaks();
                 }
             },
