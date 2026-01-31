@@ -370,17 +370,15 @@ fn writeToFile(
     suffix: []const u8,
     allocator: std.mem.Allocator,
 ) void {
-    _ = allocator;
-
     const basename = std.fs.path.basename(source_path);
     const stem = if (std.mem.lastIndexOf(u8, basename, ".")) |idx| basename[0..idx] else basename;
     const name = fn_name orelse "anonymous";
 
-    var path_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const file_path = std.fmt.bufPrint(&path_buf, "{s}/{s}_{s}_{s}.dot", .{ dir, stem, name, suffix }) catch {
-        log.warn("DOT path too long", .{});
+    const file_path = std.fmt.allocPrint(allocator, "{s}/{s}_{s}_{s}.dot", .{ dir, stem, name, suffix }) catch {
+        log.warn("failed to allocate DOT path", .{});
         return;
     };
+    defer allocator.free(file_path);
 
     std.fs.cwd().makePath(dir) catch |err| {
         log.warn("failed to create DOT dump directory {s}: {}", .{ dir, err });
