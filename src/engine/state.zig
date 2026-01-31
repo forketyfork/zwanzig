@@ -559,7 +559,7 @@ test "ProgramPoint basic operations" {
     try testing.expect(point1.eql(point3));
 
     try testing.expect(point1.hash() != point2.hash());
-    try testing.expect(point1.hash() == point3.hash());
+    try testing.expectEqual(point1.hash(), point3.hash());
 
     // Test CFG identity: same node index but different CFG should not be equal
     const point4 = ProgramPoint.initPre(ids.cfgId(5), &cfg2);
@@ -749,7 +749,7 @@ test "ProgramState call stack operations" {
 
     const call_site = CallSite{ .call_node = ids.cfgId(1), .caller_cfg = &cfg, .return_node = ids.cfgId(2) };
 
-    try testing.expect(state.peekCallSite() == null);
+    try testing.expectEqual(@as(?CallSite, null), state.peekCallSite());
 
     try state.pushCallSite(call_site);
     try testing.expect(state.peekCallSite() != null);
@@ -757,7 +757,7 @@ test "ProgramState call stack operations" {
 
     const popped = state.popCallSite();
     try testing.expect(popped != null);
-    try testing.expect(state.peekCallSite() == null);
+    try testing.expectEqual(@as(?CallSite, null), state.peekCallSite());
 }
 
 test "ProgramState clone preserves inline depth and call stack" {
@@ -1051,7 +1051,7 @@ test "ProgramState widen clears cached hash" {
     defer widened.deinit();
 
     // Widened state should have null cached_hash
-    try testing.expect(widened.cached_hash == null);
+    try testing.expectEqual(@as(?u64, null), widened.cached_hash);
 }
 
 test "ProgramState widen error_state join same" {

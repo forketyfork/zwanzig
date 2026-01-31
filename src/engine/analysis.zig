@@ -294,6 +294,7 @@ pub const AnalysisEngine = struct {
             try self.buildFunctionIndex(src);
         }
 
+        // Seed only when starting fresh; otherwise continue from the pre-seeded worklist.
         if (self.worklist.items.len == 0) {
             var initial_state = ProgramState.init(self.allocator);
             initial_state.build_metadata = self.build_metadata;

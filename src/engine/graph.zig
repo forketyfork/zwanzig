@@ -174,48 +174,72 @@ pub const ExplodedGraph = struct {
         return null;
     }
 
+    fn sameContext(a: *const ProgramState, b: *const ProgramState) bool {
+        if (a.inline_depth != b.inline_depth) return false;
+        if (a.call_stack.items.len != b.call_stack.items.len) return false;
+        for (a.call_stack.items, b.call_stack.items) |call_site, other_site| {
+            if (call_site.call_node != other_site.call_node or
+                call_site.return_node != other_site.return_node or
+                call_site.caller_cfg != other_site.caller_cfg)
+            {
+                return false;
+            }
+        }
+        return true;
+    }
+
     fn widenOnCap(self: *ExplodedGraph, point_key: u64, state: *ProgramState) EngineError!CapWideningResult {
-        if (self.point_nodes.getPtr(point_key)) |list| {
-            if (list.items.len > 0) {
-                const target_index = list.items[0];
-                var target_node = &self.nodes.items[target_index];
+        const list = self.point_nodes.getPtr(point_key) orelse
+            return .{ .index = std.math.maxInt(u32), .applied = false, .converged = false, .state_updated = false };
+        if (list.items.len == 0) {
+            return .{ .index = std.math.maxInt(u32), .applied = false, .converged = false, .state_updated = false };
+        }
 
-                var widened = target_node.state.widen(state) catch |err| switch (err) {
-                    error.OutOfMemory => return EngineError.OutOfMemory,
-                };
-                if (widened.eql(&target_node.state)) {
-                    widened.deinit();
-                    self.widening_converged += 1;
-                    return .{ .index = target_index, .applied = true, .converged = true, .state_updated = false };
-                }
-
-                const new_key = ExplodedNode.computeKey(target_node.point, &widened);
-                if (self.node_map.get(new_key)) |existing_index| {
-                    if (existing_index != target_index) {
-                        widened.deinit();
-                        return .{ .index = existing_index, .applied = true, .converged = true, .state_updated = false };
-                    }
-                }
-
-                const old_key = ExplodedNode.computeKey(target_node.point, &target_node.state);
-                target_node.state.deinit();
-                target_node.state = widened;
-
-                if (new_key != old_key) {
-                    _ = self.node_map.remove(old_key);
-                    self.node_map.put(new_key, target_index) catch |err| switch (err) {
-                        error.OutOfMemory => return EngineError.OutOfMemory,
-                    };
-                }
-
-                self.widened_nodes += 1;
-                return .{ .index = target_index, .applied = true, .converged = false, .state_updated = true };
+        var target_index: ?u32 = null;
+        for (list.items) |index| {
+            const existing_state = &self.nodes.items[index].state;
+            if (sameContext(existing_state, state)) {
+                target_index = index;
+                break;
             }
         }
 
-        self.dropped_state_count += 1;
-        return .{ .index = std.math.maxInt(u32), .applied = false, .converged = false, .state_updated = false };
+        const cap_index = target_index orelse
+            return .{ .index = std.math.maxInt(u32), .applied = false, .converged = false, .state_updated = false };
+        var target_node = &self.nodes.items[cap_index];
+
+        var widened = target_node.state.widen(state) catch |err| switch (err) {
+            error.OutOfMemory => return EngineError.OutOfMemory,
+        };
+        if (widened.eql(&target_node.state)) {
+            widened.deinit();
+            self.widening_converged += 1;
+            return .{ .index = cap_index, .applied = true, .converged = true, .state_updated = false };
+        }
+
+        const new_key = ExplodedNode.computeKey(target_node.point, &widened);
+        if (self.node_map.get(new_key)) |existing_index| {
+            if (existing_index != cap_index) {
+                widened.deinit();
+                return .{ .index = existing_index, .applied = true, .converged = true, .state_updated = false };
+            }
+        }
+
+        const old_key = ExplodedNode.computeKey(target_node.point, &target_node.state);
+        target_node.state.deinit();
+        target_node.state = widened;
+
+        if (new_key != old_key) {
+            _ = self.node_map.remove(old_key);
+            self.node_map.put(new_key, cap_index) catch |err| switch (err) {
+                error.OutOfMemory => return EngineError.OutOfMemory,
+            };
+        }
+
+        self.widened_nodes += 1;
+        return .{ .index = cap_index, .applied = true, .converged = false, .state_updated = true };
     }
+
     /// Get or create a node for the given point and state.
     /// Returns the node index and whether it was newly created.
     /// Ownership: The caller should deinit `state` if `is_new == false` OR if `widening_applied == true`.
@@ -346,17 +370,19 @@ pub const ExplodedGraph = struct {
         const current_count = self.point_state_counts.get(point_key) orelse 0;
         if (current_count >= self.max_states_per_point) {
             const cap_result = try self.widenOnCap(point_key, current_state);
-            if (widened_state) |*ws| {
-                ws.deinit();
+            if (cap_result.applied) {
+                if (widened_state) |*ws| {
+                    ws.deinit();
+                }
+                return .{
+                    .index = cap_result.index,
+                    .is_new = false,
+                    .widening_applied = widening_applied or cap_result.applied,
+                    .converged = converged or cap_result.converged,
+                    .state_updated = cap_result.state_updated,
+                    .caller_should_deinit = true,
+                };
             }
-            return .{
-                .index = cap_result.index,
-                .is_new = false,
-                .widening_applied = widening_applied or cap_result.applied,
-                .converged = converged or cap_result.converged,
-                .state_updated = cap_result.state_updated,
-                .caller_should_deinit = true,
-            };
         }
 
         const index: u32 = @intCast(self.nodes.items.len);
@@ -726,6 +752,43 @@ test "ExplodedGraph widen-on-cap updates existing node" {
     try testing.expect(val.isUnknown());
 
     state3.deinit();
+}
+
+test "ExplodedGraph widen-on-cap respects context" {
+    const testing = std.testing;
+    const allocator = testing.allocator;
+
+    var cfg = Cfg.init(allocator);
+    defer cfg.deinit();
+
+    _ = try cfg.addNode(IrNode.init(.fn_entry));
+    _ = try cfg.addNode(IrNode.init(.fn_entry));
+
+    var graph = ExplodedGraph.init(allocator, &cfg);
+    defer graph.deinit();
+
+    graph.setMaxStatesPerPoint(1);
+
+    const point = ProgramPoint.initPre(ids.cfgId(0), &cfg);
+
+    var state1 = ProgramState.init(allocator);
+    try state1.setVar(ids.varId(1), .{ .concrete_int = 10 });
+    const result1 = try graph.getOrCreateNode(point, &state1);
+    try testing.expect(result1.is_new);
+
+    var state2 = ProgramState.init(allocator);
+    try state2.setVar(ids.varId(1), .{ .concrete_int = 20 });
+    try state2.pushCallSite(state_mod.CallSite{ .call_node = ids.cfgId(0), .caller_cfg = &cfg, .return_node = ids.cfgId(1) });
+
+    const result2 = try graph.getOrCreateNodeWithWidening(point, &state2, .{});
+    try testing.expect(result2.is_new);
+    try testing.expect(!result2.widening_applied);
+    try testing.expectEqual(@as(usize, 2), graph.nodeCount());
+    try testing.expectEqual(@as(u32, 0), graph.getDroppedStateCount());
+
+    if (result2.caller_should_deinit) {
+        state2.deinit();
+    }
 }
 
 test "ExplodedGraph without widening options works as before" {
