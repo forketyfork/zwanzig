@@ -83,6 +83,18 @@ pub const StoreViolationsEngineChecker = struct {
                 stats.recordRun(engine.getGraph().getDroppedStateCount());
                 stats.recordWidening(engine.getGraph().getWidenedNodeCount(), engine.getGraph().getWideningConvergedCount());
             }
+
+            // Dump visualizations if requested
+            if (context.dump_exploded_graph_dir) |dir| {
+                engine_mod.dot.writeExplodedGraphToFile(engine.getGraph(), dir, src.getFilePath(), cfg.fn_name, allocator);
+            }
+            if (context.dump_annotated_cfg_dir) |dir| {
+                engine_mod.dot.writeAnnotatedCfgToFile(engine.getGraph(), dir, src.getFilePath(), cfg.fn_name, allocator);
+            }
+            if (context.dump_path_trace_dir) |dir| {
+                engine_mod.dot.writePathTracesToFile(engine.getGraph(), dir, src.getFilePath(), cfg.fn_name, allocator);
+            }
+
             if (!run_ok) return;
 
             var reported: std.ArrayList(StoreViolation) = .empty;

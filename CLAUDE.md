@@ -79,6 +79,9 @@ See existing rules in `src/rules/` for patterns. For CFG-based checkers, see `sr
 - `--skip <rule>`: Skip specified rules (blocklist, repeatable)
 - `--do` and `--skip` are mutually exclusive
 - `--dump-cfg <dir>`: Dump CFG DOT files for visualization (see Debugging section)
+- `--dump-exploded-graph <dir>`: Dump exploded graph showing all (CFG node, state) pairs
+- `--dump-annotated-cfg <dir>`: Dump CFG with state annotations overlaid
+- `--dump-path-trace <dir>`: Dump path traces to violations
 
 ## Debugging
 
@@ -107,6 +110,39 @@ DOT output features:
   - Purple dashed: `defer_edge`
 
 The `Cfg` struct also provides `dumpDot(allocator)` for quick stderr output during development.
+
+### Lattice Flow Visualization
+
+Engine-based checkers build exploded graphs showing all reachable (CFG node, state) pairs during abstract interpretation. Three visualization options are available:
+
+```bash
+# Dump full exploded graph (can be large for complex functions)
+zig build run -- --dump-exploded-graph ./eg_output src/myfile.zig
+
+# Dump CFG with state counts overlaid on each node
+zig build run -- --dump-annotated-cfg ./acfg_output src/myfile.zig
+
+# Dump path traces to violations (useful for debugging false positives)
+zig build run -- --dump-path-trace ./traces src/myfile.zig
+```
+
+**Exploded Graph** (`--dump-exploded-graph`):
+- Each node shows: CFG index, IR tag, pre/post state, state hash, env size, constraint count
+- Green fill: entry states; Red fill: exit states; Yellow fill: states with violations
+- Edges show transitions between (CFG node, state) pairs
+
+**Annotated CFG** (`--dump-annotated-cfg`):
+- Same structure as regular CFG visualization
+- Each node shows the count of unique states that reached it
+- Yellow fill indicates nodes where a violation was detected
+
+**Path Traces** (`--dump-path-trace`):
+- One subgraph per detected violation
+- Shows the path from function entry to the violation
+- Each node shows step number, CFG index, IR tag, env size, and error state
+- Red fill marks the violation location; green fill marks the entry
+
+Output files are named: `<source_basename>_<fn_name>_<suffix>.dot`
 
 ### Debug Logging
 

@@ -6,6 +6,7 @@ const state = @import("engine/state.zig");
 const summary = @import("engine/summary.zig");
 const graph = @import("engine/graph.zig");
 const analysis = @import("engine/analysis.zig");
+pub const dot = @import("engine/dot.zig");
 
 pub const EngineError = base.EngineError;
 pub const default_max_inline_depth = base.default_max_inline_depth;
