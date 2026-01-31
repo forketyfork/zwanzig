@@ -149,9 +149,17 @@ pub const UnreachableCodeChecker = struct {
         }
         const ident_name = tree.source[start .. start + len];
 
-        // Search for a const declaration with this name in preceding nodes
-        for (0..cond_node) |i| {
+        // Search for a const declaration with this name in preceding nodes.
+        // Walk backwards from the condition node to find the nearest declaration
+        // and stop at function boundaries to respect lexical scope.
+        var i: usize = cond_node;
+        while (i > 0) {
+            i -= 1;
             const node_tag = tags[i];
+
+            // Stop at function boundary to respect lexical scope
+            if (node_tag == .fn_decl) break;
+
             // Look for simple_var_decl (const x = ...) or local_var_decl
             if (node_tag != .simple_var_decl and node_tag != .local_var_decl) continue;
 

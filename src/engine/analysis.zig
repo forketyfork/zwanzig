@@ -1983,11 +1983,11 @@ pub const AnalysisEngine = struct {
         if (ir_node.operand_node) |cond_node| {
             // First check if the condition is a literal boolean
             if (self.evaluateLiteral(cond_node)) |literal_val| {
-                if (literal_val.toBool()) |_| {
+                if (literal_val.toBool()) |bool_val| {
                     // Literal true/false - create a constraint on a synthetic var
                     // that will be checked against the known literal value
                     const var_key = ids.varId(cond_node);
-                    return Constraint.boolCheck(var_key, true);
+                    return Constraint.boolCheck(var_key, bool_val);
                 }
             }
 
