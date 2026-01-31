@@ -21,6 +21,7 @@ pub const rules = struct {
     pub const shadowed_variable = @import("rules/shadowed_variable.zig");
     pub const identifier_style = @import("rules/identifier_style.zig");
     pub const sentinel_alloc = @import("rules/sentinel_alloc.zig");
+    pub const unused_parameter = @import("rules/unused_parameter.zig");
 };
 
 pub const checkers = struct {

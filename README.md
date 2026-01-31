@@ -125,6 +125,26 @@ pub fn main() void {
 }
 ```
 
+### unused-parameter
+
+Detects function parameters that are never referenced.
+
+- Parameters starting with `_` are ignored (explicit opt-out)
+
+**Bad:**
+```zig
+fn add(unused: i32, value: i32) i32 {
+    return value + 1;
+}
+```
+
+**Good:**
+```zig
+fn add(value: i32) i32 {
+    return value + 1;
+}
+```
+
 ### unreachable-code
 
 Detects code that can never execute using control-flow graph analysis.
