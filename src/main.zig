@@ -332,8 +332,14 @@ const WorkerContext = struct {
 };
 
 fn workerTask(file_index: usize, ctx: *WorkerContext) void {
+    // Use a per-task arena allocator backed by the page allocator.
+    // This eliminates lock contention on the shared GPA during parallel analysis,
+    // as each worker thread has its own independent arena.
+    var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
+    defer arena.deinit();
+
     const file_path = ctx.files[file_index];
-    const result = ctx.analyzer.analyzeFileResult(file_path);
+    const result = ctx.analyzer.analyzeFileResultWithScratchAllocator(file_path, arena.allocator());
     if (result) |r| {
         ctx.results[file_index] = r;
         ctx.errors[file_index] = null;

@@ -251,6 +251,19 @@ pub const Analyzer = struct {
     /// This method does not mutate any shared state in the Analyzer,
     /// making it safe to call in parallel (once thread-safety is added).
     pub fn analyzeFileResult(self: *Analyzer, file_path: []const u8) !AnalysisResult {
+        return self.analyzeFileResultWithScratchAllocator(file_path, self.allocator);
+    }
+
+    /// Analyze a single file using a scratch allocator for temporary data.
+    /// The scratch_allocator is used for heavy temporary allocations (file content,
+    /// AST parsing, etc.) while self.allocator is used for persistent data like
+    /// diagnostic strings. This enables efficient parallel analysis by allowing
+    /// each worker thread to use its own arena allocator for scratch memory.
+    pub fn analyzeFileResultWithScratchAllocator(
+        self: *Analyzer,
+        file_path: []const u8,
+        scratch_allocator: std.mem.Allocator,
+    ) !AnalysisResult {
         log.debug("analyzeResult: start {s}", .{file_path});
 
         const file = try std.fs.cwd().openFile(file_path, .{});
@@ -260,15 +273,15 @@ pub const Analyzer = struct {
         // Sentinel needed for Source.init; free accounts for sentinel byte below
         // zwanzig-disable-next-line: sentinel-alloc
         const content = try file.readToEndAllocOptions(
-            self.allocator,
+            scratch_allocator,
             max_size,
             null,
             std.mem.Alignment.of(u8),
             0,
         );
-        defer self.allocator.free(content.ptr[0 .. content.len + 1]);
+        defer scratch_allocator.free(content.ptr[0 .. content.len + 1]);
 
-        var source = Source.init(self.allocator, file_path, content);
+        var source = Source.init(scratch_allocator, file_path, content);
         defer source.deinit();
 
         var cached_artifacts: ?CachedArtifacts = null;
@@ -276,17 +289,17 @@ pub const Analyzer = struct {
 
         var cache_key: ?CacheKey = null;
         var enabled_rules_buf: std.ArrayList([]const u8) = .empty;
-        defer enabled_rules_buf.deinit(self.allocator);
+        defer enabled_rules_buf.deinit(scratch_allocator);
 
         if (self.use_cache) {
             for (self.checker_manager.checkers.items) |chkr| {
                 if (self.isRuleEnabled(chkr.name)) {
-                    try enabled_rules_buf.append(self.allocator, chkr.name);
+                    try enabled_rules_buf.append(scratch_allocator, chkr.name);
                 }
             }
             for (self.checker_manager.adapted_rules.items) |rule| {
                 if (self.isRuleEnabled(rule.name)) {
-                    try enabled_rules_buf.append(self.allocator, rule.name);
+                    try enabled_rules_buf.append(scratch_allocator, rule.name);
                 }
             }
 
@@ -302,7 +315,7 @@ pub const Analyzer = struct {
                     defer self.allocator.free(cached_data);
                     log.debug("analyzeResult: cache hit {s}, loading artifacts", .{file_path});
 
-                    cached_artifacts = CachedArtifacts.deserialize(self.allocator, cached_data) catch |err| blk: {
+                    cached_artifacts = CachedArtifacts.deserialize(scratch_allocator, cached_data) catch |err| blk: {
                         log.debug("analyzeResult: failed to deserialize cached artifacts: {}", .{err});
                         break :blk null;
                     };
@@ -310,25 +323,42 @@ pub const Analyzer = struct {
             }
         }
 
+        // Initialize result early so we can use its stats field
         var result = AnalysisResult.init();
         errdefer result.deinit(self.allocator);
 
-        try self.runChecksOnSource(&source, &result.diagnostics, &result.stats);
+        // Use a temporary list for diagnostics created with scratch allocator
+        var scratch_diagnostics: std.ArrayList(Diagnostic) = .empty;
+        defer {
+            // Free diagnostic messages before freeing the list
+            for (scratch_diagnostics.items) |*diag| {
+                diag.deinit(scratch_allocator);
+            }
+            scratch_diagnostics.deinit(scratch_allocator);
+        }
 
-        try filterDiagnosticsWithSuppressions(self.allocator, content, &result.diagnostics);
+        try self.runChecksOnSource(&source, scratch_allocator, &scratch_diagnostics, &result.stats);
+
+        try filterDiagnosticsWithSuppressions(scratch_allocator, content, &scratch_diagnostics);
+
+        // Transfer diagnostics from scratch allocator to persistent allocator
+        for (scratch_diagnostics.items) |diag| {
+            const cloned = try diag.clone(self.allocator);
+            try result.diagnostics.append(self.allocator, cloned);
+        }
 
         if (self.use_cache and cache_key != null) {
             if (self.cache) |*c| {
-                var artifacts = CachedArtifacts.init(self.allocator);
+                var artifacts = CachedArtifacts.init(scratch_allocator);
                 defer artifacts.deinit();
 
                 artifacts.had_type_info = self.use_typed_ir;
 
-                const serialized = artifacts.serialize(self.allocator) catch |err| {
+                const serialized = artifacts.serialize(scratch_allocator) catch |err| {
                     log.debug("analyzeResult: failed to serialize artifacts: {}", .{err});
                     return result;
                 };
-                defer self.allocator.free(serialized);
+                defer scratch_allocator.free(serialized);
 
                 c.put(cache_key.?, serialized) catch |err| {
                     log.debug("analyzeResult: failed to cache artifacts: {}", .{err});
@@ -363,16 +393,18 @@ pub const Analyzer = struct {
 
     /// Internal method to run checks on a source with the analyzer's filter.
     /// Accepts explicit diagnostics and stats parameters for isolation.
+    /// The scratch_allocator is used for temporary allocations during analysis.
     fn runChecksOnSource(
         self: *Analyzer,
         source: *Source,
+        scratch_allocator: std.mem.Allocator,
         diagnostics: *std.ArrayList(Diagnostic),
         analysis_stats: *checker_mod.AnalysisStats,
     ) !void {
         // Create type context if typed IR is enabled
         var type_ctx: ?TypeContext = null;
         if (self.use_typed_ir) {
-            type_ctx = TypeContext.init(self.allocator, source);
+            type_ctx = TypeContext.init(scratch_allocator, source);
             log.debug("type context: created for {s}, available={}", .{
                 source.getFilePath(),
                 if (type_ctx) |*tc| tc.isAvailable() else false,
@@ -400,7 +432,7 @@ pub const Analyzer = struct {
         for (self.checker_manager.checkers.items) |chkr| {
             if (self.isRuleEnabled(chkr.name)) {
                 log.debug("checker: start {s} ({s})", .{ source.getFilePath(), chkr.name });
-                try chkr.checkAst(source, self.allocator, diagnostics, context);
+                try chkr.checkAst(source, scratch_allocator, diagnostics, context);
                 log.debug("checker: done {s} ({s})", .{ source.getFilePath(), chkr.name });
             }
         }
@@ -409,7 +441,7 @@ pub const Analyzer = struct {
         for (self.checker_manager.adapted_rules.items) |rule| {
             if (self.isRuleEnabled(rule.name)) {
                 log.debug("rule: start {s} ({s})", .{ source.getFilePath(), rule.name });
-                try rule.check(source, self.allocator, diagnostics);
+                try rule.check(source, scratch_allocator, diagnostics);
                 log.debug("rule: done {s} ({s})", .{ source.getFilePath(), rule.name });
             }
         }

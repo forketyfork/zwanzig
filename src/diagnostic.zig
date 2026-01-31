@@ -93,6 +93,19 @@ pub const Diagnostic = struct {
         allocator.free(self.message);
     }
 
+    /// Create a copy of this diagnostic with message owned by a new allocator.
+    /// This is useful for transferring diagnostics between allocators (e.g., from
+    /// an arena allocator to a persistent allocator).
+    pub fn clone(self: Diagnostic, allocator: std.mem.Allocator) !Diagnostic {
+        return .{
+            .file_path = self.file_path,
+            .rule_id = self.rule_id,
+            .severity = self.severity,
+            .message = try allocator.dupe(u8, self.message),
+            .range = self.range,
+        };
+    }
+
     pub fn format(self: Diagnostic, writer: anytype) !void {
         try writer.print("{s}:{d}:{d}: {s}: [{s}] {s}\n", .{
             self.file_path,
