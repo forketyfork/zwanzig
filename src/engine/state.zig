@@ -365,6 +365,7 @@ pub const ProgramState = struct {
         const var_id = switch (constraint) {
             .int_compare => |ic| ic.var_id,
             .null_check => |nc| nc.var_id,
+            .bool_check => |bc| bc.var_id,
             .var_compare => |vc| vc.var1_id,
         };
 

@@ -705,6 +705,37 @@ The cache invalidates automatically when any of these change.
 
 **Tip:** Add `.zwanzig-cache/` to `.gitignore`.
 
+### Debug Output
+
+Enable debug logging at build time with `-Dlog-level`:
+
+```bash
+zig build run -Dlog-level=debug -- src/
+```
+
+Available log levels: `err`, `warn`, `info` (default), `debug`.
+
+Debug output includes file discovery counts, rule counts, and analysis statistics.
+
+### CFG Visualization
+
+Dump Control Flow Graphs for engine-based checkers to understand analysis behavior:
+
+```bash
+# Dump CFG DOT files to a directory
+zwanzig --dump-cfg ./cfg_output src/myfile.zig
+
+# Convert to PNG with Graphviz
+dot -Tpng ./cfg_output/myfile_functionName.dot -o cfg.png
+```
+
+DOT files can also be viewed online at [edotor.net](https://edotor.net) or [viz-js.com](https://viz-js.com).
+
+The visualization shows:
+- Entry nodes (green) and exit nodes (red)
+- Branch/loop headers as diamonds
+- Edge colors indicating control flow type (green for true branches, red for false/error paths, blue dashed for loop back-edges)
+
 ### Output Formats
 
 Use `--format` to choose the output style.

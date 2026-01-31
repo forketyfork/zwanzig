@@ -1,5 +1,6 @@
 const std = @import("std");
 const graph = @import("graph.zig");
+const dot = @import("dot.zig");
 const Source = @import("../source.zig").Source;
 const ids = @import("../ids.zig");
 const type_context_mod = @import("../type_context.zig");
@@ -24,6 +25,8 @@ pub const CfgBuilder = struct {
     allocator: std.mem.Allocator,
     /// Optional type context for annotating IR nodes with type information.
     type_context: ?*TypeContext = null,
+    /// Optional directory to dump CFG DOT files for visualization.
+    dump_cfg_dir: ?[]const u8 = null,
 
     const ProcessResult = struct {
         last: ?CfgNodeId,
@@ -50,6 +53,12 @@ pub const CfgBuilder = struct {
     /// Check if type annotation is available.
     pub fn hasTypeContext(self: *const CfgBuilder) bool {
         return self.type_context != null;
+    }
+
+    /// Set directory for dumping CFG DOT files.
+    /// When set, buildFromFn automatically writes DOT files after building CFGs.
+    pub fn setDumpCfgDir(self: *CfgBuilder, dir: ?[]const u8) void {
+        self.dump_cfg_dir = dir;
     }
 
     /// Annotate an IR node with type information if available.
@@ -97,27 +106,55 @@ pub const CfgBuilder = struct {
 
         cfg.fn_ast_node = fn_node;
 
+        // Extract function name from the AST
+        const fn_data = tree.nodes.items(.data)[fn_index];
+        const fn_proto_idx = @intFromEnum(fn_data.node_and_node[0]);
+        if (fn_proto_idx > 0) {
+            const main_tokens = tree.nodes.items(.main_token);
+            const proto_token = main_tokens[fn_proto_idx];
+            // The function name token typically follows the 'fn' keyword
+            // Check if the next token is an identifier
+            const token_tags = tree.tokens.items(.tag);
+            if (proto_token + 1 < token_tags.len and token_tags[proto_token + 1] == .identifier) {
+                const name_start = tree.tokens.items(.start)[proto_token + 1];
+                const source_bytes = tree.source;
+                // Find the end of the identifier
+                var name_end = name_start;
+                while (name_end < source_bytes.len and
+                    (std.ascii.isAlphanumeric(source_bytes[name_end]) or source_bytes[name_end] == '_'))
+                {
+                    name_end += 1;
+                }
+                if (name_end > name_start) {
+                    cfg.fn_name = source_bytes[name_start..name_end];
+                }
+            }
+        }
+
         const entry_idx = try cfg.addNode(IrNode.init(.fn_entry));
         cfg.entry = entry_idx;
 
         const exit_idx = try cfg.addNode(IrNode.init(.fn_exit));
         cfg.exit = exit_idx;
 
-        const fn_data = tree.nodes.items(.data)[fn_index];
         const body_node = @intFromEnum(fn_data.node_and_node[1]);
 
         if (body_node == 0) {
             try cfg.addEdge(entry_idx, exit_idx);
-            return cfg;
+        } else {
+            const result = try self.processNode(&cfg, source, body_node, entry_idx);
+            if (result.last) |ln| {
+                if (!result.terminates) {
+                    try cfg.addEdge(ln, exit_idx);
+                }
+            } else {
+                try cfg.addEdge(entry_idx, exit_idx);
+            }
         }
 
-        const result = try self.processNode(&cfg, source, body_node, entry_idx);
-        if (result.last) |ln| {
-            if (!result.terminates) {
-                try cfg.addEdge(ln, exit_idx);
-            }
-        } else {
-            try cfg.addEdge(entry_idx, exit_idx);
+        // Auto-dump CFG if configured
+        if (self.dump_cfg_dir) |dir| {
+            dot.writeToFile(&cfg, dir, source.getFilePath(), self.allocator);
         }
 
         return cfg;

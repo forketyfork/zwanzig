@@ -7,7 +7,6 @@ const Diagnostic = checker_mod.Diagnostic;
 const Source = @import("../source.zig").Source;
 const ids = @import("../ids.zig");
 const cfg_mod = @import("../cfg.zig");
-const CfgBuilder = cfg_mod.CfgBuilder;
 const Cfg = cfg_mod.Cfg;
 const CfgNodeId = ids.CfgNodeId;
 const AstNodeId = ids.AstNodeId;
@@ -158,7 +157,7 @@ pub const EmptyCatchEngineChecker = struct {
         diagnostics: *std.ArrayList(Diagnostic),
         context: checker_mod.CheckerContext,
     ) CheckerError!void {
-        var builder = CfgBuilder.init(allocator);
+        var builder = context.createCfgBuilder(allocator);
 
         // Build CFG for the function
         var cfg_opt = builder.buildFromFn(src, fn_node) catch return;
@@ -188,6 +187,17 @@ pub const EmptyCatchEngineChecker = struct {
             if (context.analysis_stats) |stats| {
                 stats.recordRun(engine.getGraph().getDroppedStateCount());
                 stats.recordWidening(engine.getGraph().getWidenedNodeCount(), engine.getGraph().getWideningConvergedCount());
+            }
+
+            // Dump visualizations if requested
+            if (context.dump_exploded_graph_dir) |dir| {
+                engine_mod.dot.writeExplodedGraphToFile(engine.getGraph(), dir, src.getFilePath(), cfg.fn_name, allocator);
+            }
+            if (context.dump_annotated_cfg_dir) |dir| {
+                engine_mod.dot.writeAnnotatedCfgToFile(engine.getGraph(), dir, src.getFilePath(), cfg.fn_name, allocator);
+            }
+            if (context.dump_path_trace_dir) |dir| {
+                engine_mod.dot.writePathTracesToFile(engine.getGraph(), dir, src.getFilePath(), cfg.fn_name, allocator);
             }
 
             // Examine CFG nodes for catch_expr with empty handlers

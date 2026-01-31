@@ -5,6 +5,7 @@ const CheckerError = checker_mod.CheckerError;
 const Diagnostic = checker_mod.Diagnostic;
 const SourceRange = checker_mod.SourceRange;
 const Source = @import("../source.zig").Source;
+const value = @import("../engine/value.zig");
 
 /// Engine-based checker that detects unreachable code using CFG and exploded graph reachability.
 ///
@@ -55,7 +56,7 @@ pub const UnreachableCodeChecker = struct {
         const full_if = tree.fullIf(@enumFromInt(if_node)) orelse return;
 
         const cond_node: u32 = @intFromEnum(full_if.ast.cond_expr);
-        const cond_value = evaluateConstantBool(tree, cond_node);
+        const cond_value = evaluateConditionValue(tree, cond_node);
 
         if (cond_value) |is_true| {
             if (is_true) {
@@ -102,7 +103,7 @@ pub const UnreachableCodeChecker = struct {
         const full_while = tree.fullWhile(@enumFromInt(while_node)) orelse return;
 
         const cond_node: u32 = @intFromEnum(full_while.ast.cond_expr);
-        const cond_value = evaluateConstantBool(tree, cond_node);
+        const cond_value = evaluateConditionValue(tree, cond_node);
 
         if (cond_value) |is_true| {
             if (!is_true) {
@@ -123,39 +124,70 @@ pub const UnreachableCodeChecker = struct {
         }
     }
 
-    fn evaluateConstantBool(tree: *const std.zig.Ast, node: u32) ?bool {
+    fn evaluateConditionValue(tree: *const std.zig.Ast, cond_node: u32) ?bool {
+        // First, try to evaluate as a literal true/false
+        if (value.evaluateBoolLiteral(tree, cond_node)) |literal| {
+            return literal;
+        }
+
+        // If it's an identifier, try to resolve it to a const declaration
         const tags = tree.nodes.items(.tag);
+        if (cond_node >= tags.len) return null;
+        if (tags[cond_node] != .identifier) return null;
+
+        // Get the identifier name
         const main_tokens = tree.nodes.items(.main_token);
-        const token_tags = tree.tokens.items(.tag);
         const token_starts = tree.tokens.items(.start);
+        const token = main_tokens[cond_node];
+        const start = token_starts[token];
 
-        if (node >= tags.len) return null;
+        var len: u32 = 0;
+        while (start + len < tree.source.len) {
+            const c = tree.source[start + len];
+            if (!std.ascii.isAlphanumeric(c) and c != '_') break;
+            len += 1;
+        }
+        const ident_name = tree.source[start .. start + len];
 
-        const tag = tags[node];
-        if (tag == .identifier) {
-            const token = main_tokens[node];
-            if (token >= token_tags.len) return null;
-            if (token_tags[token] != .identifier) return null;
+        // Search for a const declaration with this name in preceding nodes.
+        // Walk backwards from the condition node to find the nearest declaration
+        // and stop at function boundaries to respect lexical scope.
+        var i: usize = cond_node;
+        while (i > 0) {
+            i -= 1;
+            const node_tag = tags[i];
 
-            const start = token_starts[token];
-            const source = tree.source;
+            // Stop at function boundary to respect lexical scope
+            if (node_tag == .fn_decl) break;
 
-            // Get the full identifier length by scanning until a non-identifier character
-            var len: u32 = 0;
-            while (start + len < source.len) {
-                const c = source[start + len];
+            // Look for simple_var_decl (const x = ...) or local_var_decl
+            if (node_tag != .simple_var_decl and node_tag != .local_var_decl) continue;
+
+            const var_decl = tree.fullVarDecl(@enumFromInt(@as(u32, @intCast(i)))) orelse continue;
+
+            // Must be a const (not var)
+            const decl_token = tree.tokens.items(.tag)[var_decl.ast.mut_token];
+            if (decl_token != .keyword_const) continue;
+
+            // Get the declaration name
+            const decl_name_token = var_decl.ast.mut_token + 1;
+            if (decl_name_token >= tree.tokens.items(.start).len) continue;
+            const decl_start = tree.tokens.items(.start)[decl_name_token];
+
+            var decl_len: u32 = 0;
+            while (decl_start + decl_len < tree.source.len) {
+                const c = tree.source[decl_start + decl_len];
                 if (!std.ascii.isAlphanumeric(c) and c != '_') break;
-                len += 1;
+                decl_len += 1;
             }
+            const decl_name = tree.source[decl_start .. decl_start + decl_len];
 
-            // Check for exact match with "false" (5 characters)
-            if (len == 5 and std.mem.eql(u8, source[start .. start + 5], "false")) {
-                return false;
-            }
-            // Check for exact match with "true" (4 characters)
-            if (len == 4 and std.mem.eql(u8, source[start .. start + 4], "true")) {
-                return true;
-            }
+            // Check if names match
+            if (!std.mem.eql(u8, ident_name, decl_name)) continue;
+
+            // Found the declaration, now evaluate its initializer
+            const init_node = var_decl.ast.init_node.unwrap() orelse continue;
+            return value.evaluateBoolLiteral(tree, @intFromEnum(init_node));
         }
 
         return null;
@@ -395,6 +427,86 @@ test "unreachable_code_engine - no false positive for identifiers starting with 
         \\    if (falsey) {
         \\        return 1;
         \\    }
+        \\    return 0;
+        \\}
+    ;
+    var source = Source.init(allocator, "test.zig", code);
+    defer source.deinit();
+
+    var diagnostics: std.ArrayList(Diagnostic) = .empty;
+    defer diagnostics.deinit(allocator);
+    defer for (diagnostics.items) |diag| allocator.free(@constCast(diag.message));
+
+    const context = checker_mod.CheckerContext{ .build_metadata = null };
+    try UnreachableCodeChecker.checker.checkAst(&source, allocator, &diagnostics, context);
+
+    try testing.expectEqual(@as(usize, 0), diagnostics.items.len);
+}
+
+test "unreachable_code_engine - detects const flag false" {
+    const testing = std.testing;
+    const allocator = testing.allocator;
+
+    const code: [:0]const u8 =
+        \\fn foo() i32 {
+        \\    const debug = false;
+        \\    if (debug) {
+        \\        return 1;
+        \\    }
+        \\    return 0;
+        \\}
+    ;
+    var source = Source.init(allocator, "test.zig", code);
+    defer source.deinit();
+
+    var diagnostics: std.ArrayList(Diagnostic) = .empty;
+    defer diagnostics.deinit(allocator);
+    defer for (diagnostics.items) |diag| allocator.free(@constCast(diag.message));
+
+    const context = checker_mod.CheckerContext{ .build_metadata = null };
+    try UnreachableCodeChecker.checker.checkAst(&source, allocator, &diagnostics, context);
+
+    try testing.expectEqual(@as(usize, 1), diagnostics.items.len);
+    try testing.expectEqualStrings("unreachable-code-engine", diagnostics.items[0].rule_id);
+}
+
+test "unreachable_code_engine - detects const flag true else branch" {
+    const testing = std.testing;
+    const allocator = testing.allocator;
+
+    const code: [:0]const u8 =
+        \\fn foo() i32 {
+        \\    const enabled = true;
+        \\    if (enabled) {
+        \\        return 1;
+        \\    } else {
+        \\        return 0;
+        \\    }
+        \\}
+    ;
+    var source = Source.init(allocator, "test.zig", code);
+    defer source.deinit();
+
+    var diagnostics: std.ArrayList(Diagnostic) = .empty;
+    defer diagnostics.deinit(allocator);
+    defer for (diagnostics.items) |diag| allocator.free(@constCast(diag.message));
+
+    const context = checker_mod.CheckerContext{ .build_metadata = null };
+    try UnreachableCodeChecker.checker.checkAst(&source, allocator, &diagnostics, context);
+
+    try testing.expectEqual(@as(usize, 1), diagnostics.items.len);
+    try testing.expectEqualStrings("unreachable-code-engine", diagnostics.items[0].rule_id);
+}
+
+test "unreachable_code_engine - no warning for var flag (may be reassigned)" {
+    const testing = std.testing;
+    const allocator = testing.allocator;
+
+    const code: [:0]const u8 =
+        \\fn foo(cond: bool) i32 {
+        \\    var flag = true;
+        \\    if (cond) flag = false;
+        \\    if (flag) return 1;
         \\    return 0;
         \\}
     ;

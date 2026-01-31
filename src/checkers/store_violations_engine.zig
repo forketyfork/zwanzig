@@ -10,8 +10,6 @@ const config_mod = @import("../config.zig");
 const Config = config_mod.Config;
 const ResourceModel = config_mod.ResourceModel;
 const ids = @import("../ids.zig");
-const cfg_mod = @import("../cfg.zig");
-const CfgBuilder = cfg_mod.CfgBuilder;
 const engine_mod = @import("../engine.zig");
 const AnalysisEngine = engine_mod.AnalysisEngine;
 const store_mod = @import("../engine/store.zig");
@@ -48,7 +46,7 @@ pub const StoreViolationsEngineChecker = struct {
         diagnostics: *std.ArrayList(Diagnostic),
         context: checker_mod.CheckerContext,
     ) CheckerError!void {
-        var builder = CfgBuilder.init(allocator);
+        var builder = context.createCfgBuilder(allocator);
         var cfg_opt = builder.buildFromFn(src, fn_node) catch return;
         if (cfg_opt) |*cfg| {
             defer cfg.deinit();
@@ -85,6 +83,18 @@ pub const StoreViolationsEngineChecker = struct {
                 stats.recordRun(engine.getGraph().getDroppedStateCount());
                 stats.recordWidening(engine.getGraph().getWidenedNodeCount(), engine.getGraph().getWideningConvergedCount());
             }
+
+            // Dump visualizations if requested
+            if (context.dump_exploded_graph_dir) |dir| {
+                engine_mod.dot.writeExplodedGraphToFile(engine.getGraph(), dir, src.getFilePath(), cfg.fn_name, allocator);
+            }
+            if (context.dump_annotated_cfg_dir) |dir| {
+                engine_mod.dot.writeAnnotatedCfgToFile(engine.getGraph(), dir, src.getFilePath(), cfg.fn_name, allocator);
+            }
+            if (context.dump_path_trace_dir) |dir| {
+                engine_mod.dot.writePathTracesToFile(engine.getGraph(), dir, src.getFilePath(), cfg.fn_name, allocator);
+            }
+
             if (!run_ok) return;
 
             var reported: std.ArrayList(StoreViolation) = .empty;

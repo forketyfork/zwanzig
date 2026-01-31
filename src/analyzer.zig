@@ -39,6 +39,10 @@ pub const Analyzer = struct {
     max_states_per_point: ?u32 = null,
     use_widening: ?bool = null,
     config: ?Config = null,
+    dump_cfg_dir: ?[]const u8 = null,
+    dump_exploded_graph_dir: ?[]const u8 = null,
+    dump_annotated_cfg_dir: ?[]const u8 = null,
+    dump_path_trace_dir: ?[]const u8 = null,
 
     pub fn init(allocator: std.mem.Allocator) Analyzer {
         return Analyzer{
@@ -128,6 +132,22 @@ pub const Analyzer = struct {
 
     pub fn setUseWidening(self: *Analyzer, use_w: bool) void {
         self.use_widening = use_w;
+    }
+
+    pub fn setDumpCfgDir(self: *Analyzer, dir: []const u8) void {
+        self.dump_cfg_dir = dir;
+    }
+
+    pub fn setDumpExplodedGraphDir(self: *Analyzer, dir: []const u8) void {
+        self.dump_exploded_graph_dir = dir;
+    }
+
+    pub fn setDumpAnnotatedCfgDir(self: *Analyzer, dir: []const u8) void {
+        self.dump_annotated_cfg_dir = dir;
+    }
+
+    pub fn setDumpPathTraceDir(self: *Analyzer, dir: []const u8) void {
+        self.dump_path_trace_dir = dir;
     }
 
     /// Set the config for resource models and other settings.
@@ -370,6 +390,10 @@ pub const Analyzer = struct {
                 .use_widening = self.use_widening,
             },
             .config = self.getConfig(),
+            .dump_cfg_dir = self.dump_cfg_dir,
+            .dump_exploded_graph_dir = self.dump_exploded_graph_dir,
+            .dump_annotated_cfg_dir = self.dump_annotated_cfg_dir,
+            .dump_path_trace_dir = self.dump_path_trace_dir,
         };
 
         // Run native checkers

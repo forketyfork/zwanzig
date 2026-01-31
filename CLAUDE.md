@@ -66,6 +66,8 @@ nix develop
 - **`Diagnostic`**: Issue report with file path, line/column, rule name, severity, and message. Diagnostics own their message strings; `Analyzer.deinit()` frees them.
 - **`TypeContext`** (`src/type_context.zig`): Unified interface for type queries wrapping the ZIR bridge. Use `getDeclType()`, `classifyIdentifier()`, `isDeclFunction()`, etc.
 - **`ZirBridge`** (`src/zir_bridge.zig`): Generates ZIR from source and extracts typed information (`TypeInfo`, `DeclInfo`).
+- **`AbstractValue`** (`src/engine/value.zig`): Lattice value for abstract interpretation. Supports `unknown`, `null_val`, `non_null`, `int_range`, `concrete_int`, and `concrete_bool`. The engine evaluates boolean and integer literals from const declarations.
+- **`Constraint`** (`src/engine/constraints.zig`): Path constraints for symbolic execution. Includes `int_compare`, `null_check`, `bool_check`, and `var_compare` for path-sensitive analysis.
 
 ### Adding a New Rule
 
@@ -78,6 +80,18 @@ See existing rules in `src/rules/` for patterns. For CFG-based checkers, see `sr
 - `--do <rule>`: Run only specified rules (allowlist, repeatable)
 - `--skip <rule>`: Skip specified rules (blocklist, repeatable)
 - `--do` and `--skip` are mutually exclusive
+- `--dump-cfg <dir>`: Dump CFG DOT files for visualization
+- `--dump-exploded-graph <dir>`: Dump exploded graph showing all (CFG node, state) pairs
+- `--dump-annotated-cfg <dir>`: Dump CFG with state annotations overlaid
+- `--dump-path-trace <dir>`: Dump path traces to violations
+
+See [docs/VISUALIZATION.md](docs/VISUALIZATION.md) for detailed visualization documentation.
+
+## Debugging
+
+### Debug Logging
+
+Set log level at build time or use `-Dlog_level=debug` for verbose output showing rule execution and analysis stats.
 
 ## Testing
 
