@@ -36,6 +36,33 @@ pub const AnalysisStats = struct {
         self.widened_nodes += widened;
         self.widening_converged += converged;
     }
+
+    pub fn merge(self: *AnalysisStats, other: AnalysisStats) void {
+        self.total_runs += other.total_runs;
+        self.runs_with_drops += other.runs_with_drops;
+        self.dropped_states += other.dropped_states;
+        self.widened_nodes += other.widened_nodes;
+        self.widening_converged += other.widening_converged;
+    }
+};
+
+pub const AnalysisResult = struct {
+    diagnostics: std.ArrayList(Diagnostic),
+    stats: AnalysisStats,
+
+    pub fn init() AnalysisResult {
+        return .{
+            .diagnostics = .empty,
+            .stats = .{},
+        };
+    }
+
+    pub fn deinit(self: *AnalysisResult, allocator: std.mem.Allocator) void {
+        for (self.diagnostics.items) |*diag| {
+            diag.deinit(allocator);
+        }
+        self.diagnostics.deinit(allocator);
+    }
 };
 
 pub const AnalysisLimits = struct {

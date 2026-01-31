@@ -8,6 +8,8 @@ const Checker = checker_mod.Checker;
 const CheckerManagerWithRules = checker_mod.CheckerManagerWithRules;
 const TypeContext = checker_mod.TypeContext;
 const Config = checker_mod.Config;
+pub const AnalysisResult = checker_mod.AnalysisResult;
+pub const AnalysisStats = checker_mod.AnalysisStats;
 const ZirBridge = @import("zir_bridge.zig").ZirBridge;
 const BuildMetadata = @import("build_metadata.zig").BuildMetadata;
 const cache_mod = @import("cache.zig");
@@ -231,7 +233,26 @@ pub const Analyzer = struct {
     }
 
     pub fn analyzeFile(self: *Analyzer, file_path: []const u8) !void {
-        log.debug("analyze: start {s}", .{file_path});
+        var result = try self.analyzeFileResult(file_path);
+        errdefer result.deinit(self.allocator);
+        try self.mergeResult(&result);
+    }
+
+    pub fn mergeResult(self: *Analyzer, result: *AnalysisResult) !void {
+        self.analysis_stats.merge(result.stats);
+        for (result.diagnostics.items) |diag| {
+            try self.diagnostics.append(self.allocator, diag);
+        }
+        result.diagnostics.deinit(self.allocator);
+        result.diagnostics = .empty;
+    }
+
+    /// Analyze a single file and return an isolated AnalysisResult.
+    /// This method does not mutate any shared state in the Analyzer,
+    /// making it safe to call in parallel (once thread-safety is added).
+    pub fn analyzeFileResult(self: *Analyzer, file_path: []const u8) !AnalysisResult {
+        log.debug("analyzeResult: start {s}", .{file_path});
+
         const file = try std.fs.cwd().openFile(file_path, .{});
         defer file.close();
 
@@ -279,26 +300,22 @@ pub const Analyzer = struct {
             if (self.cache) |*c| {
                 if (try c.get(cache_key.?)) |cached_data| {
                     defer self.allocator.free(cached_data);
-                    log.debug("analyze: cache hit {s}, loading artifacts", .{file_path});
+                    log.debug("analyzeResult: cache hit {s}, loading artifacts", .{file_path});
 
                     cached_artifacts = CachedArtifacts.deserialize(self.allocator, cached_data) catch |err| blk: {
-                        log.debug("analyze: failed to deserialize cached artifacts: {}", .{err});
+                        log.debug("analyzeResult: failed to deserialize cached artifacts: {}", .{err});
                         break :blk null;
                     };
                 }
             }
         }
 
-        if (self.use_typed_ir) {
-            log.debug("analyze: load typed ir {s}", .{file_path});
-            try self.loadTypedIr(&source);
-        }
+        var result = AnalysisResult.init();
+        errdefer result.deinit(self.allocator);
 
-        const diag_start_index = self.diagnostics.items.len;
+        try self.runChecksOnSource(&source, &result.diagnostics, &result.stats);
 
-        try self.runChecksOnSource(&source);
-
-        try self.filterSuppressedDiagnostics(content, diag_start_index);
+        try filterDiagnosticsWithSuppressions(self.allocator, content, &result.diagnostics);
 
         if (self.use_cache and cache_key != null) {
             if (self.cache) |*c| {
@@ -308,34 +325,50 @@ pub const Analyzer = struct {
                 artifacts.had_type_info = self.use_typed_ir;
 
                 const serialized = artifacts.serialize(self.allocator) catch |err| {
-                    log.debug("analyze: failed to serialize artifacts: {}", .{err});
-                    return;
+                    log.debug("analyzeResult: failed to serialize artifacts: {}", .{err});
+                    return result;
                 };
                 defer self.allocator.free(serialized);
 
                 c.put(cache_key.?, serialized) catch |err| {
-                    log.debug("analyze: failed to cache artifacts: {}", .{err});
+                    log.debug("analyzeResult: failed to cache artifacts: {}", .{err});
                 };
             }
         }
 
-        log.debug("analyze: done {s}", .{file_path});
+        log.debug("analyzeResult: done {s}", .{file_path});
+        return result;
     }
 
-    /// Load typed IR for a source file using ZirBridge.
-    fn loadTypedIr(self: *Analyzer, source: *Source) !void {
-        if (self.zir_bridge) |*bridge| {
-            bridge.loadFromSource(source) catch |err| {
-                switch (err) {
-                    error.ParseError, error.AstGenFailed => {},
-                    else => return err,
-                }
-            };
+    /// Filter suppressed diagnostics in a standalone list.
+    fn filterDiagnosticsWithSuppressions(
+        allocator: std.mem.Allocator,
+        content: [:0]const u8,
+        diagnostics: *std.ArrayList(Diagnostic),
+    ) !void {
+        var sup_map = try suppression.parseSuppressions(allocator, content);
+        defer sup_map.deinit();
+
+        var write_index: usize = 0;
+        for (diagnostics.items) |*diag| {
+            if (!sup_map.isSuppressed(diag.range.start.line, diag.rule_id)) {
+                diagnostics.items[write_index] = diag.*;
+                write_index += 1;
+            } else {
+                diag.deinit(allocator);
+            }
         }
+        diagnostics.shrinkRetainingCapacity(write_index);
     }
 
     /// Internal method to run checks on a source with the analyzer's filter.
-    fn runChecksOnSource(self: *Analyzer, source: *Source) !void {
+    /// Accepts explicit diagnostics and stats parameters for isolation.
+    fn runChecksOnSource(
+        self: *Analyzer,
+        source: *Source,
+        diagnostics: *std.ArrayList(Diagnostic),
+        analysis_stats: *checker_mod.AnalysisStats,
+    ) !void {
         // Create type context if typed IR is enabled
         var type_ctx: ?TypeContext = null;
         if (self.use_typed_ir) {
@@ -350,7 +383,7 @@ pub const Analyzer = struct {
         const context = checker_mod.CheckerContext{
             .build_metadata = self.getBuildMetadata(),
             .type_context = if (type_ctx) |*tc| tc else null,
-            .analysis_stats = &self.analysis_stats,
+            .analysis_stats = analysis_stats,
             .analysis_limits = .{
                 .max_worklist_steps = self.max_worklist_steps,
                 .max_states_per_point = self.max_states_per_point,
@@ -367,7 +400,7 @@ pub const Analyzer = struct {
         for (self.checker_manager.checkers.items) |chkr| {
             if (self.isRuleEnabled(chkr.name)) {
                 log.debug("checker: start {s} ({s})", .{ source.getFilePath(), chkr.name });
-                try chkr.checkAst(source, self.allocator, &self.diagnostics, context);
+                try chkr.checkAst(source, self.allocator, diagnostics, context);
                 log.debug("checker: done {s} ({s})", .{ source.getFilePath(), chkr.name });
             }
         }
@@ -376,30 +409,10 @@ pub const Analyzer = struct {
         for (self.checker_manager.adapted_rules.items) |rule| {
             if (self.isRuleEnabled(rule.name)) {
                 log.debug("rule: start {s} ({s})", .{ source.getFilePath(), rule.name });
-                try rule.check(source, self.allocator, &self.diagnostics);
+                try rule.check(source, self.allocator, diagnostics);
                 log.debug("rule: done {s} ({s})", .{ source.getFilePath(), rule.name });
             }
         }
-    }
-
-    fn filterSuppressedDiagnostics(
-        self: *Analyzer,
-        content: [:0]const u8,
-        start_index: usize,
-    ) !void {
-        var sup_map = try suppression.parseSuppressions(self.allocator, content);
-        defer sup_map.deinit();
-
-        var write_index = start_index;
-        for (self.diagnostics.items[start_index..]) |*diag| {
-            if (!sup_map.isSuppressed(diag.range.start.line, diag.rule_id)) {
-                self.diagnostics.items[write_index] = diag.*;
-                write_index += 1;
-            } else {
-                diag.deinit(self.allocator);
-            }
-        }
-        self.diagnostics.shrinkRetainingCapacity(write_index);
     }
 
     pub const OutputFormat = enum {

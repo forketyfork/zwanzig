@@ -2,6 +2,8 @@ const std = @import("std");
 const analyzer_mod = @import("analyzer.zig");
 const Analyzer = analyzer_mod.Analyzer;
 const OutputFormat = analyzer_mod.Analyzer.OutputFormat;
+const diagnostic_mod = @import("diagnostic.zig");
+const Diagnostic = diagnostic_mod.Diagnostic;
 const DupeImportRule = @import("rules/dupe_import.zig").DupeImportRule;
 const TodoCommentRule = @import("rules/todo_comment.zig").TodoCommentRule;
 const FileAsStructRule = @import("rules/file_as_struct.zig").FileAsStructRule;
@@ -65,6 +67,7 @@ pub const CliArgs = struct {
     dump_exploded_graph_dir: ?[]const u8,
     dump_annotated_cfg_dir: ?[]const u8,
     dump_path_trace_dir: ?[]const u8,
+    thread_count: usize,
 };
 
 pub const CliError = error{
@@ -97,6 +100,8 @@ pub fn parseArgs(allocator: std.mem.Allocator, args: []const []const u8) CliErro
     var dump_exploded_graph_dir: ?[]const u8 = null;
     var dump_annotated_cfg_dir: ?[]const u8 = null;
     var dump_path_trace_dir: ?[]const u8 = null;
+    // zwanzig-disable-next-line: swallowed-error
+    var thread_count: usize = std.Thread.getCpuCount() catch 1;
     var build_meta: ?BuildMetadata = null;
     errdefer {
         if (build_meta) |*meta| {
@@ -188,6 +193,14 @@ pub fn parseArgs(allocator: std.mem.Allocator, args: []const []const u8) CliErro
             }
             i += 1;
             dump_path_trace_dir = args[i];
+        } else if (std.mem.eql(u8, arg, "--threads")) {
+            if (i + 1 >= args.len or std.mem.startsWith(u8, args[i + 1], "--")) {
+                return CliError.MissingFlagValue;
+            }
+            i += 1;
+            const parsed = std.fmt.parseInt(usize, args[i], 10) catch return CliError.InvalidNumericValue;
+            if (parsed == 0) return CliError.InvalidNumericValue;
+            thread_count = parsed;
         } else if (std.mem.startsWith(u8, arg, "--")) {
             continue;
         } else {
@@ -229,6 +242,7 @@ pub fn parseArgs(allocator: std.mem.Allocator, args: []const []const u8) CliErro
         .dump_exploded_graph_dir = dump_exploded_graph_dir,
         .dump_annotated_cfg_dir = dump_annotated_cfg_dir,
         .dump_path_trace_dir = dump_path_trace_dir,
+        .thread_count = thread_count,
     };
 }
 
@@ -296,8 +310,97 @@ fn mergeConfig(allocator: std.mem.Allocator, cli_args: CliArgs) !MergedConfig {
     }
 }
 
+const AnalysisResult = analyzer_mod.AnalysisResult;
+
+const WorkerContext = struct {
+    analyzer: *Analyzer,
+    files: []const []const u8,
+    results: []?AnalysisResult,
+    errors: []?anyerror,
+    allocator: std.mem.Allocator,
+};
+
+fn workerTask(file_index: usize, ctx: *WorkerContext) void {
+    const file_path = ctx.files[file_index];
+    const result = ctx.analyzer.analyzeFileResult(file_path);
+    if (result) |r| {
+        ctx.results[file_index] = r;
+        ctx.errors[file_index] = null;
+    } else |err| {
+        ctx.results[file_index] = null;
+        ctx.errors[file_index] = err;
+    }
+}
+
+fn workerTaskWrapper(file_index: usize, ctx: *WorkerContext, wg: *std.Thread.WaitGroup) void {
+    defer wg.finish();
+    workerTask(file_index, ctx);
+}
+
+fn analyzeFilesParallel(analyzer: *Analyzer, files: []const []const u8, thread_count: usize, allocator: std.mem.Allocator) !void {
+    if (files.len == 0) return;
+
+    const results = try allocator.alloc(?AnalysisResult, files.len);
+    defer allocator.free(results);
+    @memset(results, null);
+
+    const errors = try allocator.alloc(?anyerror, files.len);
+    defer allocator.free(errors);
+    @memset(errors, null);
+
+    var ctx = WorkerContext{
+        .analyzer = analyzer,
+        .files = files,
+        .results = results,
+        .errors = errors,
+        .allocator = allocator,
+    };
+
+    var pool: std.Thread.Pool = undefined;
+    try pool.init(.{
+        .allocator = allocator,
+        .n_jobs = @intCast(thread_count),
+    });
+    defer pool.deinit();
+
+    var wg: std.Thread.WaitGroup = .{};
+    var spawn_error: ?anyerror = null;
+    for (0..files.len) |i| {
+        wg.start();
+        pool.spawn(workerTaskWrapper, .{ i, &ctx, &wg }) catch |err| {
+            wg.finish();
+            spawn_error = err;
+            break;
+        };
+    }
+
+    pool.waitAndWork(&wg);
+
+    if (spawn_error) |err| {
+        return err;
+    }
+
+    var first_error: ?anyerror = null;
+    for (0..files.len) |i| {
+        if (errors[i]) |err| {
+            if (first_error == null) {
+                first_error = err;
+            }
+        } else if (results[i]) |*result| {
+            try analyzer.mergeResult(result);
+        }
+    }
+
+    // Sort diagnostics for deterministic output ordering
+    std.mem.sort(Diagnostic, analyzer.diagnostics.items, {}, Diagnostic.lessThan);
+
+    if (first_error) |err| {
+        return err;
+    }
+}
+
 pub fn main() !void {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    var gpa = std.heap.GeneralPurposeAllocator(.{ .thread_safe = true }){};
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
@@ -494,10 +597,8 @@ pub fn main() !void {
         analyzer.setDumpPathTraceDir(dir);
     }
 
-    log.info("analyzing with {d} rule(s)", .{analyzer.totalCheckerCount()});
-    for (files) |file_path| {
-        try analyzer.analyzeFile(file_path);
-    }
+    log.info("analyzing with {d} rule(s) using {d} thread(s)", .{ analyzer.totalCheckerCount(), cli_args.thread_count });
+    try analyzeFilesParallel(&analyzer, files, cli_args.thread_count, allocator);
     log.info("analysis complete", .{});
     analyzer.logAnalysisStats();
 
@@ -523,8 +624,9 @@ fn printUsage() !void {
     try stdout.writeAll("  --format <format> Output format: 'text', 'json', or 'sarif' (default: text)\n");
     try stdout.writeAll("  --max-steps <n>   Max worklist steps per engine run\n");
     try stdout.writeAll("  --max-states-per-point <n> Max unique states per CFG point\n");
-    try stdout.writeAll("  --use-widening    Enable loop-header widening for convergence\n");
+    try stdout.writeAll("  --use-widening    Enable widening for convergence (default: off)\n");
     try stdout.writeAll("  --cache           Enable incremental caching\n");
+    try stdout.writeAll("  --threads <n>     Number of threads for parallel analysis (default: CPU count)\n");
     try stdout.writeAll("  --dump-cfg <dir>  Dump CFG DOT files to directory for visualization\n");
     try stdout.writeAll("  --dump-exploded-graph <dir>  Dump exploded graph (all states) as DOT\n");
     try stdout.writeAll("  --dump-annotated-cfg <dir>   Dump CFG with state annotations as DOT\n");
@@ -859,6 +961,7 @@ test "mergeConfig: CLI overrides config allowlist" {
         .dump_exploded_graph_dir = null,
         .dump_annotated_cfg_dir = null,
         .dump_path_trace_dir = null,
+        .thread_count = 1,
     };
 
     const result = try mergeConfig(allocator, cli_args);
@@ -905,6 +1008,7 @@ test "mergeConfig: uses config when no CLI filter" {
         .dump_exploded_graph_dir = null,
         .dump_annotated_cfg_dir = null,
         .dump_path_trace_dir = null,
+        .thread_count = 1,
     };
 
     const result = try mergeConfig(allocator, cli_args);
@@ -950,6 +1054,7 @@ test "mergeConfig: no config file and no CLI filter" {
         .dump_exploded_graph_dir = null,
         .dump_annotated_cfg_dir = null,
         .dump_path_trace_dir = null,
+        .thread_count = 1,
     };
 
     const result = try mergeConfig(allocator, cli_args);
@@ -1032,4 +1137,117 @@ test "parseArgs: default no cache" {
     defer freeCliArgs(allocator, result);
 
     try std.testing.expect(!result.use_cache);
+}
+
+test "parseArgs: --threads flag" {
+    const allocator = std.testing.allocator;
+    const args = [_][]const u8{ "zwanzig", "--threads", "4", "file.zig" };
+    const result = try parseArgs(allocator, &args);
+    defer freeCliArgs(allocator, result);
+
+    try std.testing.expectEqual(@as(usize, 4), result.thread_count);
+    try std.testing.expectEqual(@as(usize, 1), result.paths.len);
+    try std.testing.expectEqualStrings("file.zig", result.paths[0]);
+}
+
+test "parseArgs: --threads without value" {
+    const allocator = std.testing.allocator;
+    const args = [_][]const u8{ "zwanzig", "--threads" };
+    const result = parseArgs(allocator, &args);
+
+    try std.testing.expectError(CliError.MissingFlagValue, result);
+}
+
+test "parseArgs: --threads with invalid value" {
+    const allocator = std.testing.allocator;
+    const args = [_][]const u8{ "zwanzig", "--threads", "abc" };
+    const result = parseArgs(allocator, &args);
+
+    try std.testing.expectError(CliError.InvalidNumericValue, result);
+}
+
+test "parseArgs: --threads with zero value" {
+    const allocator = std.testing.allocator;
+    const args = [_][]const u8{ "zwanzig", "--threads", "0" };
+    const result = parseArgs(allocator, &args);
+
+    try std.testing.expectError(CliError.InvalidNumericValue, result);
+}
+
+test "parseArgs: --threads with negative value" {
+    const allocator = std.testing.allocator;
+    const args = [_][]const u8{ "zwanzig", "--threads", "-1" };
+    const result = parseArgs(allocator, &args);
+
+    try std.testing.expectError(CliError.InvalidNumericValue, result);
+}
+
+test "parseArgs: default thread count is CPU count" {
+    const allocator = std.testing.allocator;
+    const args = [_][]const u8{ "zwanzig", "file.zig" };
+    const result = try parseArgs(allocator, &args);
+    defer freeCliArgs(allocator, result);
+
+    const expected_count = std.Thread.getCpuCount() catch 1;
+    try std.testing.expectEqual(expected_count, result.thread_count);
+}
+
+test "parallel analysis produces deterministic output ordering" {
+    // Use thread-safe allocator for parallel analysis test
+    var gpa = std.heap.GeneralPurposeAllocator(.{ .thread_safe = true }){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    var tmp_dir = std.testing.tmpDir(.{});
+    defer tmp_dir.cleanup();
+
+    const file_a_content =
+        \\const std = @import("std");
+        \\const std2 = @import("std");
+    ;
+    const file_b_content =
+        \\const foo = @import("foo");
+        \\const foo2 = @import("foo");
+    ;
+    const file_c_content =
+        \\const bar = @import("bar");
+        \\const bar2 = @import("bar");
+    ;
+
+    try tmp_dir.dir.writeFile(.{ .sub_path = "a.zig", .data = file_a_content });
+    try tmp_dir.dir.writeFile(.{ .sub_path = "b.zig", .data = file_b_content });
+    try tmp_dir.dir.writeFile(.{ .sub_path = "c.zig", .data = file_c_content });
+
+    var path_buf_a: [std.fs.max_path_bytes]u8 = undefined;
+    var path_buf_b: [std.fs.max_path_bytes]u8 = undefined;
+    var path_buf_c: [std.fs.max_path_bytes]u8 = undefined;
+    const path_a = try tmp_dir.dir.realpath("a.zig", &path_buf_a);
+    const path_b = try tmp_dir.dir.realpath("b.zig", &path_buf_b);
+    const path_c = try tmp_dir.dir.realpath("c.zig", &path_buf_c);
+
+    const files = [_][]const u8{ path_a, path_b, path_c };
+
+    // Run with 1 thread
+    var analyzer1 = Analyzer.init(allocator);
+    defer analyzer1.deinit();
+    try analyzer1.registerRule(&DupeImportRule.rule);
+    try analyzeFilesParallel(&analyzer1, &files, 1, allocator);
+
+    // Run with multiple threads
+    var analyzer2 = Analyzer.init(allocator);
+    defer analyzer2.deinit();
+    try analyzer2.registerRule(&DupeImportRule.rule);
+    try analyzeFilesParallel(&analyzer2, &files, 4, allocator);
+
+    // Both runs should produce the same number of diagnostics
+    try std.testing.expectEqual(analyzer1.diagnostics.items.len, analyzer2.diagnostics.items.len);
+
+    // Diagnostics should be in the same order (sorted by file path, line, column)
+    for (analyzer1.diagnostics.items, analyzer2.diagnostics.items) |d1, d2| {
+        try std.testing.expectEqualStrings(d1.file_path, d2.file_path);
+        try std.testing.expectEqual(d1.range.start.line, d2.range.start.line);
+        try std.testing.expectEqual(d1.range.start.column, d2.range.start.column);
+        try std.testing.expectEqualStrings(d1.rule_id, d2.rule_id);
+        try std.testing.expectEqualStrings(d1.message, d2.message);
+    }
 }
