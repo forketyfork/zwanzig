@@ -624,7 +624,7 @@ fn printUsage() !void {
     try stdout.writeAll("  --format <format> Output format: 'text', 'json', or 'sarif' (default: text)\n");
     try stdout.writeAll("  --max-steps <n>   Max worklist steps per engine run\n");
     try stdout.writeAll("  --max-states-per-point <n> Max unique states per CFG point\n");
-    try stdout.writeAll("  --use-widening    Enable widening for convergence (default: on)\n");
+    try stdout.writeAll("  --use-widening    Enable widening for convergence (default: off)\n");
     try stdout.writeAll("  --cache           Enable incremental caching\n");
     try stdout.writeAll("  --threads <n>     Number of threads for parallel analysis (default: CPU count)\n");
     try stdout.writeAll("  --dump-cfg <dir>  Dump CFG DOT files to directory for visualization\n");
@@ -1193,7 +1193,10 @@ test "parseArgs: default thread count is CPU count" {
 }
 
 test "parallel analysis produces deterministic output ordering" {
-    const allocator = std.testing.allocator;
+    // Use thread-safe allocator for parallel analysis test
+    var gpa = std.heap.GeneralPurposeAllocator(.{ .thread_safe = true }){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
 
     var tmp_dir = std.testing.tmpDir(.{});
     defer tmp_dir.cleanup();
