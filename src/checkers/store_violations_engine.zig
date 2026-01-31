@@ -53,6 +53,9 @@ pub const StoreViolationsEngineChecker = struct {
         if (cfg_opt) |*cfg| {
             defer cfg.deinit();
 
+            // Dump CFG if requested
+            context.dumpCfg(allocator, cfg, src.getFilePath());
+
             // Create a TypeContext for type-aware analysis
             var type_ctx = TypeContext.init(allocator, src);
             defer type_ctx.deinit();

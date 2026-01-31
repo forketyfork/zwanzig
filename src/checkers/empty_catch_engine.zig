@@ -165,6 +165,9 @@ pub const EmptyCatchEngineChecker = struct {
         if (cfg_opt) |*cfg| {
             defer cfg.deinit();
 
+            // Dump CFG if requested
+            context.dumpCfg(allocator, cfg, src.getFilePath());
+
             // Run the analysis engine with a worklist limit to avoid pathological cases
             var engine = AnalysisEngine.initWithSource(allocator, cfg, src);
             defer engine.deinit();

@@ -60,6 +60,10 @@ pub const SwallowedErrorChecker = struct {
         var cfg_opt = builder.buildFromFn(src, fn_node) catch return;
         if (cfg_opt) |*cfg| {
             defer cfg.deinit();
+
+            // Dump CFG if requested
+            context.dumpCfg(allocator, cfg, src.getFilePath());
+
             const tree = src.ast() catch return;
             const data = tree.nodes.items(.data);
 
