@@ -624,7 +624,7 @@ fn printUsage() !void {
     try stdout.writeAll("  --format <format> Output format: 'text', 'json', or 'sarif' (default: text)\n");
     try stdout.writeAll("  --max-steps <n>   Max worklist steps per engine run\n");
     try stdout.writeAll("  --max-states-per-point <n> Max unique states per CFG point\n");
-    try stdout.writeAll("  --use-widening    Enable loop-header widening for convergence\n");
+    try stdout.writeAll("  --use-widening    Enable widening for convergence (default: on)\n");
     try stdout.writeAll("  --cache           Enable incremental caching\n");
     try stdout.writeAll("  --threads <n>     Number of threads for parallel analysis (default: CPU count)\n");
     try stdout.writeAll("  --dump-cfg <dir>  Dump CFG DOT files to directory for visualization\n");
@@ -1190,4 +1190,61 @@ test "parseArgs: default thread count is CPU count" {
 
     const expected_count = std.Thread.getCpuCount() catch 1;
     try std.testing.expectEqual(expected_count, result.thread_count);
+}
+
+test "parallel analysis produces deterministic output ordering" {
+    const allocator = std.testing.allocator;
+
+    var tmp_dir = std.testing.tmpDir(.{});
+    defer tmp_dir.cleanup();
+
+    const file_a_content =
+        \\const std = @import("std");
+        \\const std2 = @import("std");
+    ;
+    const file_b_content =
+        \\const foo = @import("foo");
+        \\const foo2 = @import("foo");
+    ;
+    const file_c_content =
+        \\const bar = @import("bar");
+        \\const bar2 = @import("bar");
+    ;
+
+    try tmp_dir.dir.writeFile(.{ .sub_path = "a.zig", .data = file_a_content });
+    try tmp_dir.dir.writeFile(.{ .sub_path = "b.zig", .data = file_b_content });
+    try tmp_dir.dir.writeFile(.{ .sub_path = "c.zig", .data = file_c_content });
+
+    var path_buf_a: [std.fs.max_path_bytes]u8 = undefined;
+    var path_buf_b: [std.fs.max_path_bytes]u8 = undefined;
+    var path_buf_c: [std.fs.max_path_bytes]u8 = undefined;
+    const path_a = try tmp_dir.dir.realpath("a.zig", &path_buf_a);
+    const path_b = try tmp_dir.dir.realpath("b.zig", &path_buf_b);
+    const path_c = try tmp_dir.dir.realpath("c.zig", &path_buf_c);
+
+    const files = [_][]const u8{ path_a, path_b, path_c };
+
+    // Run with 1 thread
+    var analyzer1 = Analyzer.init(allocator);
+    defer analyzer1.deinit();
+    try analyzer1.registerRule(&DupeImportRule.rule);
+    try analyzeFilesParallel(&analyzer1, &files, 1, allocator);
+
+    // Run with multiple threads
+    var analyzer2 = Analyzer.init(allocator);
+    defer analyzer2.deinit();
+    try analyzer2.registerRule(&DupeImportRule.rule);
+    try analyzeFilesParallel(&analyzer2, &files, 4, allocator);
+
+    // Both runs should produce the same number of diagnostics
+    try std.testing.expectEqual(analyzer1.diagnostics.items.len, analyzer2.diagnostics.items.len);
+
+    // Diagnostics should be in the same order (sorted by file path, line, column)
+    for (analyzer1.diagnostics.items, analyzer2.diagnostics.items) |d1, d2| {
+        try std.testing.expectEqualStrings(d1.file_path, d2.file_path);
+        try std.testing.expectEqual(d1.range.start.line, d2.range.start.line);
+        try std.testing.expectEqual(d1.range.start.column, d2.range.start.column);
+        try std.testing.expectEqualStrings(d1.rule_id, d2.rule_id);
+        try std.testing.expectEqualStrings(d1.message, d2.message);
+    }
 }
