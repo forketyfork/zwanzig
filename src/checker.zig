@@ -15,6 +15,7 @@ const config_mod = @import("config.zig");
 pub const Config = config_mod.Config;
 const cfg_mod = @import("cfg.zig");
 pub const Cfg = cfg_mod.Cfg;
+const ids = @import("ids.zig");
 
 const log = std.log.scoped(.checker);
 
@@ -117,13 +118,15 @@ pub const CheckerContext = struct {
         };
         defer allocator.free(dot);
 
-        // Build filename: <source_basename>_<fn_name>.dot
+        // Build filename: <source_basename>_<fn_name>_<ast_idx>.dot
+        // The AST index suffix guarantees uniqueness for functions with the same name
         const basename = std.fs.path.basename(source_path);
         const stem = if (std.mem.lastIndexOf(u8, basename, ".")) |idx| basename[0..idx] else basename;
         const fn_name = cfg.fn_name orelse "anonymous";
+        const ast_idx = if (cfg.fn_ast_node) |node| ids.astIndex(node) else 0;
 
         var path_buf: [std.fs.max_path_bytes]u8 = undefined;
-        const file_path = std.fmt.bufPrint(&path_buf, "{s}/{s}_{s}.dot", .{ dir, stem, fn_name }) catch {
+        const file_path = std.fmt.bufPrint(&path_buf, "{s}/{s}_{s}_{d}.dot", .{ dir, stem, fn_name, ast_idx }) catch {
             log.warn("CFG DOT path too long", .{});
             return;
         };
