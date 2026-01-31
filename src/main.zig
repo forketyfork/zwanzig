@@ -65,6 +65,7 @@ pub const CliArgs = struct {
     dump_exploded_graph_dir: ?[]const u8,
     dump_annotated_cfg_dir: ?[]const u8,
     dump_path_trace_dir: ?[]const u8,
+    thread_count: usize,
 };
 
 pub const CliError = error{
@@ -97,6 +98,8 @@ pub fn parseArgs(allocator: std.mem.Allocator, args: []const []const u8) CliErro
     var dump_exploded_graph_dir: ?[]const u8 = null;
     var dump_annotated_cfg_dir: ?[]const u8 = null;
     var dump_path_trace_dir: ?[]const u8 = null;
+    // zwanzig-disable-next-line: swallowed-error
+    var thread_count: usize = std.Thread.getCpuCount() catch 1;
     var build_meta: ?BuildMetadata = null;
     errdefer {
         if (build_meta) |*meta| {
@@ -188,6 +191,14 @@ pub fn parseArgs(allocator: std.mem.Allocator, args: []const []const u8) CliErro
             }
             i += 1;
             dump_path_trace_dir = args[i];
+        } else if (std.mem.eql(u8, arg, "--threads")) {
+            if (i + 1 >= args.len or std.mem.startsWith(u8, args[i + 1], "--")) {
+                return CliError.MissingFlagValue;
+            }
+            i += 1;
+            const parsed = std.fmt.parseInt(usize, args[i], 10) catch return CliError.InvalidNumericValue;
+            if (parsed == 0) return CliError.InvalidNumericValue;
+            thread_count = parsed;
         } else if (std.mem.startsWith(u8, arg, "--")) {
             continue;
         } else {
@@ -229,6 +240,7 @@ pub fn parseArgs(allocator: std.mem.Allocator, args: []const []const u8) CliErro
         .dump_exploded_graph_dir = dump_exploded_graph_dir,
         .dump_annotated_cfg_dir = dump_annotated_cfg_dir,
         .dump_path_trace_dir = dump_path_trace_dir,
+        .thread_count = thread_count,
     };
 }
 
@@ -293,6 +305,83 @@ fn mergeConfig(allocator: std.mem.Allocator, cli_args: CliArgs) !MergedConfig {
                 .resource_models = resource_models,
             };
         },
+    }
+}
+
+const AnalysisResult = analyzer_mod.AnalysisResult;
+
+const WorkerContext = struct {
+    analyzer: *Analyzer,
+    files: []const []const u8,
+    results: []?AnalysisResult,
+    errors: []?anyerror,
+    allocator: std.mem.Allocator,
+};
+
+fn workerTask(file_index: usize, ctx: *WorkerContext) void {
+    const file_path = ctx.files[file_index];
+    const result = ctx.analyzer.analyzeFileResult(file_path);
+    if (result) |r| {
+        ctx.results[file_index] = r;
+        ctx.errors[file_index] = null;
+    } else |err| {
+        ctx.results[file_index] = null;
+        ctx.errors[file_index] = err;
+    }
+}
+
+fn workerTaskWrapper(file_index: usize, ctx: *WorkerContext, wg: *std.Thread.WaitGroup) void {
+    defer wg.finish();
+    workerTask(file_index, ctx);
+}
+
+fn analyzeFilesParallel(analyzer: *Analyzer, files: []const []const u8, thread_count: usize, allocator: std.mem.Allocator) !void {
+    if (files.len == 0) return;
+
+    const results = try allocator.alloc(?AnalysisResult, files.len);
+    defer allocator.free(results);
+    @memset(results, null);
+
+    const errors = try allocator.alloc(?anyerror, files.len);
+    defer allocator.free(errors);
+    @memset(errors, null);
+
+    var ctx = WorkerContext{
+        .analyzer = analyzer,
+        .files = files,
+        .results = results,
+        .errors = errors,
+        .allocator = allocator,
+    };
+
+    var pool: std.Thread.Pool = undefined;
+    try pool.init(.{
+        .allocator = allocator,
+        .n_jobs = @intCast(thread_count),
+    });
+    defer pool.deinit();
+
+    var wg: std.Thread.WaitGroup = .{};
+    for (0..files.len) |i| {
+        wg.start();
+        try pool.spawn(workerTaskWrapper, .{ i, &ctx, &wg });
+    }
+
+    pool.waitAndWork(&wg);
+
+    var first_error: ?anyerror = null;
+    for (0..files.len) |i| {
+        if (errors[i]) |err| {
+            if (first_error == null) {
+                first_error = err;
+            }
+        } else if (results[i]) |*result| {
+            try analyzer.mergeResult(result);
+        }
+    }
+
+    if (first_error) |err| {
+        return err;
     }
 }
 
@@ -494,10 +583,8 @@ pub fn main() !void {
         analyzer.setDumpPathTraceDir(dir);
     }
 
-    log.info("analyzing with {d} rule(s)", .{analyzer.totalCheckerCount()});
-    for (files) |file_path| {
-        try analyzer.analyzeFile(file_path);
-    }
+    log.info("analyzing with {d} rule(s) using {d} thread(s)", .{ analyzer.totalCheckerCount(), cli_args.thread_count });
+    try analyzeFilesParallel(&analyzer, files, cli_args.thread_count, allocator);
     log.info("analysis complete", .{});
     analyzer.logAnalysisStats();
 
@@ -525,6 +612,7 @@ fn printUsage() !void {
     try stdout.writeAll("  --max-states-per-point <n> Max unique states per CFG point\n");
     try stdout.writeAll("  --use-widening    Enable loop-header widening for convergence\n");
     try stdout.writeAll("  --cache           Enable incremental caching\n");
+    try stdout.writeAll("  --threads <n>     Number of threads for parallel analysis (default: CPU count)\n");
     try stdout.writeAll("  --dump-cfg <dir>  Dump CFG DOT files to directory for visualization\n");
     try stdout.writeAll("  --dump-exploded-graph <dir>  Dump exploded graph (all states) as DOT\n");
     try stdout.writeAll("  --dump-annotated-cfg <dir>   Dump CFG with state annotations as DOT\n");
@@ -859,6 +947,7 @@ test "mergeConfig: CLI overrides config allowlist" {
         .dump_exploded_graph_dir = null,
         .dump_annotated_cfg_dir = null,
         .dump_path_trace_dir = null,
+        .thread_count = 1,
     };
 
     const result = try mergeConfig(allocator, cli_args);
@@ -905,6 +994,7 @@ test "mergeConfig: uses config when no CLI filter" {
         .dump_exploded_graph_dir = null,
         .dump_annotated_cfg_dir = null,
         .dump_path_trace_dir = null,
+        .thread_count = 1,
     };
 
     const result = try mergeConfig(allocator, cli_args);
@@ -950,6 +1040,7 @@ test "mergeConfig: no config file and no CLI filter" {
         .dump_exploded_graph_dir = null,
         .dump_annotated_cfg_dir = null,
         .dump_path_trace_dir = null,
+        .thread_count = 1,
     };
 
     const result = try mergeConfig(allocator, cli_args);
@@ -1032,4 +1123,57 @@ test "parseArgs: default no cache" {
     defer freeCliArgs(allocator, result);
 
     try std.testing.expect(!result.use_cache);
+}
+
+test "parseArgs: --threads flag" {
+    const allocator = std.testing.allocator;
+    const args = [_][]const u8{ "zwanzig", "--threads", "4", "file.zig" };
+    const result = try parseArgs(allocator, &args);
+    defer freeCliArgs(allocator, result);
+
+    try std.testing.expectEqual(@as(usize, 4), result.thread_count);
+    try std.testing.expectEqual(@as(usize, 1), result.paths.len);
+    try std.testing.expectEqualStrings("file.zig", result.paths[0]);
+}
+
+test "parseArgs: --threads without value" {
+    const allocator = std.testing.allocator;
+    const args = [_][]const u8{ "zwanzig", "--threads" };
+    const result = parseArgs(allocator, &args);
+
+    try std.testing.expectError(CliError.MissingFlagValue, result);
+}
+
+test "parseArgs: --threads with invalid value" {
+    const allocator = std.testing.allocator;
+    const args = [_][]const u8{ "zwanzig", "--threads", "abc" };
+    const result = parseArgs(allocator, &args);
+
+    try std.testing.expectError(CliError.InvalidNumericValue, result);
+}
+
+test "parseArgs: --threads with zero value" {
+    const allocator = std.testing.allocator;
+    const args = [_][]const u8{ "zwanzig", "--threads", "0" };
+    const result = parseArgs(allocator, &args);
+
+    try std.testing.expectError(CliError.InvalidNumericValue, result);
+}
+
+test "parseArgs: --threads with negative value" {
+    const allocator = std.testing.allocator;
+    const args = [_][]const u8{ "zwanzig", "--threads", "-1" };
+    const result = parseArgs(allocator, &args);
+
+    try std.testing.expectError(CliError.InvalidNumericValue, result);
+}
+
+test "parseArgs: default thread count is CPU count" {
+    const allocator = std.testing.allocator;
+    const args = [_][]const u8{ "zwanzig", "file.zig" };
+    const result = try parseArgs(allocator, &args);
+    defer freeCliArgs(allocator, result);
+
+    const expected_count = std.Thread.getCpuCount() catch 1;
+    try std.testing.expectEqual(expected_count, result.thread_count);
 }
