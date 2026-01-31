@@ -262,6 +262,44 @@ fn foo(x: i32) void {
 }
 ```
 
+### sentinel-alloc
+
+Detects sentinel-terminated allocations that can cause memory mismatch bugs when freed.
+
+Sentinel-terminated allocations (e.g., `[:0]u8`) allocate `len + 1` bytes but the slice length is `len`. If the slice is stored in a non-sentinel type (e.g., `[]u8`), the sentinel info is lost and freeing will cause an allocation size mismatch.
+
+**Bad:**
+```zig
+fn readFile(allocator: std.mem.Allocator, file: std.fs.File) ![]u8 {
+    // dupeZ allocates len+1 bytes but returns [:0]u8
+    // If stored as []u8, freeing loses the +1 byte info
+    const content = try allocator.dupeZ(u8, "hello");
+    return content; // Type erased to []u8, size mismatch on free
+}
+```
+
+**Good:**
+```zig
+fn readFile(allocator: std.mem.Allocator, file: std.fs.File) ![:0]u8 {
+    // Preserve the sentinel type
+    const content = try allocator.dupeZ(u8, "hello");
+    return content;
+}
+
+// Or use non-sentinel allocation if sentinel isn't needed
+fn readFileNoSentinel(allocator: std.mem.Allocator, file: std.fs.File) ![]u8 {
+    const content = try allocator.dupe(u8, "hello");
+    return content;
+}
+```
+
+Detected functions:
+- `dupeZ` - always creates null-terminated copy
+- `allocSentinel` - always creates sentinel-terminated allocation
+- `allocPrintSentinel` - always creates sentinel-terminated string
+- `allocWithOptions` with non-null sentinel parameter
+- `readToEndAllocOptions` with non-null sentinel parameter
+
 ### identifier-style
 
 Enforces Zig naming conventions:

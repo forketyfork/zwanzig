@@ -113,3 +113,18 @@ fn lineSliceFor(content: []const u8, line_number: usize) ?[]const u8 {
     }
     return null;
 }
+
+test "lineSliceFor returns correct line" {
+    const content = "line1\nline2\nline3";
+    try std.testing.expectEqualStrings("line1", lineSliceFor(content, 1).?);
+    try std.testing.expectEqualStrings("line2", lineSliceFor(content, 2).?);
+    try std.testing.expectEqualStrings("line3", lineSliceFor(content, 3).?);
+    try std.testing.expect(lineSliceFor(content, 4) == null);
+    try std.testing.expect(lineSliceFor(content, 0) == null);
+}
+
+test "lineSliceFor strips CR from CRLF" {
+    const content = "line1\r\nline2\r\n";
+    try std.testing.expectEqualStrings("line1", lineSliceFor(content, 1).?);
+    try std.testing.expectEqualStrings("line2", lineSliceFor(content, 2).?);
+}

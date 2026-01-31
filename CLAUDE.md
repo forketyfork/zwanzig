@@ -92,3 +92,10 @@ zig build run -- test/fixtures/store_violations_engine/fixture_name.zig
 - Tests colocated with implementation in the same file
 - Rules in `src/rules/` directory, one file per rule
 - **ArrayList initialization**: In Zig 0.15, use `.empty` to initialize ArrayLists (e.g., `var list: std.ArrayList(T) = .empty;`). The allocator is passed to methods like `append(allocator, item)` and `deinit(allocator)`. Do NOT use the old `.init(allocator)` pattern.
+
+## Temporary Files
+
+When creating temporary Zig files for testing or experimentation, use the `.tmp/` directory in this project instead of `/tmp`. Run with relative paths:
+```bash
+zig run .tmp/test_file.zig
+```

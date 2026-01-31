@@ -395,6 +395,7 @@ pub const Analyzer = struct {
             },
             .sarif => {
                 var formatter = SarifFormatter.init(
+                    self.allocator,
                     &self.checker_manager,
                     self.tool_version,
                     self.diagnostics.items,
@@ -538,24 +539,24 @@ test "Analyzer SARIF output format" {
     try analyzer.diagnostics.append(allocator, diag1);
     try analyzer.diagnostics.append(allocator, diag2);
 
-    var buffer: [2048]u8 = undefined;
-    var stream = std.io.fixedBufferStream(&buffer);
-    var formatter = SarifFormatter.init(&analyzer.checker_manager, analyzer.tool_version, analyzer.diagnostics.items);
-    try formatter.write(stream.writer());
+    var output: std.ArrayList(u8) = .empty;
+    defer output.deinit(allocator);
+    var formatter = SarifFormatter.init(allocator, &analyzer.checker_manager, analyzer.tool_version, analyzer.diagnostics.items);
+    try formatter.write(output.writer(allocator));
 
-    const output = stream.getWritten();
-    try testing.expect(std.mem.indexOf(u8, output, "\"version\": \"2.1.0\"") != null);
-    try testing.expect(std.mem.indexOf(u8, output, "\"$schema\":") != null);
-    try testing.expect(std.mem.indexOf(u8, output, "\"runs\":") != null);
-    try testing.expect(std.mem.indexOf(u8, output, "\"tool\":") != null);
-    try testing.expect(std.mem.indexOf(u8, output, "\"driver\":") != null);
-    try testing.expect(std.mem.indexOf(u8, output, "\"name\": \"Zwanzig\"") != null);
-    try testing.expect(std.mem.indexOf(u8, output, "\"rules\":") != null);
-    try testing.expect(std.mem.indexOf(u8, output, "\"results\":") != null);
-    try testing.expect(std.mem.indexOf(u8, output, "test1.zig") != null);
-    try testing.expect(std.mem.indexOf(u8, output, "test2.zig") != null);
-    try testing.expect(std.mem.indexOf(u8, output, "test-rule") != null);
-    try testing.expect(std.mem.indexOf(u8, output, "other-rule") != null);
+    const result = output.items;
+    try testing.expect(std.mem.indexOf(u8, result, "\"version\": \"2.1.0\"") != null);
+    try testing.expect(std.mem.indexOf(u8, result, "\"$schema\":") != null);
+    try testing.expect(std.mem.indexOf(u8, result, "\"runs\":") != null);
+    try testing.expect(std.mem.indexOf(u8, result, "\"tool\":") != null);
+    try testing.expect(std.mem.indexOf(u8, result, "\"driver\":") != null);
+    try testing.expect(std.mem.indexOf(u8, result, "\"name\": \"Zwanzig\"") != null);
+    try testing.expect(std.mem.indexOf(u8, result, "\"rules\":") != null);
+    try testing.expect(std.mem.indexOf(u8, result, "\"results\":") != null);
+    try testing.expect(std.mem.indexOf(u8, result, "test1.zig") != null);
+    try testing.expect(std.mem.indexOf(u8, result, "test2.zig") != null);
+    try testing.expect(std.mem.indexOf(u8, result, "test-rule") != null);
+    try testing.expect(std.mem.indexOf(u8, result, "other-rule") != null);
 }
 
 test "Analyzer cache enabled" {
