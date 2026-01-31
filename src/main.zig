@@ -362,12 +362,21 @@ fn analyzeFilesParallel(analyzer: *Analyzer, files: []const []const u8, thread_c
     defer pool.deinit();
 
     var wg: std.Thread.WaitGroup = .{};
+    var spawn_error: ?anyerror = null;
     for (0..files.len) |i| {
         wg.start();
-        try pool.spawn(workerTaskWrapper, .{ i, &ctx, &wg });
+        pool.spawn(workerTaskWrapper, .{ i, &ctx, &wg }) catch |err| {
+            wg.finish();
+            spawn_error = err;
+            break;
+        };
     }
 
     pool.waitAndWork(&wg);
+
+    if (spawn_error) |err| {
+        return err;
+    }
 
     var first_error: ?anyerror = null;
     for (0..files.len) |i| {
