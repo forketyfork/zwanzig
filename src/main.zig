@@ -15,6 +15,7 @@ const ShadowedVariableRule = @import("rules/shadowed_variable.zig").ShadowedVari
 const IdentifierStyleRule = @import("rules/identifier_style.zig").IdentifierStyleRule;
 const SentinelAllocRule = @import("rules/sentinel_alloc.zig").SentinelAllocRule;
 const UnusedParameterRule = @import("rules/unused_parameter.zig").UnusedParameterRule;
+const OptionalUnwrapRule = @import("rules/optional_unwrap.zig").OptionalUnwrapRule;
 const RuleFilter = @import("rule_filter.zig").RuleFilter;
 const file_discovery = @import("file_discovery.zig");
 const EmptyCatchEngineChecker = @import("checkers/empty_catch_engine.zig").EmptyCatchEngineChecker;
@@ -569,6 +570,7 @@ pub fn main() !void {
     try analyzer.registerRule(&IdentifierStyleRule.rule);
     try analyzer.registerRule(&SentinelAllocRule.rule);
     try analyzer.registerRule(&UnusedParameterRule.rule);
+    try analyzer.registerRule(&OptionalUnwrapRule.rule);
 
     // Engine-based checkers
     try analyzer.registerChecker(&EmptyCatchEngineChecker.checker);
