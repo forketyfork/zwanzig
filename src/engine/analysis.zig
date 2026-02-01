@@ -55,6 +55,8 @@ pub const AnalysisEngine = struct {
     function_names: std.StringHashMap(AstNodeId),
     /// Cache of scope-aware variable resolvers per function
     var_resolvers: std.AutoHashMap(AstNodeId, *VarResolver),
+    /// Cache of assertion scopes per function
+    assertion_scopes: std.AutoHashMap(AstNodeId, assertions.AssertionScope),
     /// Count of inlined calls (for testing/debugging)
     inlined_call_count: u32,
     /// Cache of function summaries for interprocedural analysis
@@ -101,6 +103,7 @@ pub const AnalysisEngine = struct {
             .function_cfgs = std.AutoHashMap(AstNodeId, *Cfg).init(allocator),
             .function_names = std.StringHashMap(AstNodeId).init(allocator),
             .var_resolvers = std.AutoHashMap(AstNodeId, *VarResolver).init(allocator),
+            .assertion_scopes = std.AutoHashMap(AstNodeId, assertions.AssertionScope).init(allocator),
             .inlined_call_count = 0,
             .summary_cache = SummaryCache.init(allocator),
             .use_summaries = true,
@@ -137,7 +140,30 @@ pub const AnalysisEngine = struct {
             self.allocator.destroy(resolver_ptr.*);
         }
         self.var_resolvers.deinit();
+        var scope_iter = self.assertion_scopes.valueIterator();
+        while (scope_iter.next()) |scope| {
+            scope.deinit(self.allocator);
+        }
+        self.assertion_scopes.deinit();
         self.summary_cache.deinit();
+    }
+
+    fn getAssertionScope(self: *AnalysisEngine, current_cfg: *const Cfg) ?*assertions.AssertionScope {
+        const fn_node = current_cfg.fn_ast_node orelse return null;
+        if (self.assertion_scopes.getPtr(fn_node)) |scope| return scope;
+
+        const src = self.source orelse return null;
+        const tree = src.ast() catch return null;
+
+        var scope = assertions.buildAssertionScope(self.allocator, tree, ids.astIndex(fn_node), false) catch return null;
+        errdefer scope.deinit(self.allocator);
+
+        self.assertion_scopes.put(fn_node, scope) catch {
+            scope.deinit(self.allocator);
+            return null;
+        };
+
+        return self.assertion_scopes.getPtr(fn_node);
     }
 
     /// Set the maximum inline depth for interprocedural analysis.
@@ -2301,7 +2327,8 @@ pub const AnalysisEngine = struct {
             else => null,
         } orelse return null;
 
-        const assertion_name = assertions.resolveAssertionName(tree, full_call.ast.fn_expr, false) orelse return null;
+        const scope = self.getAssertionScope(current_cfg) orelse return null;
+        const assertion_name = assertions.resolveAssertionName(tree, full_call.ast.fn_expr, scope) orelse return null;
         const assertion_kind = assertions.constraintKindForName(assertion_name) orelse return null;
 
         // Get the first argument (the condition being asserted)

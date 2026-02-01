@@ -135,6 +135,15 @@ pub const OptionalUnwrapEngineChecker = struct {
         const fn_index = ids.astIndex(fn_node);
         if (fn_index >= tags.len) return;
 
+        const parent_map = try allocator.alloc(u32, tags.len);
+        defer allocator.free(parent_map);
+        @memset(parent_map, 0);
+        ast_walk.fillParentMap(tree, fn_index, parent_map);
+
+        const allow_bare = tags[fn_index] == .test_decl;
+        var assertion_scope = try assertions.buildAssertionScope(allocator, tree, fn_index, allow_bare);
+        defer assertion_scope.deinit(allocator);
+
         // Collect all unwrap_optional nodes within this function's body
         var unwraps: std.ArrayList(u32) = .empty;
         defer unwraps.deinit(allocator);
@@ -147,7 +156,7 @@ pub const OptionalUnwrapEngineChecker = struct {
 
             // Skip unwraps inside test assertion calls (expectEqual, expectEqualStrings, etc.)
             // These are intentional - the test will panic if the value is null
-            if (isInsideTestAssertion(tree, ast_node, fn_index)) continue;
+            if (isInsideTestAssertion(tree, ast_node, parent_map, &assertion_scope)) continue;
 
             // Get the variable being unwrapped
             const unwrapped_node = @intFromEnum(datas[ast_node].node_and_token[0]);
@@ -172,48 +181,34 @@ pub const OptionalUnwrapEngineChecker = struct {
     /// Check if an unwrap_optional AST node is inside a test assertion call.
     /// Test assertions like expectEqual, expectEqualStrings, etc. are intentional
     /// uses where a panic is acceptable (the test would fail anyway).
-    fn isInsideTestAssertion(tree: *const std.zig.Ast, unwrap_node: u32, fn_root: u32) bool {
-        // Walk up the AST to find if this unwrap is inside a call to a test assertion.
+    fn isInsideTestAssertion(
+        tree: *const std.zig.Ast,
+        unwrap_node: u32,
+        parent_map: []const u32,
+        scope: *const assertions.AssertionScope,
+    ) bool {
         const tags = tree.nodes.items(.tag);
-        const allow_bare = fn_root < tags.len and tags[fn_root] == .test_decl;
-        return findParentAssertionCall(tree, unwrap_node, fn_root, 0, allow_bare);
-    }
+        var node = unwrap_node;
+        var depth: u32 = 0;
 
-    fn findParentAssertionCall(tree: *const std.zig.Ast, node: u32, fn_root: u32, depth: u32, allow_bare: bool) bool {
-        // Limit recursion depth to avoid infinite loops
-        if (depth > 20) return false;
-
-        const tags = tree.nodes.items(.tag);
-
-        if (node >= tags.len) return false;
-        if (node == fn_root) return false;
-
-        // Check if this node is a call to a test assertion
-        switch (tags[node]) {
-            .call, .call_comma, .call_one, .call_one_comma => {
-                if (isTestAssertionCall(tree, node, allow_bare)) {
-                    return true;
-                }
-            },
-            else => {},
-        }
-
-        // Walk up to parent by checking which nodes contain this one
-        // This is expensive but we limit the search depth
-        for (0..tags.len) |i| {
-            const parent: u32 = @intCast(i);
-            if (parent == node) continue;
-            if (ast_walk.containsNode(tree, parent, node)) {
-                if (findParentAssertionCall(tree, parent, fn_root, depth + 1, allow_bare)) {
-                    return true;
-                }
+        while (node < parent_map.len and depth < 64) : (depth += 1) {
+            const parent = parent_map[node];
+            if (parent == 0 or parent >= tags.len) break;
+            switch (tags[parent]) {
+                .call, .call_comma, .call_one, .call_one_comma => {
+                    if (isTestAssertionCall(tree, parent, scope)) {
+                        return true;
+                    }
+                },
+                else => {},
             }
+            node = parent;
         }
 
         return false;
     }
 
-    fn isTestAssertionCall(tree: *const std.zig.Ast, call_node: u32, allow_bare: bool) bool {
+    fn isTestAssertionCall(tree: *const std.zig.Ast, call_node: u32, scope: *const assertions.AssertionScope) bool {
         const tags = tree.nodes.items(.tag);
 
         if (call_node >= tags.len) return false;
@@ -221,7 +216,7 @@ pub const OptionalUnwrapEngineChecker = struct {
         var buf: [1]std.zig.Ast.Node.Index = undefined;
         const full = tree.fullCall(&buf, @enumFromInt(call_node)) orelse return false;
 
-        return assertions.resolveAssertionName(tree, full.ast.fn_expr, allow_bare) != null;
+        return assertions.resolveAssertionName(tree, full.ast.fn_expr, scope) != null;
     }
 
     fn collectUnwrapsInSubtree(

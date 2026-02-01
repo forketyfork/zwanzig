@@ -174,15 +174,23 @@ pub fn walk(
             return;
         },
         .slice, .slice_open, .slice_sentinel => {
-            const pair = datas[node].node_and_node;
-            const lhs = @intFromEnum(pair[0]);
-            const rhs = @intFromEnum(pair[1]);
-            if (lhs != 0) {
-                try walk(Visitor, tree, lhs, visitor);
+            const slice = tree.fullSlice(@enumFromInt(node)) orelse return;
+            const sliced = @intFromEnum(slice.ast.sliced);
+            if (sliced != 0) {
+                try walk(Visitor, tree, sliced, visitor);
                 if (visitor.stop) return;
             }
-            if (rhs != 0) {
-                try walk(Visitor, tree, rhs, visitor);
+            const start = @intFromEnum(slice.ast.start);
+            if (start != 0) {
+                try walk(Visitor, tree, start, visitor);
+                if (visitor.stop) return;
+            }
+            if (slice.ast.end.unwrap()) |end_node| {
+                try walk(Visitor, tree, @intFromEnum(end_node), visitor);
+                if (visitor.stop) return;
+            }
+            if (slice.ast.sentinel.unwrap()) |sentinel_node| {
+                try walk(Visitor, tree, @intFromEnum(sentinel_node), visitor);
             }
             return;
         },
@@ -224,6 +232,222 @@ pub fn walk(
             }
             if (rhs != 0) {
                 try walk(Visitor, tree, rhs, visitor);
+            }
+            return;
+        },
+        else => {},
+    }
+}
+
+pub fn fillParentMap(tree: *const Ast, root: u32, parent_map: []u32) void {
+    const tags = tree.nodes.items(.tag);
+    if (root == 0 or root >= tags.len) return;
+    fillParentMapInternal(tree, root, 0, parent_map);
+}
+
+fn fillParentMapInternal(tree: *const Ast, node: u32, parent: u32, parent_map: []u32) void {
+    if (node == 0) return;
+
+    const tags = tree.nodes.items(.tag);
+    if (node >= tags.len) return;
+
+    if (parent != 0 and node < parent_map.len and parent_map[node] == 0) {
+        parent_map[node] = parent;
+    }
+
+    if (tree.fullSwitchCase(@enumFromInt(node))) |full_case| {
+        for (full_case.ast.values) |value| {
+            fillParentMapInternal(tree, @intFromEnum(value), node, parent_map);
+        }
+        fillParentMapInternal(tree, @intFromEnum(full_case.ast.target_expr), node, parent_map);
+        return;
+    }
+
+    const datas = tree.nodes.items(.data);
+
+    switch (tags[node]) {
+        .block, .block_semicolon => {
+            const extra_range = datas[node].extra_range;
+            const start = @intFromEnum(extra_range.start);
+            const end = @intFromEnum(extra_range.end);
+            const statements = tree.extra_data[start..end];
+            for (statements) |stmt| {
+                fillParentMapInternal(tree, stmt, node, parent_map);
+            }
+            return;
+        },
+        .block_two, .block_two_semicolon => {
+            const pair = datas[node].opt_node_and_opt_node;
+            if (pair[0].unwrap()) |n| {
+                fillParentMapInternal(tree, @intFromEnum(n), node, parent_map);
+            }
+            if (pair[1].unwrap()) |n| {
+                fillParentMapInternal(tree, @intFromEnum(n), node, parent_map);
+            }
+            return;
+        },
+        .fn_decl => {
+            const body = @intFromEnum(datas[node].node_and_node[1]);
+            if (body != 0) {
+                fillParentMapInternal(tree, body, node, parent_map);
+            }
+            return;
+        },
+        .test_decl => {
+            const body = @intFromEnum(datas[node].opt_token_and_node[1]);
+            if (body != 0) {
+                fillParentMapInternal(tree, body, node, parent_map);
+            }
+            return;
+        },
+        .simple_var_decl, .local_var_decl, .global_var_decl, .aligned_var_decl => {
+            const full = tree.fullVarDecl(@enumFromInt(node)) orelse return;
+            if (full.ast.init_node.unwrap()) |init| {
+                fillParentMapInternal(tree, @intFromEnum(init), node, parent_map);
+            }
+            return;
+        },
+        .@"if", .if_simple => {
+            const full = tree.fullIf(@enumFromInt(node)) orelse return;
+            fillParentMapInternal(tree, @intFromEnum(full.ast.cond_expr), node, parent_map);
+            fillParentMapInternal(tree, @intFromEnum(full.ast.then_expr), node, parent_map);
+            if (full.ast.else_expr.unwrap()) |else_node| {
+                fillParentMapInternal(tree, @intFromEnum(else_node), node, parent_map);
+            }
+            return;
+        },
+        .@"while", .while_simple, .while_cont => {
+            const full = tree.fullWhile(@enumFromInt(node)) orelse return;
+            fillParentMapInternal(tree, @intFromEnum(full.ast.cond_expr), node, parent_map);
+            fillParentMapInternal(tree, @intFromEnum(full.ast.then_expr), node, parent_map);
+            if (full.ast.else_expr.unwrap()) |else_node| {
+                fillParentMapInternal(tree, @intFromEnum(else_node), node, parent_map);
+            }
+            if (full.ast.cont_expr.unwrap()) |cont| {
+                fillParentMapInternal(tree, @intFromEnum(cont), node, parent_map);
+            }
+            return;
+        },
+        .@"for", .for_simple => {
+            const full = tree.fullFor(@enumFromInt(node)) orelse return;
+            for (full.ast.inputs) |input| {
+                fillParentMapInternal(tree, @intFromEnum(input), node, parent_map);
+            }
+            fillParentMapInternal(tree, @intFromEnum(full.ast.then_expr), node, parent_map);
+            if (full.ast.else_expr.unwrap()) |else_node| {
+                fillParentMapInternal(tree, @intFromEnum(else_node), node, parent_map);
+            }
+            return;
+        },
+        .call, .call_comma, .call_one, .call_one_comma => {
+            var buf: [1]Ast.Node.Index = undefined;
+            const full = tree.fullCall(&buf, @enumFromInt(node)) orelse return;
+            fillParentMapInternal(tree, @intFromEnum(full.ast.fn_expr), node, parent_map);
+            for (full.ast.params) |param| {
+                fillParentMapInternal(tree, @intFromEnum(param), node, parent_map);
+            }
+            return;
+        },
+        .builtin_call, .builtin_call_comma, .builtin_call_two, .builtin_call_two_comma => {
+            var buf: [2]Ast.Node.Index = undefined;
+            const params = tree.builtinCallParams(&buf, @enumFromInt(node)) orelse return;
+            for (params) |param| {
+                fillParentMapInternal(tree, @intFromEnum(param), node, parent_map);
+            }
+            return;
+        },
+        .@"switch", .switch_comma => {
+            const full = tree.switchFull(@enumFromInt(node));
+            fillParentMapInternal(tree, @intFromEnum(full.ast.condition), node, parent_map);
+            for (full.ast.cases) |case_node| {
+                fillParentMapInternal(tree, @intFromEnum(case_node), node, parent_map);
+            }
+            return;
+        },
+        .@"return" => {
+            if (datas[node].opt_node.unwrap()) |ret_node| {
+                fillParentMapInternal(tree, @intFromEnum(ret_node), node, parent_map);
+            }
+            return;
+        },
+        .@"errdefer" => {
+            const body = @intFromEnum(datas[node].opt_token_and_node[1]);
+            if (body != 0) {
+                fillParentMapInternal(tree, body, node, parent_map);
+            }
+            return;
+        },
+        .ptr_type, .ptr_type_aligned, .ptr_type_sentinel, .ptr_type_bit_range => {
+            const ptr_info = tree.fullPtrType(@enumFromInt(node)) orelse return;
+            fillParentMapInternal(tree, @intFromEnum(ptr_info.ast.child_type), node, parent_map);
+            return;
+        },
+        .array_type, .array_type_sentinel => {
+            const pair = datas[node].node_and_node;
+            const lhs = @intFromEnum(pair[0]);
+            const rhs = @intFromEnum(pair[1]);
+            if (lhs != 0) {
+                fillParentMapInternal(tree, lhs, node, parent_map);
+            }
+            if (rhs != 0) {
+                fillParentMapInternal(tree, rhs, node, parent_map);
+            }
+            return;
+        },
+        .slice, .slice_open, .slice_sentinel => {
+            const slice = tree.fullSlice(@enumFromInt(node)) orelse return;
+            const sliced = @intFromEnum(slice.ast.sliced);
+            if (sliced != 0) {
+                fillParentMapInternal(tree, sliced, node, parent_map);
+            }
+            const start = @intFromEnum(slice.ast.start);
+            if (start != 0) {
+                fillParentMapInternal(tree, start, node, parent_map);
+            }
+            if (slice.ast.end.unwrap()) |end_node| {
+                fillParentMapInternal(tree, @intFromEnum(end_node), node, parent_map);
+            }
+            if (slice.ast.sentinel.unwrap()) |sentinel_node| {
+                fillParentMapInternal(tree, @intFromEnum(sentinel_node), node, parent_map);
+            }
+            return;
+        },
+        .optional_type => {
+            const child = @intFromEnum(datas[node].node);
+            if (child != 0) {
+                fillParentMapInternal(tree, child, node, parent_map);
+            }
+            return;
+        },
+        .error_union => {
+            const pair = datas[node].node_and_node;
+            fillParentMapInternal(tree, @intFromEnum(pair[0]), node, parent_map);
+            fillParentMapInternal(tree, @intFromEnum(pair[1]), node, parent_map);
+            return;
+        },
+        .bool_not, .negation, .address_of, .@"try", .deref, .@"defer", .@"comptime", .@"nosuspend" => {
+            const child = @intFromEnum(datas[node].node);
+            if (child != 0) {
+                fillParentMapInternal(tree, child, node, parent_map);
+            }
+            return;
+        },
+        .unwrap_optional, .grouped_expression, .field_access => {
+            const child = @intFromEnum(datas[node].node_and_token[0]);
+            if (child != 0) {
+                fillParentMapInternal(tree, child, node, parent_map);
+            }
+            return;
+        },
+        .bool_and, .bool_or, .assign, .bang_equal, .equal_equal, .less_than, .greater_than, .less_or_equal, .greater_or_equal, .add, .sub, .mul, .div, .mod, .@"orelse", .@"catch", .array_access => {
+            const pair = datas[node].node_and_node;
+            const lhs = @intFromEnum(pair[0]);
+            const rhs = @intFromEnum(pair[1]);
+            if (lhs != 0) {
+                fillParentMapInternal(tree, lhs, node, parent_map);
+            }
+            if (rhs != 0) {
+                fillParentMapInternal(tree, rhs, node, parent_map);
             }
             return;
         },
