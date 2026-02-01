@@ -42,7 +42,7 @@ pub const OptionalUnwrapEngineChecker = struct {
         defer reported.deinit();
 
         for (0..tags.len) |i| {
-            if (tags[i] == .fn_decl) {
+            if (tags[i] == .fn_decl or tags[i] == .test_decl) {
                 try analyzeFunction(src, allocator, ids.astId(@intCast(i)), diagnostics, context, &reported);
             }
         }
@@ -128,11 +128,18 @@ pub const OptionalUnwrapEngineChecker = struct {
         const token_starts = tree.tokens.items(.start);
         const datas = tree.nodes.items(.data);
 
-        for (tags, 0..) |tag, i| {
-            if (tag != .unwrap_optional) continue;
+        // Scan only the AST nodes that are part of this function's body
+        // We do this by walking the function body's AST subtree
+        const fn_index = ids.astIndex(fn_node);
+        if (fn_index >= tags.len) return;
 
-            const ast_node: u32 = @intCast(i);
+        // Collect all unwrap_optional nodes within this function's body
+        var unwraps: std.ArrayList(u32) = .empty;
+        defer unwraps.deinit(allocator);
 
+        try collectUnwrapsInSubtree(tree, fn_index, allocator, &unwraps);
+
+        for (unwraps.items) |ast_node| {
             // Skip if already reported
             if (reported.contains(ast_node)) continue;
 
@@ -156,6 +163,230 @@ pub const OptionalUnwrapEngineChecker = struct {
         }
     }
 
+    fn collectUnwrapsInSubtree(
+        tree: *const std.zig.Ast,
+        node: u32,
+        allocator: std.mem.Allocator,
+        unwraps: *std.ArrayList(u32),
+    ) CheckerError!void {
+        const tags = tree.nodes.items(.tag);
+        const datas = tree.nodes.items(.data);
+
+        if (node >= tags.len) return;
+
+        if (tags[node] == .unwrap_optional) {
+            try unwraps.append(allocator, node);
+        }
+
+        // Handle block nodes specially since they can have many children
+        switch (tags[node]) {
+            .block, .block_semicolon => {
+                const extra_range = datas[node].extra_range;
+                const start = @intFromEnum(extra_range.start);
+                const end = @intFromEnum(extra_range.end);
+                const statements = tree.extra_data[start..end];
+                for (statements) |stmt| {
+                    try collectUnwrapsInSubtree(tree, stmt, allocator, unwraps);
+                }
+                return;
+            },
+            else => {},
+        }
+
+        // Recursively scan child nodes
+        const children = getChildNodes(tree, node);
+        for (children) |child| {
+            try collectUnwrapsInSubtree(tree, child, allocator, unwraps);
+        }
+    }
+
+    fn getChildNodes(tree: *const std.zig.Ast, node: u32) []const u32 {
+        const tags = tree.nodes.items(.tag);
+        const datas = tree.nodes.items(.data);
+
+        if (node >= tags.len) return &[_]u32{};
+
+        // Use a static buffer for child nodes (most nodes have <= 8 children)
+        const S = struct {
+            threadlocal var buffer: [8]u32 = undefined;
+        };
+
+        const tag = tags[node];
+        var count: usize = 0;
+
+        switch (tag) {
+            // Nodes with node_and_node data (two children)
+            .bool_and, .bool_or, .assign, .bang_equal, .equal_equal, .less_than, .greater_than, .less_or_equal, .greater_or_equal, .add, .sub, .mul, .div, .mod, .@"orelse", .@"catch", .array_access => {
+                const pair = datas[node].node_and_node;
+                if (@intFromEnum(pair[0]) != 0) {
+                    S.buffer[count] = @intFromEnum(pair[0]);
+                    count += 1;
+                }
+                if (@intFromEnum(pair[1]) != 0) {
+                    S.buffer[count] = @intFromEnum(pair[1]);
+                    count += 1;
+                }
+            },
+
+            // Nodes with single node child
+            .bool_not, .negation, .address_of, .@"try", .deref, .@"defer", .@"comptime", .@"nosuspend" => {
+                const child = @intFromEnum(datas[node].node);
+                if (child != 0) {
+                    S.buffer[count] = child;
+                    count += 1;
+                }
+            },
+
+            // Nodes with node_and_token data (one child node)
+            .unwrap_optional, .grouped_expression, .field_access => {
+                const child = @intFromEnum(datas[node].node_and_token[0]);
+                if (child != 0) {
+                    S.buffer[count] = child;
+                    count += 1;
+                }
+            },
+
+            // Return statement with optional expression
+            .@"return" => {
+                if (datas[node].opt_node.unwrap()) |ret_node| {
+                    S.buffer[count] = @intFromEnum(ret_node);
+                    count += 1;
+                }
+            },
+
+            // Block statements - need to handle specially
+            .block, .block_semicolon => {
+                // These use extra_data range, return empty for now as they're handled separately
+            },
+            .block_two, .block_two_semicolon => {
+                const pair = datas[node].opt_node_and_opt_node;
+                if (pair[0].unwrap()) |n| {
+                    S.buffer[count] = @intFromEnum(n);
+                    count += 1;
+                }
+                if (pair[1].unwrap()) |n| {
+                    S.buffer[count] = @intFromEnum(n);
+                    count += 1;
+                }
+            },
+
+            // Function/test declarations - get the body
+            .fn_decl => {
+                const body = @intFromEnum(datas[node].node_and_node[1]);
+                if (body != 0) {
+                    S.buffer[count] = body;
+                    count += 1;
+                }
+            },
+            .test_decl => {
+                const body = @intFromEnum(datas[node].opt_token_and_node[1]);
+                if (body != 0) {
+                    S.buffer[count] = body;
+                    count += 1;
+                }
+            },
+
+            // Variable declarations
+            .simple_var_decl, .local_var_decl, .global_var_decl, .aligned_var_decl => {
+                const full = tree.fullVarDecl(@enumFromInt(node)) orelse return S.buffer[0..0];
+                if (full.ast.init_node.unwrap()) |init| {
+                    S.buffer[count] = @intFromEnum(init);
+                    count += 1;
+                }
+            },
+
+            // If statements
+            .@"if", .if_simple => {
+                const full = tree.fullIf(@enumFromInt(node)) orelse return S.buffer[0..0];
+                S.buffer[count] = @intFromEnum(full.ast.cond_expr);
+                count += 1;
+                S.buffer[count] = @intFromEnum(full.ast.then_expr);
+                count += 1;
+                if (full.ast.else_expr.unwrap()) |else_node| {
+                    S.buffer[count] = @intFromEnum(else_node);
+                    count += 1;
+                }
+            },
+
+            // While loops
+            .@"while", .while_simple, .while_cont => {
+                const full = tree.fullWhile(@enumFromInt(node)) orelse return S.buffer[0..0];
+                S.buffer[count] = @intFromEnum(full.ast.cond_expr);
+                count += 1;
+                S.buffer[count] = @intFromEnum(full.ast.then_expr);
+                count += 1;
+                if (full.ast.else_expr.unwrap()) |else_node| {
+                    S.buffer[count] = @intFromEnum(else_node);
+                    count += 1;
+                }
+                if (full.ast.cont_expr.unwrap()) |cont| {
+                    S.buffer[count] = @intFromEnum(cont);
+                    count += 1;
+                }
+            },
+
+            // For loops
+            .@"for", .for_simple => {
+                const full = tree.fullFor(@enumFromInt(node)) orelse return S.buffer[0..0];
+                for (full.ast.inputs) |input| {
+                    if (count < S.buffer.len) {
+                        S.buffer[count] = @intFromEnum(input);
+                        count += 1;
+                    }
+                }
+                S.buffer[count] = @intFromEnum(full.ast.then_expr);
+                count += 1;
+                if (full.ast.else_expr.unwrap()) |else_node| {
+                    S.buffer[count] = @intFromEnum(else_node);
+                    count += 1;
+                }
+            },
+
+            // Call expressions
+            .call, .call_comma, .call_one, .call_one_comma => {
+                var buf: [1]std.zig.Ast.Node.Index = undefined;
+                const full = tree.fullCall(&buf, @enumFromInt(node)) orelse return S.buffer[0..0];
+                S.buffer[count] = @intFromEnum(full.ast.fn_expr);
+                count += 1;
+                for (full.ast.params) |param| {
+                    if (count < S.buffer.len) {
+                        S.buffer[count] = @intFromEnum(param);
+                        count += 1;
+                    }
+                }
+            },
+
+            // Switch
+            .@"switch", .switch_comma => {
+                const full = tree.switchFull(@enumFromInt(node));
+                S.buffer[count] = @intFromEnum(full.ast.condition);
+                count += 1;
+                for (full.ast.cases) |case| {
+                    if (count < S.buffer.len) {
+                        S.buffer[count] = @intFromEnum(case);
+                        count += 1;
+                    }
+                }
+            },
+
+            // Errdefer
+            .@"errdefer" => {
+                const body = @intFromEnum(datas[node].opt_token_and_node[1]);
+                if (body != 0) {
+                    S.buffer[count] = body;
+                    count += 1;
+                }
+            },
+
+            else => {
+                // For other nodes, try to find children using the data union
+                // This is a fallback for nodes we haven't explicitly handled
+            },
+        }
+
+        return S.buffer[0..count];
+    }
+
     fn findCfgNodeForAst(cfg: *const Cfg, ast_node: u32, tree: *const std.zig.Ast) ?ids.CfgNodeId {
         const token_starts = tree.tokens.items(.start);
         const main_tokens = tree.nodes.items(.main_token);
@@ -174,7 +405,7 @@ pub const OptionalUnwrapEngineChecker = struct {
         }
 
         // If no direct match, find the CFG node whose AST span contains this node
-        // by finding the smallest CFG node that starts before and ends after the target
+        // by finding the CFG node that starts closest to (but before) the target position
         var best_match: ?ids.CfgNodeId = null;
         var best_start: u32 = 0;
 

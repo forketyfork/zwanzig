@@ -822,6 +822,25 @@ pub const AnalysisEngine = struct {
                 const data = datas[expr_node].node_and_token;
                 break :blk self.resolveVarIdFromExpr(@intFromEnum(data[0]), current_cfg);
             },
+            .field_access => blk: {
+                // For field access like self.cache_dir, create a combined VarId
+                // from the base expression and a hash of the field name
+                const field_access_data = datas[expr_node].node_and_token;
+                const base_node = @intFromEnum(field_access_data[0]);
+                const field_token = field_access_data[1];
+
+                // Hash the field name (not token position) for consistent VarId across usages
+                const field_name = tree.tokenSlice(field_token);
+                const field_name_hash = hashFieldName(field_name);
+
+                // Recursively resolve the base (handles chained field access like a.b.c)
+                if (self.resolveVarIdFromExpr(base_node, current_cfg)) |base_var_id| {
+                    // Combine base VarId and field name hash to create a unique ID for the field access
+                    break :blk combineFieldAccessId(base_var_id, field_name_hash);
+                }
+                // If we can't resolve the base, use the field name hash alone as a fallback
+                break :blk combineFieldAccessId(ids.varId(0), field_name_hash);
+            },
             .slice, .slice_open, .slice_sentinel => blk: {
                 const slice = tree.fullSlice(@enumFromInt(expr_node)) orelse break :blk null;
                 break :blk self.resolveVarIdFromExpr(@intFromEnum(slice.ast.sliced), current_cfg);
@@ -843,6 +862,50 @@ pub const AnalysisEngine = struct {
             },
             else => null,
         };
+    }
+
+    /// Hash a field name to a u32 using FNV-1a.
+    fn hashFieldName(name: []const u8) u32 {
+        const fnv_offset: u32 = 2166136261;
+        const fnv_prime: u32 = 16777619;
+
+        var hash: u32 = fnv_offset;
+        for (name) |byte| {
+            hash ^= byte;
+            hash *%= fnv_prime;
+        }
+        return hash;
+    }
+
+    /// Combine a base VarId with a field name hash to create a unique VarId for field access.
+    /// Uses FNV-1a hash to combine the two values into a single u32.
+    fn combineFieldAccessId(base_var_id: ids.VarId, field_name_hash: u32) ids.VarId {
+        // Use FNV-1a hash to combine base_var_id and field_name_hash
+        const fnv_offset: u32 = 2166136261;
+        const fnv_prime: u32 = 16777619;
+
+        var hash: u32 = fnv_offset;
+        // Mix in the base var id
+        const base_val = @intFromEnum(base_var_id);
+        hash ^= @truncate(base_val & 0xFF);
+        hash *%= fnv_prime;
+        hash ^= @truncate((base_val >> 8) & 0xFF);
+        hash *%= fnv_prime;
+        hash ^= @truncate((base_val >> 16) & 0xFF);
+        hash *%= fnv_prime;
+        hash ^= @truncate((base_val >> 24) & 0xFF);
+        hash *%= fnv_prime;
+        // Mix in the field name hash
+        hash ^= @truncate(field_name_hash & 0xFF);
+        hash *%= fnv_prime;
+        hash ^= @truncate((field_name_hash >> 8) & 0xFF);
+        hash *%= fnv_prime;
+        hash ^= @truncate((field_name_hash >> 16) & 0xFF);
+        hash *%= fnv_prime;
+        hash ^= @truncate((field_name_hash >> 24) & 0xFF);
+        hash *%= fnv_prime;
+
+        return ids.varId(hash);
     }
 
     fn getOrBuildVarResolver(self: *AnalysisEngine, fn_node: AstNodeId) ?*VarResolver {
@@ -2061,6 +2124,142 @@ pub const AnalysisEngine = struct {
         return std.mem.eql(u8, token_slice, "null");
     }
 
+    /// Extract a non-null constraint from an assertion call.
+    /// Handles patterns like:
+    /// - testing.expect(x != null)
+    /// - std.testing.expect(x != null)
+    /// - try testing.expect(x != null)
+    /// After such a call, we assume x is non-null (the assertion would have failed otherwise).
+    fn extractAssertionConstraint(self: *AnalysisEngine, call_node: u32, current_cfg: *const Cfg) ?Constraint {
+        const src = self.source orelse return null;
+        const tree = src.ast() catch return null;
+        const tags = tree.nodes.items(.tag);
+        const datas = tree.nodes.items(.data);
+
+        if (call_node >= tags.len) return null;
+
+        // Get the full call information
+        var call_buf: [1]std.zig.Ast.Node.Index = undefined;
+        const full_call = switch (tags[call_node]) {
+            .call, .call_comma, .call_one, .call_one_comma => tree.fullCall(&call_buf, @enumFromInt(call_node)),
+            else => null,
+        } orelse return null;
+
+        // Check if this is an assertion function
+        if (!self.isAssertionCall(tree, full_call.ast.fn_expr)) return null;
+
+        // Get the first argument (the condition being asserted)
+        const args = full_call.ast.params;
+        if (args.len == 0) return null;
+        const cond_node = @intFromEnum(args[0]);
+
+        // Check if the condition is a null check (x != null)
+        if (cond_node >= tags.len) return null;
+        const cond_tag = tags[cond_node];
+
+        if (cond_tag == .bang_equal) {
+            // x != null pattern - after expect(x != null), x is non-null
+            const lhs = datas[cond_node].node_and_node[0];
+            const rhs = datas[cond_node].node_and_node[1];
+
+            const lhs_is_null = self.isNullLiteral(@intFromEnum(lhs));
+            const rhs_is_null = self.isNullLiteral(@intFromEnum(rhs));
+
+            if (lhs_is_null or rhs_is_null) {
+                const var_node = if (lhs_is_null) @intFromEnum(rhs) else @intFromEnum(lhs);
+                const var_key = self.resolveVarIdFromExpr(var_node, current_cfg) orelse return null;
+                // After expect(x != null), x is proven non-null (is_null=false)
+                return Constraint.nullCheck(var_key, false);
+            }
+        } else if (cond_tag == .equal_equal) {
+            // x == null pattern - after expect(x == null), x is proven null
+            // This is less common but we handle it for completeness
+            const lhs = datas[cond_node].node_and_node[0];
+            const rhs = datas[cond_node].node_and_node[1];
+
+            const lhs_is_null = self.isNullLiteral(@intFromEnum(lhs));
+            const rhs_is_null = self.isNullLiteral(@intFromEnum(rhs));
+
+            if (lhs_is_null or rhs_is_null) {
+                const var_node = if (lhs_is_null) @intFromEnum(rhs) else @intFromEnum(lhs);
+                const var_key = self.resolveVarIdFromExpr(var_node, current_cfg) orelse return null;
+                // After expect(x == null), x is proven null (is_null=true)
+                return Constraint.nullCheck(var_key, true);
+            }
+        }
+
+        return null;
+    }
+
+    /// Check if a call expression is to a known assertion function.
+    fn isAssertionCall(self: *AnalysisEngine, tree: *const std.zig.Ast, fn_expr: std.zig.Ast.Node.Index) bool {
+        _ = self;
+        const tags = tree.nodes.items(.tag);
+        const datas = tree.nodes.items(.data);
+        const fn_node = @intFromEnum(fn_expr);
+
+        if (fn_node >= tags.len) return false;
+
+        // Handle field access patterns like testing.expect or std.testing.expect
+        if (tags[fn_node] == .field_access) {
+            const field_data = datas[fn_node].node_and_token;
+            const field_token = field_data[1];
+            const field_name = tree.tokenSlice(field_token);
+
+            // Check if the field name is a known assertion function
+            if (std.mem.eql(u8, field_name, "expect") or
+                std.mem.eql(u8, field_name, "expectEqual") or
+                std.mem.eql(u8, field_name, "assert"))
+            {
+                return true;
+            }
+        }
+
+        // Handle direct identifier calls (rare but possible)
+        if (tags[fn_node] == .identifier) {
+            const main_tokens = tree.nodes.items(.main_token);
+            const token = main_tokens[fn_node];
+            const name = tree.tokenSlice(token);
+
+            if (std.mem.eql(u8, name, "assert") or
+                std.mem.eql(u8, name, "expect"))
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    /// Extract a non-null constraint from a try expression wrapping an assertion call.
+    /// Handles patterns like: try testing.expect(x != null)
+    fn extractTryAssertionConstraint(self: *AnalysisEngine, try_ast_node: u32, current_cfg: *const Cfg) ?Constraint {
+        const src = self.source orelse return null;
+        const tree = src.ast() catch return null;
+        const tags = tree.nodes.items(.tag);
+        const datas = tree.nodes.items(.data);
+
+        if (try_ast_node >= tags.len) return null;
+
+        // Check if the AST node is a try expression
+        if (tags[try_ast_node] != .@"try") return null;
+
+        // Get the operand of the try expression
+        const try_operand = @intFromEnum(datas[try_ast_node].node);
+        if (try_operand >= tags.len) return null;
+
+        // Check if the operand is a call expression
+        const operand_tag = tags[try_operand];
+        if (operand_tag != .call and operand_tag != .call_comma and
+            operand_tag != .call_one and operand_tag != .call_one_comma)
+        {
+            return null;
+        }
+
+        // Delegate to the regular assertion constraint extraction
+        return self.extractAssertionConstraint(try_operand, current_cfg);
+    }
+
     /// Check if a condition expression is an optional type.
     fn isOptionalType(self: *AnalysisEngine, cond_node: u32, current_cfg: *const Cfg) bool {
         _ = current_cfg;
@@ -2218,6 +2417,12 @@ pub const AnalysisEngine = struct {
                     }
                     self.trackEscapesFromCall(&new_state, ast_node, current_cfg);
                     try self.recordOwnershipFromCall(&new_state, ast_node, current_cfg);
+
+                    // Check for assertion calls like testing.expect(x != null)
+                    // and add non-null constraints for the asserted variables
+                    if (self.extractAssertionConstraint(ast_node, current_cfg)) |constraint| {
+                        try new_state.addConstraint(constraint);
+                    }
                 }
             },
             .defer_stmt => {
@@ -2269,6 +2474,11 @@ pub const AnalysisEngine = struct {
                 if (ir_node.ast_node) |ast_node| {
                     try self.checkUseAfterFreeInExpr(&new_state, ast_node, current_cfg);
                     self.trackEscapesInExpr(&new_state, ast_node, current_cfg);
+
+                    // Check for assertion calls wrapped in try (try testing.expect(...))
+                    if (self.extractTryAssertionConstraint(ast_node, current_cfg)) |constraint| {
+                        try new_state.addConstraint(constraint);
+                    }
                 }
             },
             .expr => {

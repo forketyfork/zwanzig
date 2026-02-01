@@ -131,6 +131,9 @@ pub const VarResolver = struct {
         const tags = self.tree.nodes.items(.tag);
         if (fn_node >= tags.len) return;
 
+        // Test declarations don't have parameters
+        if (tags[fn_node] == .test_decl) return;
+
         const data = self.tree.nodes.items(.data)[fn_node];
         const proto_node = @intFromEnum(data.node_and_node[0]);
         if (proto_node == 0 or proto_node >= tags.len) return;
@@ -155,8 +158,16 @@ pub const VarResolver = struct {
 
     fn getFnBody(self: *const VarResolver, fn_node: u32) ?u32 {
         const tags = self.tree.nodes.items(.tag);
-        if (fn_node >= tags.len or tags[fn_node] != .fn_decl) return null;
+        if (fn_node >= tags.len) return null;
+
         const data = self.tree.nodes.items(.data)[fn_node];
+
+        if (tags[fn_node] == .test_decl) {
+            // test_decl uses opt_token_and_node: [1] is the body
+            return @intFromEnum(data.opt_token_and_node[1]);
+        }
+
+        if (tags[fn_node] != .fn_decl) return null;
         return @intFromEnum(data.node_and_node[1]);
     }
 
