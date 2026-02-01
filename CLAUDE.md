@@ -77,9 +77,18 @@ nix develop
 See existing rules in `src/rules/` for patterns. For CFG-based checkers, see `src/checkers/`.
 
 ### CLI Flags
+- `--file <path>`: Specify a file or directory to analyze (repeatable)
 - `--do <rule>`: Run only specified rules (allowlist, repeatable)
 - `--skip <rule>`: Skip specified rules (blocklist, repeatable)
-- `--do` and `--skip` are mutually exclusive
+- `--do` and `--skip` are mutually exclusive; rule and checker names share the same namespace
+- `--target <triple>`: Specify target triple (e.g., `x86_64-linux-gnu`)
+- `--config <path>`: Path to config file (default: `.zwanzig.json`)
+- `--format <format>`: Output format (`text`, `json`, `sarif`)
+- `--max-steps <n>`: Max worklist steps per engine run
+- `--max-states-per-point <n>`: Max unique states per CFG point
+- `--use-widening`: Enable widening for convergence (default: on; disable via config)
+- `--cache`: Enable incremental caching
+- `--threads <n>`: Number of threads for parallel analysis (default: CPU count)
 - `--dump-cfg <dir>`: Dump CFG DOT files for visualization
 - `--dump-exploded-graph <dir>`: Dump exploded graph showing all (CFG node, state) pairs
 - `--dump-annotated-cfg <dir>`: Dump CFG with state annotations overlaid
@@ -87,11 +96,13 @@ See existing rules in `src/rules/` for patterns. For CFG-based checkers, see `sr
 
 See [docs/VISUALIZATION.md](docs/VISUALIZATION.md) for detailed visualization documentation.
 
+Default rule filtering: if no config file is present and no `--do`/`--skip` flags are used, `sentinel-alloc` is blocklisted.
+
 ## Debugging
 
 ### Debug Logging
 
-Set log level at build time or use `-Dlog_level=debug` for verbose output showing rule execution and analysis stats.
+Set log level at build time or use `-Dlog-level=debug` for verbose output showing rule execution and analysis stats.
 
 ## Testing
 

@@ -1,153 +1,108 @@
 # Task: Zwanzig Correctness Fixes and Analysis Improvements
 
-This plan focuses on correctness fixes and minimal analysis improvements that make the linter practically useful. It incorporates the chosen decisions:
-- **Diagnostics**: Option A (Diagnostic always owns message strings)
-- **Cache**: Option 3 (Cache intermediate artifacts: typed IR/CFG/summaries), not diagnostics
+Overview: Finish the remaining correctness work after VarId mapping and basic engine infrastructure landed. The focus now is on real constraint extraction, accurate error-path summaries, CFG-based unreachable detection, artifact caching, and documentation updates.
 
-Each step is designed for a single agent session (target: < ~1000 LOC change per step).
-
----
-
-## Step 1: Variable Identity (VarId) Unification
+## Step 1: Implement branch constraint extraction
 
 ### Status Quo
-- VarId exists in `src/ids.zig`, but uses raw AST indices as identifiers
-- Decls, assignments, and branch constraints use different AST node IDs
-- ProgramState does not propagate values or constraints correctly across these different representations
+- VarId mapping and scope-aware resolution are in place.
+- `AnalysisEngine.extractBranchConstraint` only handles literal booleans and a placeholder operand encoding.
+- `CfgBuilder` does not encode comparison details, so conditions like `x == 0` or `x != null` do not yield constraints.
 
 ### Objectives
-Introduce a stable VarId mapping for locals and use it consistently across the CFG builder and engine, enabling correct value and constraint propagation.
+Extract simple, sound constraints from branch conditions and apply them on branch edges to enable path pruning and refined states.
 
 ### Tech Notes
-- Implement a VarId resolver for function scope (conservative AST-based mapping)
-- Provide a helper (e.g., `VarIdMap.resolve(node)`) used by CFG builder and engine
-- Consider using `src/ids.zig` as the location for VarId types
+- Parse the condition AST directly for binary comparisons (`==`, `!=`, `<`, `<=`, `>`, `>=`) and null checks.
+- Map identifiers to canonical VarIds using the existing resolver.
+- Emit `Constraint.intCompare` for integer literals and `Constraint.nullCheck` for optional comparisons.
+- Keep boolean checks for `if (flag)` and literal conditions.
+- Do not invent constraints for complex expressions; return null when uncertain.
 
 ### Acceptance Criteria
-- `just test` passes with new VarId propagation tests
-- Create a test fixture with `var x = 1; x = 2; if (x == 2) {}` and verify the constraint applies to the same VarId
-- `just lint` passes
+- `just test` passes with new constraint extraction tests.
+- Fixture: `if (x == null) {}` applies a null constraint to `x` on the true branch.
+- Fixture: `if (x < 0) {}` applies an integer constraint on the true branch.
+- `just lint` passes.
 
-## Step 2: CFG/IR VarId Integration
+## Step 2: Fix summary error-path correctness
 
 ### Status Quo
-- VarId resolver exists from Step 1
-- IR nodes in `src/ir.zig` store raw AST indices
-- Engine assumes those are VarIds but they are not canonical
+- Summary computation only detects `try`/`try_error` edges.
+- Explicit error returns (`return error.Foo`) and error-union returns are not reflected in summaries.
+- `FunctionSummary.applyToState` only marks error state for `always_returns_error`.
 
 ### Objectives
-Embed VarId in IR/CFG to align state updates and constraints, ensuring ProgramState uses canonical identifiers.
+Ensure summaries conservatively preserve error behavior so callers see error paths when a callee can return errors.
 
 ### Tech Notes
-- Extend `IrNode` with VarId fields for assignments and branch conditions
-- Populate VarIds in the CFG builder for `.var_decl`, `.assign`, and `.branch`
-- Update engine to use VarId fields instead of AST node indices
+- Inspect return expressions in `computeSummary` to detect explicit error values.
+- When `TypeContext` is available, treat error-union return types as `may_return_error`.
+- If summary applicability is unclear (missing types or ambiguous control flow), fall back to inlining.
+- Apply `may_return_error` by forking or marking error paths in `applyToState` (keep conservative).
 
 ### Acceptance Criteria
-- `just test` passes with IR/CFG VarId tests
-- Verify with a test that `env.get(var_id)` returns the expected value after assignment
-- `just lint` passes
+- `just test` passes with summary error-path tests.
+- Fixture: function returning `error.Foo` sets `may_return_error` in its summary.
+- Fixture: caller of error-returning function shows an error path in the exploded graph.
+- `just lint` passes.
 
-## Step 3: Constraint Extraction (Minimal Semantics)
+## Step 3: Use CFG/exploded graph reachability for unreachable code
 
 ### Status Quo
-- VarId is integrated into IR/CFG from Step 2
-- Branch constraint extraction in the engine is a placeholder
-- Constraints do not reflect actual conditions like `x == 0` or `x != null`
+- The AST rule handles obvious unreachable code after returns.
+- `unreachable-code-engine` only reports constant conditions via AST evaluation.
+- The exploded graph is not used to detect unreachable CFG nodes.
 
 ### Objectives
-Extract simple constraints from conditions (`x == 0`, `x != 0`, `x < N`, `x == null`, `x != null`) and apply them on branch edges.
+Report unreachable code based on CFG reachability and path feasibility, not just constant conditions.
 
 ### Tech Notes
-- Parse the branch condition AST for simple binary ops and null checks
-- Encode comparison info in IR or an auxiliary condition struct
-- Apply constraints on `branch_true`/`branch_false` edges and prune infeasible paths
+- Add or extend an engine-based checker to scan CFG nodes with no reachable exploded states.
+- Report only when **no** feasible states reach a node (conservative).
+- Map unreachable CFG nodes back to source ranges for diagnostics.
 
 ### Acceptance Criteria
-- `just test` passes with constraint extraction tests
-- Test fixture: `if (x == null) { /* x is null here */ } else { /* x is non-null here */ }` verifies correct constraint application
-- Test fixture with `if (x < 0) { return; } // x >= 0 here` verifies integer constraints
-- `just lint` passes
+- `just test` passes with engine-based unreachable code tests.
+- Fixture: `if (true) { return; } doSomething();` marks `doSomething()` as unreachable.
+- Fixture: loop with guaranteed early return marks trailing code unreachable.
+- `just lint` passes.
 
-## Step 4: Summary Error-Path Correctness
+## Step 4: Cache intermediate artifacts (typed IR/CFG/summaries)
 
 ### Status Quo
-- Function summaries exist in `src/engine/summary.zig`
-- Summaries may drop error paths
-- Error behavior detection is limited to `try_expr`
+- Cache infrastructure and `CachedArtifacts` exist, but only minimal metadata is stored.
+- CFGs, summaries, and typed IR are rebuilt on every run even with `--cache`.
 
 ### Objectives
-Ensure summaries conservatively preserve error behavior for functions that can return errors.
+Persist and reuse intermediate artifacts while still recomputing diagnostics on every run.
 
 ### Tech Notes
-- Detect explicit error returns in CFG (e.g., `return error.X` / error union returns)
-- Track `may_return_error` in summaries and apply it in `applyToState` by forking or marking error paths
-- If summary applicability is unclear, fall back to inlining
+- Serialize CFGs and summaries into `CachedArtifacts` after analysis.
+- On cache hit, load artifacts and reuse them where safe (no diagnostics caching).
+- Guard reuse by cache version and build metadata; fall back to recomputation when missing.
 
 ### Acceptance Criteria
-- `just test` passes with summary error-path tests
-- Test fixture: function returning `error.Foo` has `may_return_error = true` in its summary
-- Test fixture: caller of error-returning function has error path in exploded graph
-- `just lint` passes
+- `just test` passes with artifact caching tests.
+- Running the analyzer twice on unchanged input reuses cached CFG/summaries but still produces diagnostics.
+- `just lint` passes.
 
-## Step 5: Unreachable Code via CFG/Engine
+## Step 5: Update documentation for adjustments
 
 ### Status Quo
-- `unreachable-code` rule exists in `src/rules/unreachable_code.zig` and is AST-based
-- `unreachable-code-engine` checker only detects constant `true`/`false` conditions
-- CFG/exploded-graph reachability is not used for unreachable detection
+- `docs/IMPLEMENTATION.md` documents VarId mapping and current cache behavior.
+- Diagnostic ownership, constraint extraction semantics, and CFG-based unreachable detection are not documented.
 
 ### Objectives
-Use CFG + exploded graph reachability for more precise unreachable code detection.
+Update internal and user-facing docs to reflect the completed adjustments.
 
 ### Tech Notes
-- Report CFG nodes that have no feasible exploded nodes reaching them
-- Keep conservative: report only when no feasible paths exist
-- May need to add a checker interface for engine-based unreachable detection
+- Document diagnostic ownership (messages are owned by `Diagnostic`).
+- Document branch constraint extraction and summary error-path behavior.
+- Update cache documentation to reflect artifact reuse once implemented.
+- Add a note about CFG/exploded-graph-based unreachable detection.
 
 ### Acceptance Criteria
-- `just test` passes with engine-based unreachable code tests
-- Test fixture: `if (true) { return; } doSomething();` detects `doSomething()` as unreachable
-- Test fixture: loop with guaranteed early return detects trailing code as unreachable
-- `just lint` passes
-
-## Step 6: Intermediate Artifact Cache (Typed IR/CFG/Summaries)
-
-### Status Quo
-- Cache exists in `src/cache.zig` and no longer skips analysis on cache hits
-- Cache keys include file hash, target, tool version, and enabled rules
-- `CachedArtifacts` serialization exists but analyzer does not store or reuse CFGs/summaries yet
-
-### Objectives
-Cache intermediate artifacts only, never diagnostics. Analysis always runs but can reuse cached artifacts.
-
-### Tech Notes
-- Persist typed IR, CFGs, and summaries when available
-- Load cached artifacts when valid; rebuild if missing
-- Ensure cached artifacts are actually used to skip recomputation where safe
-
-### Acceptance Criteria
-- `just test` passes with artifact caching tests
-- Verify: modify a file, run twice, second run recomputes diagnostics (not cached)
-- Verify: unchanged file uses cached CFG/summaries but still runs checkers
-- `just lint` passes
-
-## Step 7: Documentation Update (Adjustment Scope)
-
-### Status Quo
-- `docs/IMPLEMENTATION.md` and `README.md` were partially updated
-- VarId mapping, constraint extraction, and CFG-based unreachable detection are not documented
-- Cache docs do not yet cover actual CFG reuse once implemented
-
-### Objectives
-Update documentation to reflect all adjustment changes once Steps 1-6 are complete.
-
-### Tech Notes
-- Update `docs/IMPLEMENTATION.md` with diagnostic ownership, VarId mapping, constraint extraction, and cache behavior
-- Update `README.md` with any user-facing changes (cache flags, new checker behavior)
-
-### Acceptance Criteria
-- `docs/IMPLEMENTATION.md` describes diagnostic ownership model
-- `docs/IMPLEMENTATION.md` describes VarId and constraint extraction
-- `docs/IMPLEMENTATION.md` describes artifact caching strategy and actual reuse
-- `just lint` passes
+- `docs/IMPLEMENTATION.md` covers diagnostic ownership, constraint extraction, summary error paths, and artifact caching.
+- `README.md` (and/or `docs/RULES.md`) mentions CFG-based unreachable detection if user-facing.
+- `just lint` passes.
