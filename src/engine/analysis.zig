@@ -8,6 +8,7 @@ const EdgeKind = cfg_mod.EdgeKind;
 const CfgBuilder = cfg_mod.CfgBuilder;
 const Source = @import("../source.zig").Source;
 const BuildMetadata = @import("../build_metadata.zig").BuildMetadata;
+const assertions = @import("../assertions.zig");
 const TypeContext = @import("../type_context.zig").TypeContext;
 const Config = @import("../config.zig").Config;
 const base = @import("base.zig");
@@ -54,6 +55,8 @@ pub const AnalysisEngine = struct {
     function_names: std.StringHashMap(AstNodeId),
     /// Cache of scope-aware variable resolvers per function
     var_resolvers: std.AutoHashMap(AstNodeId, *VarResolver),
+    /// Cache of assertion scopes per function
+    assertion_scopes: std.AutoHashMap(AstNodeId, assertions.AssertionScope),
     /// Count of inlined calls (for testing/debugging)
     inlined_call_count: u32,
     /// Cache of function summaries for interprocedural analysis
@@ -100,6 +103,7 @@ pub const AnalysisEngine = struct {
             .function_cfgs = std.AutoHashMap(AstNodeId, *Cfg).init(allocator),
             .function_names = std.StringHashMap(AstNodeId).init(allocator),
             .var_resolvers = std.AutoHashMap(AstNodeId, *VarResolver).init(allocator),
+            .assertion_scopes = std.AutoHashMap(AstNodeId, assertions.AssertionScope).init(allocator),
             .inlined_call_count = 0,
             .summary_cache = SummaryCache.init(allocator),
             .use_summaries = true,
@@ -136,7 +140,30 @@ pub const AnalysisEngine = struct {
             self.allocator.destroy(resolver_ptr.*);
         }
         self.var_resolvers.deinit();
+        var scope_iter = self.assertion_scopes.valueIterator();
+        while (scope_iter.next()) |scope| {
+            scope.deinit(self.allocator);
+        }
+        self.assertion_scopes.deinit();
         self.summary_cache.deinit();
+    }
+
+    fn getAssertionScope(self: *AnalysisEngine, current_cfg: *const Cfg) ?*assertions.AssertionScope {
+        const fn_node = current_cfg.fn_ast_node orelse return null;
+        if (self.assertion_scopes.getPtr(fn_node)) |scope| return scope;
+
+        const src = self.source orelse return null;
+        const tree = src.ast() catch return null;
+
+        var scope = assertions.buildAssertionScope(self.allocator, tree, ids.astIndex(fn_node), false) catch return null;
+        errdefer scope.deinit(self.allocator);
+
+        self.assertion_scopes.put(fn_node, scope) catch {
+            scope.deinit(self.allocator);
+            return null;
+        };
+
+        return self.assertion_scopes.getPtr(fn_node);
     }
 
     /// Set the maximum inline depth for interprocedural analysis.
@@ -806,7 +833,10 @@ pub const AnalysisEngine = struct {
         return ids.varId(token);
     }
 
-    fn resolveVarIdFromExpr(self: *AnalysisEngine, expr_node: u32, current_cfg: *const Cfg) ?ids.VarId {
+    /// Resolve a variable ID from an expression node.
+    /// This handles identifiers, grouped expressions, unwrap operations, etc.
+    /// Uses the VarResolver when available to correctly handle variable shadowing.
+    pub fn resolveVarIdFromExpr(self: *AnalysisEngine, expr_node: u32, current_cfg: *const Cfg) ?ids.VarId {
         const src = self.source orelse return null;
         const tree = src.ast() catch return null;
         const tags = tree.nodes.items(.tag);
@@ -818,6 +848,25 @@ pub const AnalysisEngine = struct {
             .grouped_expression, .unwrap_optional => blk: {
                 const data = datas[expr_node].node_and_token;
                 break :blk self.resolveVarIdFromExpr(@intFromEnum(data[0]), current_cfg);
+            },
+            .field_access => blk: {
+                // For field access like self.cache_dir, create a combined VarId
+                // from the base expression and a hash of the field name
+                const field_access_data = datas[expr_node].node_and_token;
+                const base_node = @intFromEnum(field_access_data[0]);
+                const field_token = field_access_data[1];
+
+                // Hash the field name (not token position) for consistent VarId across usages
+                const field_name = tree.tokenSlice(field_token);
+                const field_name_hash = hashFieldName(field_name);
+
+                // Recursively resolve the base (handles chained field access like a.b.c)
+                if (self.resolveVarIdFromExpr(base_node, current_cfg)) |base_var_id| {
+                    // Combine base VarId and field name hash to create a unique ID for the field access
+                    break :blk combineFieldAccessId(base_var_id, field_name_hash);
+                }
+                // If we can't resolve the base, use the field name hash alone as a fallback
+                break :blk combineFieldAccessId(ids.varId(0), field_name_hash);
             },
             .slice, .slice_open, .slice_sentinel => blk: {
                 const slice = tree.fullSlice(@enumFromInt(expr_node)) orelse break :blk null;
@@ -840,6 +889,50 @@ pub const AnalysisEngine = struct {
             },
             else => null,
         };
+    }
+
+    /// Hash a field name to a u32 using FNV-1a.
+    fn hashFieldName(name: []const u8) u32 {
+        const fnv_offset: u32 = 2166136261;
+        const fnv_prime: u32 = 16777619;
+
+        var hash: u32 = fnv_offset;
+        for (name) |byte| {
+            hash ^= byte;
+            hash *%= fnv_prime;
+        }
+        return hash;
+    }
+
+    /// Combine a base VarId with a field name hash to create a unique VarId for field access.
+    /// Uses FNV-1a hash to combine the two values into a single u32.
+    fn combineFieldAccessId(base_var_id: ids.VarId, field_name_hash: u32) ids.VarId {
+        // Use FNV-1a hash to combine base_var_id and field_name_hash
+        const fnv_offset: u32 = 2166136261;
+        const fnv_prime: u32 = 16777619;
+
+        var hash: u32 = fnv_offset;
+        // Mix in the base var id
+        const base_val = @intFromEnum(base_var_id);
+        hash ^= @truncate(base_val & 0xFF);
+        hash *%= fnv_prime;
+        hash ^= @truncate((base_val >> 8) & 0xFF);
+        hash *%= fnv_prime;
+        hash ^= @truncate((base_val >> 16) & 0xFF);
+        hash *%= fnv_prime;
+        hash ^= @truncate((base_val >> 24) & 0xFF);
+        hash *%= fnv_prime;
+        // Mix in the field name hash
+        hash ^= @truncate(field_name_hash & 0xFF);
+        hash *%= fnv_prime;
+        hash ^= @truncate((field_name_hash >> 8) & 0xFF);
+        hash *%= fnv_prime;
+        hash ^= @truncate((field_name_hash >> 16) & 0xFF);
+        hash *%= fnv_prime;
+        hash ^= @truncate((field_name_hash >> 24) & 0xFF);
+        hash *%= fnv_prime;
+
+        return ids.varId(hash);
     }
 
     fn getOrBuildVarResolver(self: *AnalysisEngine, fn_node: AstNodeId) ?*VarResolver {
@@ -1724,10 +1817,11 @@ pub const AnalysisEngine = struct {
 
                 // Check if this is a branch node - if so, we need to extract constraints
                 const is_branch_node = if (cfg_node) |node| node.ir_node.tag == .branch else false;
-                const branch_constraint = if (is_branch_node)
-                    self.extractBranchConstraint(cfg_node.?, current_cfg)
+                var branch_constraints: [4]?Constraint = .{ null, null, null, null };
+                const branch_constraint_count: usize = if (is_branch_node)
+                    self.extractBranchConstraints(cfg_node.?, current_cfg, &branch_constraints)
                 else
-                    null;
+                    0;
 
                 for (current_cfg.edges.items) |edge| {
                     if (edge.from == point.node_index) {
@@ -1764,25 +1858,29 @@ pub const AnalysisEngine = struct {
                             try self.applyPayloadBindings(node, edge.kind, &succ_state, current_cfg);
                         }
 
-                        // Determine the constraint to apply based on the edge kind
-                        var constraint_to_apply: ?Constraint = null;
-                        if (branch_constraint) |bc| {
-                            if (edge.kind == .branch_true) {
-                                constraint_to_apply = bc;
-                            } else if (edge.kind == .branch_false) {
-                                constraint_to_apply = bc.negate();
-                            }
-                        }
+                        // Apply all branch constraints based on the edge kind
+                        var path_pruned = false;
+                        if (branch_constraint_count > 0) {
+                            for (branch_constraints[0..branch_constraint_count]) |maybe_constraint| {
+                                if (maybe_constraint) |bc| {
+                                    const constraint_to_apply = if (edge.kind == .branch_true)
+                                        bc
+                                    else if (edge.kind == .branch_false)
+                                        bc.negate()
+                                    else
+                                        continue;
 
-                        // If we have a constraint, apply it to the state before deduplication
-                        if (constraint_to_apply) |constraint| {
-                            try succ_state.addConstraint(constraint);
-                            if (!succ_state.isSatisfiable()) {
-                                self.pruned_path_count += 1;
-                                succ_state.deinit();
-                                continue;
+                                    try succ_state.addConstraint(constraint_to_apply);
+                                    if (!succ_state.isSatisfiable()) {
+                                        self.pruned_path_count += 1;
+                                        succ_state.deinit();
+                                        path_pruned = true;
+                                        break;
+                                    }
+                                }
                             }
                         }
+                        if (path_pruned) continue;
 
                         // Determine if widening should be applied at this point.
                         // Widening triggers on loop-back edges into loop headers and on other join points
@@ -1978,26 +2076,19 @@ pub const AnalysisEngine = struct {
     /// Extract a constraint from a branch node's condition.
     /// Returns null if no constraint can be extracted.
     fn extractBranchConstraint(self: *AnalysisEngine, cfg_node: *const CfgNode, current_cfg: *const Cfg) ?Constraint {
-        // The branch node has ast_node pointing to the if expression
-        // In a more complete implementation, we would analyze the condition expression
-        // to extract constraints like "x == 5" or "x != null"
-        //
-        // For now, we support a simple pattern where the branch node's operand_node
-        // contains the variable being tested, and operand2_node contains information
-        // about the comparison.
-        //
-        // This is a placeholder that can be enhanced when the CFG builder provides
-        // more detailed information about branch conditions.
         const ir_node = cfg_node.ir_node;
         if (ir_node.operand_node) |cond_node| {
             // First check if the condition is a literal boolean
             if (self.evaluateLiteral(cond_node)) |literal_val| {
                 if (literal_val.toBool()) |bool_val| {
-                    // Literal true/false - create a constraint on a synthetic var
-                    // that will be checked against the known literal value
                     const var_key = ids.varId(cond_node);
                     return Constraint.boolCheck(var_key, bool_val);
                 }
+            }
+
+            // Check if the condition is a null comparison (x == null or x != null)
+            if (self.extractNullCheckConstraint(cond_node, current_cfg)) |null_constraint| {
+                return null_constraint;
             }
 
             const var_key = if (self.source != null)
@@ -2005,16 +2096,376 @@ pub const AnalysisEngine = struct {
             else
                 ids.varId(cond_node);
             if (ir_node.operand2_node) |cmp_info| {
-                // Interpret operand2_node as encoded comparison info:
-                // High 32 bits of the value represent the comparison constant
-                // This is a simplified encoding for now
                 return Constraint.intCompare(var_key, .eq, @as(i64, cmp_info));
             }
-            // If we only have a variable and no comparison info, assume it's a boolean check
-            // (for branches like `if (flag) ...` where flag is a boolean)
+            if (ir_node.ast_node) |ast_node| {
+                if (self.hasPayloadCapture(ast_node)) {
+                    return Constraint.nullCheck(var_key, false);
+                }
+            }
+            // If we only have a variable and no comparison info, check if it's an optional
+            // being used as a boolean (if (optional_var) ...)
+            if (self.isOptionalType(cond_node, current_cfg)) {
+                // When optional is used as condition: true branch means non-null
+                return Constraint.nullCheck(var_key, false);
+            }
             return Constraint.boolCheck(var_key, true);
         }
         return null;
+    }
+
+    /// Extract multiple constraints from a branch condition.
+    /// This handles compound null checks like `a == null or b == null`.
+    fn extractBranchConstraints(
+        self: *AnalysisEngine,
+        cfg_node: *const CfgNode,
+        current_cfg: *const Cfg,
+        out_constraints: *[4]?Constraint,
+    ) usize {
+        const ir_node = cfg_node.ir_node;
+        if (ir_node.operand_node) |cond_node| {
+            // Try compound null constraints first (for bool_or/bool_and patterns)
+            const count = self.extractCompoundNullConstraints(cond_node, current_cfg, out_constraints);
+            if (count > 0) {
+                return count;
+            }
+
+            // Fall back to single constraint
+            if (self.extractBranchConstraint(cfg_node, current_cfg)) |c| {
+                out_constraints[0] = c;
+                return 1;
+            }
+        }
+        return 0;
+    }
+
+    /// Extract a null check constraint from a comparison expression.
+    /// Handles patterns like `x == null` and `x != null`.
+    fn extractNullCheckConstraint(self: *AnalysisEngine, cond_node: u32, current_cfg: *const Cfg) ?Constraint {
+        const src = self.source orelse return null;
+        const tree = src.ast() catch return null;
+        const tags = tree.nodes.items(.tag);
+        const datas = tree.nodes.items(.data);
+
+        if (cond_node >= tags.len) return null;
+
+        const tag = tags[cond_node];
+        if (tag != .equal_equal and tag != .bang_equal) return null;
+
+        // Get both operands of the comparison
+        const lhs = datas[cond_node].node_and_node[0];
+        const rhs = datas[cond_node].node_and_node[1];
+
+        // Check if either operand is `null`
+        const lhs_is_null = self.isNullLiteral(@intFromEnum(lhs));
+        const rhs_is_null = self.isNullLiteral(@intFromEnum(rhs));
+
+        if (!lhs_is_null and !rhs_is_null) return null;
+
+        // The other operand is the variable being compared
+        const var_node = if (lhs_is_null) @intFromEnum(rhs) else @intFromEnum(lhs);
+        const var_key = self.resolveVarIdFromExpr(var_node, current_cfg) orelse ids.varId(var_node);
+
+        // For == null: is_null=true (true branch means var is null)
+        // For != null: is_null=false (true branch means var is non-null)
+        const is_null = (tag == .equal_equal);
+        return Constraint.nullCheck(var_key, is_null);
+    }
+
+    /// Extract multiple null check constraints from compound expressions.
+    /// Handles patterns like:
+    /// - `a == null or b == null` -> on false branch, both a and b are non-null
+    /// - `a != null and b != null` -> on true branch, both a and b are non-null
+    /// Returns constraints for the TRUE branch; caller should negate for false branch.
+    fn extractCompoundNullConstraints(
+        self: *AnalysisEngine,
+        cond_node: u32,
+        current_cfg: *const Cfg,
+        out_constraints: *[4]?Constraint,
+    ) usize {
+        const src = self.source orelse return 0;
+        const tree = src.ast() catch return 0;
+        const tags = tree.nodes.items(.tag);
+        const datas = tree.nodes.items(.data);
+
+        if (cond_node >= tags.len) return 0;
+
+        const tag = tags[cond_node];
+
+        // Handle bool_or: (a == null or b == null)
+        // On TRUE branch: at least one is null (can't use easily)
+        // On FALSE branch: both are non-null (useful!)
+        // We return the TRUE branch constraint, so for bool_or we return is_null=true for both
+        if (tag == .bool_or) {
+            const lhs = @intFromEnum(datas[cond_node].node_and_node[0]);
+            const rhs = @intFromEnum(datas[cond_node].node_and_node[1]);
+
+            var count: usize = 0;
+            if (self.extractNullCheckConstraint(lhs, current_cfg)) |c| {
+                out_constraints[count] = c;
+                count += 1;
+            }
+            if (self.extractNullCheckConstraint(rhs, current_cfg)) |c| {
+                out_constraints[count] = c;
+                count += 1;
+            }
+            return count;
+        }
+
+        // Handle bool_and: (a != null and b != null)
+        // On TRUE branch: both are non-null (useful!)
+        // On FALSE branch: at least one is null (can't use easily)
+        if (tag == .bool_and) {
+            const lhs = @intFromEnum(datas[cond_node].node_and_node[0]);
+            const rhs = @intFromEnum(datas[cond_node].node_and_node[1]);
+
+            var count: usize = 0;
+            if (self.extractNullCheckConstraint(lhs, current_cfg)) |c| {
+                out_constraints[count] = c;
+                count += 1;
+            }
+            if (self.extractNullCheckConstraint(rhs, current_cfg)) |c| {
+                out_constraints[count] = c;
+                count += 1;
+            }
+            return count;
+        }
+
+        // Fall back to single constraint
+        if (self.extractNullCheckConstraint(cond_node, current_cfg)) |c| {
+            out_constraints[0] = c;
+            return 1;
+        }
+
+        return 0;
+    }
+
+    fn isNullLiteral(self: *AnalysisEngine, node: u32) bool {
+        const src = self.source orelse return false;
+        const tree = src.ast() catch return false;
+        const tags = tree.nodes.items(.tag);
+        const main_tokens = tree.nodes.items(.main_token);
+
+        if (node >= tags.len) return false;
+        if (tags[node] != .identifier) return false;
+
+        const token = main_tokens[node];
+        const token_slice = tree.tokenSlice(token);
+        return std.mem.eql(u8, token_slice, "null");
+    }
+
+    fn isNonNullLiteral(self: *AnalysisEngine, node: u32) bool {
+        const src = self.source orelse return false;
+        const tree = src.ast() catch return false;
+        const tags = tree.nodes.items(.tag);
+        const datas = tree.nodes.items(.data);
+        const token_tags = tree.tokens.items(.tag);
+
+        if (node >= tags.len) return false;
+
+        return switch (tags[node]) {
+            .number_literal,
+            .char_literal,
+            .string_literal,
+            .multiline_string_literal,
+            .enum_literal,
+            .error_value,
+            => true,
+            .unwrap_optional,
+            .grouped_expression,
+            => blk: {
+                const data = datas[node].node_and_token;
+                break :blk self.isNonNullLiteral(@intFromEnum(data[0]));
+            },
+            .builtin_call, .builtin_call_comma, .builtin_call_two, .builtin_call_two_comma => blk: {
+                const builtin_name = builtinCallName(tree, tags, token_tags, node) orelse break :blk false;
+                if (!std.mem.eql(u8, builtin_name, "@as")) break :blk false;
+                var buf: [2]std.zig.Ast.Node.Index = undefined;
+                const params = tree.builtinCallParams(&buf, @enumFromInt(node)) orelse break :blk false;
+                if (params.len < 2) break :blk false;
+                break :blk self.isNonNullLiteral(@intFromEnum(params[1]));
+            },
+            else => false,
+        };
+    }
+
+    fn builtinCallName(
+        tree: *const std.zig.Ast,
+        tags: []const std.zig.Ast.Node.Tag,
+        token_tags: []const std.zig.Token.Tag,
+        node_idx: u32,
+    ) ?[]const u8 {
+        switch (tags[node_idx]) {
+            .builtin_call, .builtin_call_comma, .builtin_call_two, .builtin_call_two_comma => {},
+            else => return null,
+        }
+
+        const builtin_token = tree.nodes.items(.main_token)[node_idx];
+        if (builtin_token >= token_tags.len) return null;
+        if (token_tags[builtin_token] != .builtin) return null;
+        return tree.tokenSlice(builtin_token);
+    }
+
+    /// Extract a nullability constraint from an assertion call.
+    /// Handles patterns like:
+    /// - testing.expect(x != null)
+    /// - std.testing.expect(x != null)
+    /// - std.testing.expectEqual(x, null)
+    /// After such a call, we assume the asserted relationship holds.
+    fn extractAssertionConstraint(self: *AnalysisEngine, call_node: u32, current_cfg: *const Cfg) ?Constraint {
+        const src = self.source orelse return null;
+        const tree = src.ast() catch return null;
+        const tags = tree.nodes.items(.tag);
+        const datas = tree.nodes.items(.data);
+
+        if (call_node >= tags.len) return null;
+
+        // Get the full call information
+        var call_buf: [1]std.zig.Ast.Node.Index = undefined;
+        const full_call = switch (tags[call_node]) {
+            .call, .call_comma, .call_one, .call_one_comma => tree.fullCall(&call_buf, @enumFromInt(call_node)),
+            else => null,
+        } orelse return null;
+
+        const scope = self.getAssertionScope(current_cfg) orelse return null;
+        const assertion_name = assertions.resolveAssertionName(tree, full_call.ast.fn_expr, scope) orelse return null;
+        const assertion_kind = assertions.constraintKindForName(assertion_name) orelse return null;
+
+        // Get the first argument (the condition being asserted)
+        const args = full_call.ast.params;
+        if (args.len == 0) return null;
+
+        switch (assertion_kind) {
+            .boolean => {
+                const cond_node = @intFromEnum(args[0]);
+
+                // Check if the condition is a null check (x != null)
+                if (cond_node >= tags.len) return null;
+                const cond_tag = tags[cond_node];
+
+                if (cond_tag == .bang_equal) {
+                    // x != null pattern - after expect(x != null), x is non-null
+                    const lhs = datas[cond_node].node_and_node[0];
+                    const rhs = datas[cond_node].node_and_node[1];
+
+                    const lhs_is_null = self.isNullLiteral(@intFromEnum(lhs));
+                    const rhs_is_null = self.isNullLiteral(@intFromEnum(rhs));
+
+                    if (lhs_is_null or rhs_is_null) {
+                        const var_node = if (lhs_is_null) @intFromEnum(rhs) else @intFromEnum(lhs);
+                        const var_key = self.resolveVarIdFromExpr(var_node, current_cfg) orelse return null;
+                        // After expect(x != null), x is proven non-null (is_null=false)
+                        return Constraint.nullCheck(var_key, false);
+                    }
+                } else if (cond_tag == .equal_equal) {
+                    // x == null pattern - after expect(x == null), x is proven null
+                    // This is less common but we handle it for completeness
+                    const lhs = datas[cond_node].node_and_node[0];
+                    const rhs = datas[cond_node].node_and_node[1];
+
+                    const lhs_is_null = self.isNullLiteral(@intFromEnum(lhs));
+                    const rhs_is_null = self.isNullLiteral(@intFromEnum(rhs));
+
+                    if (lhs_is_null or rhs_is_null) {
+                        const var_node = if (lhs_is_null) @intFromEnum(rhs) else @intFromEnum(lhs);
+                        const var_key = self.resolveVarIdFromExpr(var_node, current_cfg) orelse return null;
+                        // After expect(x == null), x is proven null (is_null=true)
+                        return Constraint.nullCheck(var_key, true);
+                    }
+                }
+
+                return null;
+            },
+            .equality => {
+                if (args.len < 2) return null;
+                const lhs_node = @intFromEnum(args[0]);
+                const rhs_node = @intFromEnum(args[1]);
+
+                const lhs_is_null = self.isNullLiteral(lhs_node);
+                const rhs_is_null = self.isNullLiteral(rhs_node);
+
+                if (lhs_is_null or rhs_is_null) {
+                    const var_node = if (lhs_is_null) rhs_node else lhs_node;
+                    const var_key = self.resolveVarIdFromExpr(var_node, current_cfg) orelse return null;
+                    return Constraint.nullCheck(var_key, true);
+                }
+
+                const lhs_is_non_null = self.isNonNullLiteral(lhs_node);
+                const rhs_is_non_null = self.isNonNullLiteral(rhs_node);
+
+                if (lhs_is_non_null or rhs_is_non_null) {
+                    const var_node = if (lhs_is_non_null) rhs_node else lhs_node;
+                    const var_key = self.resolveVarIdFromExpr(var_node, current_cfg) orelse return null;
+                    return Constraint.nullCheck(var_key, false);
+                }
+
+                return null;
+            },
+        }
+    }
+
+    /// Extract a non-null constraint from a try expression wrapping an assertion call.
+    /// Handles patterns like: try testing.expect(x != null)
+    fn extractTryAssertionConstraint(self: *AnalysisEngine, try_ast_node: u32, current_cfg: *const Cfg) ?Constraint {
+        const src = self.source orelse return null;
+        const tree = src.ast() catch return null;
+        const tags = tree.nodes.items(.tag);
+        const datas = tree.nodes.items(.data);
+
+        if (try_ast_node >= tags.len) return null;
+
+        // Check if the AST node is a try expression
+        if (tags[try_ast_node] != .@"try") return null;
+
+        // Get the operand of the try expression
+        const try_operand = @intFromEnum(datas[try_ast_node].node);
+        if (try_operand >= tags.len) return null;
+
+        // Check if the operand is a call expression
+        const operand_tag = tags[try_operand];
+        if (operand_tag != .call and operand_tag != .call_comma and
+            operand_tag != .call_one and operand_tag != .call_one_comma)
+        {
+            return null;
+        }
+
+        // Delegate to the regular assertion constraint extraction
+        return self.extractAssertionConstraint(try_operand, current_cfg);
+    }
+
+    /// Check if a condition expression is an optional type.
+    fn isOptionalType(self: *AnalysisEngine, cond_node: u32, current_cfg: *const Cfg) bool {
+        _ = current_cfg;
+        const src = self.source orelse return false;
+        const tree = src.ast() catch return false;
+        const tags = tree.nodes.items(.tag);
+
+        if (cond_node >= tags.len) return false;
+
+        // If it's an identifier, check if the type context knows it's optional
+        if (tags[cond_node] == .identifier) {
+            if (self.type_context) |type_ctx| {
+                const main_tokens = tree.nodes.items(.main_token);
+                const token = main_tokens[cond_node];
+                const name = tree.tokenSlice(token);
+                if (type_ctx.getDeclType(name)) |type_info| {
+                    return type_info.kind == .optional;
+                }
+            }
+        }
+
+        return false;
+    }
+
+    fn hasPayloadCapture(self: *AnalysisEngine, ast_node: u32) bool {
+        const src = self.source orelse return false;
+        const tree = src.ast() catch return false;
+        const tags = tree.nodes.items(.tag);
+
+        if (ast_node >= tags.len) return false;
+        if (tags[ast_node] != .@"if" and tags[ast_node] != .if_simple) return false;
+        const full_if = tree.fullIf(@enumFromInt(ast_node)) orelse return false;
+        return full_if.payload_token != null;
     }
 
     fn hasMultiplePredecessors(cfg: *const Cfg, node_index: CfgNodeId) bool {
@@ -2150,6 +2601,12 @@ pub const AnalysisEngine = struct {
                     }
                     self.trackEscapesFromCall(&new_state, ast_node, current_cfg);
                     try self.recordOwnershipFromCall(&new_state, ast_node, current_cfg);
+
+                    // Check for assertion calls like testing.expect(x != null)
+                    // and add non-null constraints for the asserted variables
+                    if (self.extractAssertionConstraint(ast_node, current_cfg)) |constraint| {
+                        try new_state.addConstraint(constraint);
+                    }
                 }
             },
             .defer_stmt => {
@@ -2201,6 +2658,11 @@ pub const AnalysisEngine = struct {
                 if (ir_node.ast_node) |ast_node| {
                     try self.checkUseAfterFreeInExpr(&new_state, ast_node, current_cfg);
                     self.trackEscapesInExpr(&new_state, ast_node, current_cfg);
+
+                    // Check for assertion calls wrapped in try (try testing.expect(...))
+                    if (self.extractTryAssertionConstraint(ast_node, current_cfg)) |constraint| {
+                        try new_state.addConstraint(constraint);
+                    }
                 }
             },
             .expr => {
@@ -2414,7 +2876,7 @@ test "AnalysisEngine simple CFG traversal" {
     const graph = engine.getGraph();
     try testing.expect(graph.nodeCount() >= 4);
 
-    const node0 = graph.getNode(0).?;
+    const node0 = graph.getNode(0) orelse return error.TestUnexpectedResult;
     try testing.expectEqual(entry, node0.point.node_index);
     try testing.expectEqual(ProgramPoint.Kind.pre, node0.point.kind);
 }

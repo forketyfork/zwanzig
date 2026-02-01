@@ -135,6 +135,24 @@ fn add(value: i32) i32 {
 }
 ```
 
+### optional-unwrap
+
+Flags forced optional unwraps using `.?`, which panic at runtime if the value is `null`. Prefer handling the optional with `if (opt) |value|` or `orelse` to make the null case explicit.
+
+**Bad:**
+```zig
+fn readConfig(opt: ?[]const u8) []const u8 {
+    return opt.?; // Panics if opt is null
+}
+```
+
+**Good:**
+```zig
+fn readConfig(opt: ?[]const u8) []const u8 {
+    return opt orelse "default";
+}
+```
+
 ### unreachable-code
 
 Detects code that can never execute after an unconditional terminator (e.g., `return`) or after fully terminating branches (`if`, `switch`, `while`).

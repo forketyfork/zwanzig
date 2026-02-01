@@ -15,6 +15,7 @@ const ShadowedVariableRule = @import("rules/shadowed_variable.zig").ShadowedVari
 const IdentifierStyleRule = @import("rules/identifier_style.zig").IdentifierStyleRule;
 const SentinelAllocRule = @import("rules/sentinel_alloc.zig").SentinelAllocRule;
 const UnusedParameterRule = @import("rules/unused_parameter.zig").UnusedParameterRule;
+const OptionalUnwrapEngineChecker = @import("checkers/optional_unwrap_engine.zig").OptionalUnwrapEngineChecker;
 const RuleFilter = @import("rule_filter.zig").RuleFilter;
 const file_discovery = @import("file_discovery.zig");
 const EmptyCatchEngineChecker = @import("checkers/empty_catch_engine.zig").EmptyCatchEngineChecker;
@@ -42,6 +43,7 @@ test {
     _ = @import("checkers/swallowed_error.zig");
     _ = @import("checkers/unreachable_code_checker.zig");
     _ = @import("checkers/store_violations_engine.zig");
+    _ = @import("checkers/optional_unwrap_engine.zig");
     _ = @import("build_metadata.zig");
     _ = @import("config.zig");
     _ = @import("cache.zig");
@@ -255,9 +257,10 @@ const MergedConfig = struct {
     resource_models: []const config.ResourceModel = &.{},
 };
 fn defaultRuleFilter(allocator: std.mem.Allocator) !RuleFilter {
-    var rule_names = try allocator.alloc([]const u8, 1);
+    var rule_names = try allocator.alloc([]const u8, 2);
     errdefer allocator.free(rule_names);
     rule_names[0] = try allocator.dupe(u8, "sentinel-alloc");
+    rule_names[1] = try allocator.dupe(u8, "optional-unwrap");
     return .{ .blocklist = rule_names };
 }
 
@@ -572,6 +575,7 @@ pub fn main() !void {
 
     // Engine-based checkers
     try analyzer.registerChecker(&EmptyCatchEngineChecker.checker);
+    try analyzer.registerChecker(&OptionalUnwrapEngineChecker.checker);
     try analyzer.registerChecker(&SwallowedErrorChecker.checker);
     try analyzer.registerChecker(&UnreachableCodeChecker.checker);
     try analyzer.registerChecker(&StoreViolationsEngineChecker.checker);
@@ -1094,8 +1098,9 @@ test "mergeConfig: no config file and no CLI filter" {
 
     switch (result.rule_filter) {
         .blocklist => |list| {
-            try std.testing.expectEqual(@as(usize, 1), list.len);
+            try std.testing.expectEqual(@as(usize, 2), list.len);
             try std.testing.expectEqualStrings("sentinel-alloc", list[0]);
+            try std.testing.expectEqualStrings("optional-unwrap", list[1]);
         },
         else => return error.UnexpectedFilterType,
     }

@@ -99,36 +99,64 @@ pub const CfgBuilder = struct {
         if (fn_index >= tags.len) return null;
 
         const tag = tags[fn_index];
-        if (tag != .fn_decl) return null;
+        const fn_data = tree.nodes.items(.data)[fn_index];
+        var body_node: u32 = 0;
 
         var cfg = Cfg.init(self.allocator);
         errdefer cfg.deinit();
 
         cfg.fn_ast_node = fn_node;
 
-        // Extract function name from the AST
-        const fn_data = tree.nodes.items(.data)[fn_index];
-        const fn_proto_idx = @intFromEnum(fn_data.node_and_node[0]);
-        if (fn_proto_idx > 0) {
-            const main_tokens = tree.nodes.items(.main_token);
-            const proto_token = main_tokens[fn_proto_idx];
-            // The function name token typically follows the 'fn' keyword
-            // Check if the next token is an identifier
-            const token_tags = tree.tokens.items(.tag);
-            if (proto_token + 1 < token_tags.len and token_tags[proto_token + 1] == .identifier) {
-                const name_start = tree.tokens.items(.start)[proto_token + 1];
-                const source_bytes = tree.source;
-                // Find the end of the identifier
-                var name_end = name_start;
-                while (name_end < source_bytes.len and
-                    (std.ascii.isAlphanumeric(source_bytes[name_end]) or source_bytes[name_end] == '_'))
-                {
-                    name_end += 1;
-                }
-                if (name_end > name_start) {
-                    cfg.fn_name = source_bytes[name_start..name_end];
+        if (tag == .fn_decl) {
+            // Extract function name from the AST
+            const fn_proto_idx = @intFromEnum(fn_data.node_and_node[0]);
+            if (fn_proto_idx > 0) {
+                const main_tokens = tree.nodes.items(.main_token);
+                const proto_token = main_tokens[fn_proto_idx];
+                // The function name token typically follows the 'fn' keyword
+                // Check if the next token is an identifier
+                const token_tags = tree.tokens.items(.tag);
+                if (proto_token + 1 < token_tags.len and token_tags[proto_token + 1] == .identifier) {
+                    const name_start = tree.tokens.items(.start)[proto_token + 1];
+                    const source_bytes = tree.source;
+                    // Find the end of the identifier
+                    var name_end = name_start;
+                    while (name_end < source_bytes.len and
+                        (std.ascii.isAlphanumeric(source_bytes[name_end]) or source_bytes[name_end] == '_'))
+                    {
+                        name_end += 1;
+                    }
+                    if (name_end > name_start) {
+                        cfg.fn_name = source_bytes[name_start..name_end];
+                    }
                 }
             }
+            body_node = @intFromEnum(fn_data.node_and_node[1]);
+        } else if (tag == .test_decl) {
+            // Test declarations: extract test name and body
+            // test_decl uses opt_token_and_node: [0] is optional name token, [1] is body
+            const main_tokens = tree.nodes.items(.main_token);
+            const test_token = main_tokens[fn_index];
+            // Test name comes after 'test' keyword - check for string literal or identifier
+            const token_tags = tree.tokens.items(.tag);
+            if (test_token + 1 < token_tags.len) {
+                const name_token = test_token + 1;
+                if (token_tags[name_token] == .string_literal) {
+                    const name_start = tree.tokens.items(.start)[name_token];
+                    const source_bytes = tree.source;
+                    // Find the end of the string literal
+                    var name_end = name_start + 1; // Skip opening quote
+                    while (name_end < source_bytes.len and source_bytes[name_end] != '"') {
+                        name_end += 1;
+                    }
+                    if (name_end > name_start + 1) {
+                        cfg.fn_name = source_bytes[name_start + 1 .. name_end];
+                    }
+                }
+            }
+            body_node = @intFromEnum(fn_data.opt_token_and_node[1]);
+        } else {
+            return null;
         }
 
         const entry_idx = try cfg.addNode(IrNode.init(.fn_entry));
@@ -136,8 +164,6 @@ pub const CfgBuilder = struct {
 
         const exit_idx = try cfg.addNode(IrNode.init(.fn_exit));
         cfg.exit = exit_idx;
-
-        const body_node = @intFromEnum(fn_data.node_and_node[1]);
 
         if (body_node == 0) {
             try cfg.addEdge(entry_idx, exit_idx);

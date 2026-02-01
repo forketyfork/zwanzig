@@ -5,6 +5,7 @@ const Rule = @import("../rule.zig").Rule;
 const RuleError = @import("../rule.zig").RuleError;
 const Source = @import("../source.zig").Source;
 const VarResolver = @import("../engine/var_resolver.zig").VarResolver;
+const ast_walk = @import("../ast_walk.zig");
 
 const Ast = std.zig.Ast;
 
@@ -124,91 +125,6 @@ pub const UnusedParameterRule = struct {
 
     /// Recursively check if a node contains an identifier with the given name.
     fn containsIdentifier(tree: *const Ast, node: u32, target_name: []const u8) bool {
-        if (node == 0) return false;
-
-        const tags = tree.nodes.items(.tag);
-        const datas = tree.nodes.items(.data);
-        const main_tokens = tree.nodes.items(.main_token);
-
-        if (node >= tags.len) return false;
-
-        const tag = tags[node];
-
-        // Base case: identifier node
-        if (tag == .identifier) {
-            const token = main_tokens[node];
-            const name = tree.tokenSlice(token);
-            return std.mem.eql(u8, name, target_name);
-        }
-
-        // Recursive cases based on node type
-        switch (tag) {
-            // Pointer types: *T, [*]T, etc.
-            .ptr_type, .ptr_type_aligned, .ptr_type_sentinel, .ptr_type_bit_range => {
-                const ptr_info = tree.fullPtrType(@enumFromInt(node)) orelse return false;
-                return containsIdentifier(tree, @intFromEnum(ptr_info.ast.child_type), target_name);
-            },
-
-            // Array types: [N]T, []T
-            .array_type, .array_type_sentinel => {
-                const arr = datas[node].node_and_node;
-                // arr[1] is the element type
-                return containsIdentifier(tree, @intFromEnum(arr[1]), target_name);
-            },
-
-            // Slice types via slicing expressions
-            .slice, .slice_open, .slice_sentinel => {
-                const slice_data = datas[node].node_and_node;
-                return containsIdentifier(tree, @intFromEnum(slice_data[0]), target_name);
-            },
-
-            // Optional type: ?T
-            .optional_type => {
-                const child = datas[node].node;
-                return containsIdentifier(tree, @intFromEnum(child), target_name);
-            },
-
-            // Error union: E!T
-            .error_union => {
-                const pair = datas[node].node_and_node;
-                return containsIdentifier(tree, @intFromEnum(pair[0]), target_name) or
-                    containsIdentifier(tree, @intFromEnum(pair[1]), target_name);
-            },
-
-            // Field access: a.b (for types like std.ArrayList)
-            .field_access => {
-                const obj = datas[node].node_and_node[0];
-                return containsIdentifier(tree, @intFromEnum(obj), target_name);
-            },
-
-            // Call expressions: Type(args) for generic instantiation
-            .call, .call_comma, .call_one, .call_one_comma => {
-                var buf: [1]Ast.Node.Index = undefined;
-                const call_info = tree.fullCall(&buf, @enumFromInt(node)) orelse return false;
-                if (containsIdentifier(tree, @intFromEnum(call_info.ast.fn_expr), target_name)) {
-                    return true;
-                }
-                for (call_info.ast.params) |param| {
-                    if (containsIdentifier(tree, @intFromEnum(param), target_name)) {
-                        return true;
-                    }
-                }
-                return false;
-            },
-
-            // Builtin calls: @TypeOf(x), @Vector(n, T), etc.
-            .builtin_call, .builtin_call_comma, .builtin_call_two, .builtin_call_two_comma => {
-                var buf: [2]Ast.Node.Index = undefined;
-                const params = tree.builtinCallParams(&buf, @enumFromInt(node)) orelse return false;
-                for (params) |param| {
-                    if (containsIdentifier(tree, @intFromEnum(param), target_name)) {
-                        return true;
-                    }
-                }
-                return false;
-            },
-
-            else => return false,
-        }
+        return ast_walk.containsIdentifier(tree, node, target_name);
     }
 };

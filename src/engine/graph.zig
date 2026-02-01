@@ -564,8 +564,8 @@ test "ExplodedGraph edge operations" {
 
     try graph.addEdge(result1.index, result2.index);
 
-    const node1 = graph.getNode(result1.index).?;
-    const node2 = graph.getNode(result2.index).?;
+    const node1 = graph.getNode(result1.index) orelse return error.TestUnexpectedResult;
+    const node2 = graph.getNode(result2.index) orelse return error.TestUnexpectedResult;
 
     try testing.expectEqual(@as(usize, 1), node1.successors.items.len);
     try testing.expectEqual(@as(usize, 1), node2.predecessors.items.len);
@@ -747,8 +747,8 @@ test "ExplodedGraph widen-on-cap updates existing node" {
     try testing.expect(result.state_updated);
     try testing.expectEqual(@as(u32, 0), graph.getDroppedStateCount());
 
-    const node = graph.getNode(result.index).?;
-    const val = node.state.getVar(ids.varId(1)).?;
+    const node = graph.getNode(result.index) orelse return error.TestUnexpectedResult;
+    const val = node.state.getVar(ids.varId(1)) orelse return error.TestUnexpectedResult;
     try testing.expect(val.isUnknown());
 
     state3.deinit();
