@@ -806,7 +806,10 @@ pub const AnalysisEngine = struct {
         return ids.varId(token);
     }
 
-    fn resolveVarIdFromExpr(self: *AnalysisEngine, expr_node: u32, current_cfg: *const Cfg) ?ids.VarId {
+    /// Resolve a variable ID from an expression node.
+    /// This handles identifiers, grouped expressions, unwrap operations, etc.
+    /// Uses the VarResolver when available to correctly handle variable shadowing.
+    pub fn resolveVarIdFromExpr(self: *AnalysisEngine, expr_node: u32, current_cfg: *const Cfg) ?ids.VarId {
         const src = self.source orelse return null;
         const tree = src.ast() catch return null;
         const tags = tree.nodes.items(.tag);

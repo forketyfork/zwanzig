@@ -109,7 +109,7 @@ pub const OptionalUnwrapEngineChecker = struct {
 
             // Scan AST for unwrap_optional nodes and check nullability
             const tree = src.ast() catch return;
-            try scanForUnsafeUnwraps(src, allocator, diagnostics, tree, &engine, cfg, reported);
+            try scanForUnsafeUnwraps(src, allocator, diagnostics, tree, &engine, cfg, reported, fn_node);
         }
     }
 
@@ -118,9 +118,10 @@ pub const OptionalUnwrapEngineChecker = struct {
         allocator: std.mem.Allocator,
         diagnostics: *std.ArrayList(Diagnostic),
         tree: *const std.zig.Ast,
-        engine: *const AnalysisEngine,
+        engine: *AnalysisEngine,
         cfg: *const Cfg,
         reported: *std.AutoHashMap(u32, void),
+        fn_node: ids.AstNodeId,
     ) CheckerError!void {
         const tags = tree.nodes.items(.tag);
         const main_tokens = tree.nodes.items(.main_token);
@@ -139,7 +140,7 @@ pub const OptionalUnwrapEngineChecker = struct {
             const unwrapped_node = @intFromEnum(datas[ast_node].node_and_token[0]);
 
             // Find the CFG node containing this AST node
-            const cfg_node_idx = findCfgNodeForAst(cfg, ast_node);
+            const cfg_node_idx = findCfgNodeForAst(cfg, ast_node, tree);
             if (cfg_node_idx == null) {
                 // AST node not in CFG (possibly unreachable code) - report conservatively
                 try reportUnsafeUnwrap(src, allocator, diagnostics, main_tokens[ast_node], token_starts);
@@ -148,52 +149,75 @@ pub const OptionalUnwrapEngineChecker = struct {
             }
 
             // Check if the variable is proven non-null at this point
-            if (!isProvenNonNull(engine, cfg_node_idx.?, unwrapped_node, tree, cfg)) {
+            if (!isProvenNonNull(engine, cfg_node_idx.?, unwrapped_node, cfg, fn_node)) {
                 try reportUnsafeUnwrap(src, allocator, diagnostics, main_tokens[ast_node], token_starts);
                 try reported.put(ast_node, {});
             }
         }
     }
 
-    fn findCfgNodeForAst(cfg: *const Cfg, ast_node: u32) ?ids.CfgNodeId {
+    fn findCfgNodeForAst(cfg: *const Cfg, ast_node: u32, tree: *const std.zig.Ast) ?ids.CfgNodeId {
+        const token_starts = tree.tokens.items(.start);
+        const main_tokens = tree.nodes.items(.main_token);
+
+        // Get the byte position of the target AST node
+        if (ast_node >= main_tokens.len) return null;
+        const target_pos = token_starts[main_tokens[ast_node]];
+
+        // Find the CFG node that directly matches this AST node
         for (cfg.nodes.items, 0..) |node, idx| {
             if (node.ir_node.ast_node) |node_ast| {
                 if (node_ast == ast_node) {
                     return ids.cfgId(@intCast(idx));
                 }
             }
-            // Also check if the AST node is contained in the expression represented by this CFG node
-            if (containsAstNode(cfg, node.ir_node.ast_node, ast_node)) {
-                return ids.cfgId(@intCast(idx));
+        }
+
+        // If no direct match, find the CFG node whose AST span contains this node
+        // by finding the smallest CFG node that starts before and ends after the target
+        var best_match: ?ids.CfgNodeId = null;
+        var best_start: u32 = 0;
+
+        for (cfg.nodes.items, 0..) |node, idx| {
+            if (node.ir_node.ast_node) |node_ast| {
+                if (node_ast >= main_tokens.len) continue;
+
+                const cfg_pos = token_starts[main_tokens[node_ast]];
+                // Find CFG nodes that start at or before the target position
+                // and pick the one that starts closest to the target
+                if (cfg_pos <= target_pos and cfg_pos >= best_start) {
+                    best_start = cfg_pos;
+                    best_match = ids.cfgId(@intCast(idx));
+                }
             }
         }
-        return null;
-    }
 
-    fn containsAstNode(cfg: *const Cfg, parent: ?u32, target: u32) bool {
-        _ = cfg;
-        // Simple containment check - in practice we'd need to walk the AST
-        if (parent == null) return false;
-        return parent.? == target;
+        return best_match;
     }
 
     fn isProvenNonNull(
-        engine: *const AnalysisEngine,
+        engine: *AnalysisEngine,
         cfg_node_idx: ids.CfgNodeId,
         unwrapped_node: u32,
-        tree: *const std.zig.Ast,
         cfg: *const Cfg,
+        fn_node: ids.AstNodeId,
     ) bool {
+        _ = fn_node;
         // Get all states reaching this CFG node
         const graph = engine.getGraph();
-        const tags = tree.nodes.items(.tag);
 
-        // Find the variable ID for the unwrapped expression
-        const var_id = resolveVarId(unwrapped_node, tree, cfg);
+        // Find the variable ID for the unwrapped expression using the engine's resolver
+        const var_id = engine.resolveVarIdFromExpr(unwrapped_node, cfg);
+
+        // Track if we found any states at this CFG node
+        var found_states = false;
+        var all_paths_safe = true;
 
         // Check all exploded nodes at this CFG location
         for (graph.nodes.items) |exploded_node| {
             if (exploded_node.point.node_index != cfg_node_idx) continue;
+
+            found_states = true;
 
             // Check if this state proves the variable is non-null
             if (var_id) |vid| {
@@ -215,50 +239,20 @@ pub const OptionalUnwrapEngineChecker = struct {
                     continue; // This path is safe
                 }
 
-                // This path has an unguarded unwrap - but we only report if ALL paths are unsafe
-                // For now, be conservative and check if ANY path is unsafe
+                // This path has an unguarded unwrap
+                all_paths_safe = false;
+            } else {
+                // Couldn't resolve the variable - be conservative
+                all_paths_safe = false;
             }
-
-            // Check if unwrapped expression is in a comparison context
-            // e.g., if the parent is `.if` and the condition checks this variable
-            if (isInGuardedContext(unwrapped_node, tree, tags)) {
-                continue;
-            }
-
-            // Found an unsafe path - report it
-            return false;
         }
 
         // If we found no states at this point, be conservative
-        if (graph.nodes.items.len == 0) {
+        if (!found_states) {
             return false;
         }
 
-        return true;
-    }
-
-    fn resolveVarId(node: u32, tree: *const std.zig.Ast, cfg: *const Cfg) ?ids.VarId {
-        _ = cfg;
-        const tags = tree.nodes.items(.tag);
-        const main_tokens = tree.nodes.items(.main_token);
-
-        if (node >= tags.len) return null;
-
-        if (tags[node] == .identifier) {
-            return ids.varId(main_tokens[node]);
-        }
-
-        return null;
-    }
-
-    fn isInGuardedContext(node: u32, tree: *const std.zig.Ast, tags: []const std.zig.Ast.Node.Tag) bool {
-        _ = tree;
-        // Simple heuristic: if the unwrap is inside an if's then-block where
-        // the condition is a null check on the same variable, it's guarded.
-        // This is a simplified check - full implementation would trace control flow.
-        _ = node;
-        _ = tags;
-        return false;
+        return all_paths_safe;
     }
 
     fn reportUnsafeUnwrap(
