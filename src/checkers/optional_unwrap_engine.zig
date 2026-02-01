@@ -37,9 +37,13 @@ pub const OptionalUnwrapEngineChecker = struct {
         const tree = src.ast() catch return;
         const tags = tree.nodes.items(.tag);
 
+        // Track reported AST nodes across all functions to avoid duplicates
+        var reported: std.AutoHashMap(u32, void) = std.AutoHashMap(u32, void).init(allocator);
+        defer reported.deinit();
+
         for (0..tags.len) |i| {
             if (tags[i] == .fn_decl) {
-                try analyzeFunction(src, allocator, ids.astId(@intCast(i)), diagnostics, context);
+                try analyzeFunction(src, allocator, ids.astId(@intCast(i)), diagnostics, context, &reported);
             }
         }
     }
@@ -50,6 +54,7 @@ pub const OptionalUnwrapEngineChecker = struct {
         fn_node: ids.AstNodeId,
         diagnostics: *std.ArrayList(Diagnostic),
         context: checker_mod.CheckerContext,
+        reported: *std.AutoHashMap(u32, void),
     ) CheckerError!void {
         var builder = context.createCfgBuilder(allocator);
         var cfg_opt = builder.buildFromFn(src, fn_node) catch return;
@@ -104,7 +109,7 @@ pub const OptionalUnwrapEngineChecker = struct {
 
             // Scan AST for unwrap_optional nodes and check nullability
             const tree = src.ast() catch return;
-            try scanForUnsafeUnwraps(src, allocator, diagnostics, tree, &engine, cfg);
+            try scanForUnsafeUnwraps(src, allocator, diagnostics, tree, &engine, cfg, reported);
         }
     }
 
@@ -115,15 +120,12 @@ pub const OptionalUnwrapEngineChecker = struct {
         tree: *const std.zig.Ast,
         engine: *const AnalysisEngine,
         cfg: *const Cfg,
+        reported: *std.AutoHashMap(u32, void),
     ) CheckerError!void {
         const tags = tree.nodes.items(.tag);
         const main_tokens = tree.nodes.items(.main_token);
         const token_starts = tree.tokens.items(.start);
         const datas = tree.nodes.items(.data);
-
-        // Track reported locations to avoid duplicates
-        var reported: std.AutoHashMap(u32, void) = std.AutoHashMap(u32, void).init(allocator);
-        defer reported.deinit();
 
         for (tags, 0..) |tag, i| {
             if (tag != .unwrap_optional) continue;
