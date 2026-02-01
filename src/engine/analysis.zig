@@ -8,6 +8,7 @@ const EdgeKind = cfg_mod.EdgeKind;
 const CfgBuilder = cfg_mod.CfgBuilder;
 const Source = @import("../source.zig").Source;
 const BuildMetadata = @import("../build_metadata.zig").BuildMetadata;
+const assertions = @import("../assertions.zig");
 const TypeContext = @import("../type_context.zig").TypeContext;
 const Config = @import("../config.zig").Config;
 const base = @import("base.zig");
@@ -2071,6 +2072,11 @@ pub const AnalysisEngine = struct {
             if (ir_node.operand2_node) |cmp_info| {
                 return Constraint.intCompare(var_key, .eq, @as(i64, cmp_info));
             }
+            if (ir_node.ast_node) |ast_node| {
+                if (self.hasPayloadCapture(ast_node)) {
+                    return Constraint.nullCheck(var_key, false);
+                }
+            }
             // If we only have a variable and no comparison info, check if it's an optional
             // being used as a boolean (if (optional_var) ...)
             if (self.isOptionalType(cond_node, current_cfg)) {
@@ -2222,12 +2228,64 @@ pub const AnalysisEngine = struct {
         return std.mem.eql(u8, token_slice, "null");
     }
 
-    /// Extract a non-null constraint from an assertion call.
+    fn isNonNullLiteral(self: *AnalysisEngine, node: u32) bool {
+        const src = self.source orelse return false;
+        const tree = src.ast() catch return false;
+        const tags = tree.nodes.items(.tag);
+        const datas = tree.nodes.items(.data);
+        const token_tags = tree.tokens.items(.tag);
+
+        if (node >= tags.len) return false;
+
+        return switch (tags[node]) {
+            .number_literal,
+            .char_literal,
+            .string_literal,
+            .multiline_string_literal,
+            .enum_literal,
+            .error_value,
+            => true,
+            .unwrap_optional,
+            .grouped_expression,
+            => blk: {
+                const data = datas[node].node_and_token;
+                break :blk self.isNonNullLiteral(@intFromEnum(data[0]));
+            },
+            .builtin_call, .builtin_call_comma, .builtin_call_two, .builtin_call_two_comma => blk: {
+                const builtin_name = builtinCallName(tree, tags, token_tags, node) orelse break :blk false;
+                if (!std.mem.eql(u8, builtin_name, "@as")) break :blk false;
+                var buf: [2]std.zig.Ast.Node.Index = undefined;
+                const params = tree.builtinCallParams(&buf, @enumFromInt(node)) orelse break :blk false;
+                if (params.len < 2) break :blk false;
+                break :blk self.isNonNullLiteral(@intFromEnum(params[1]));
+            },
+            else => false,
+        };
+    }
+
+    fn builtinCallName(
+        tree: *const std.zig.Ast,
+        tags: []const std.zig.Ast.Node.Tag,
+        token_tags: []const std.zig.Token.Tag,
+        node_idx: u32,
+    ) ?[]const u8 {
+        switch (tags[node_idx]) {
+            .builtin_call, .builtin_call_comma, .builtin_call_two, .builtin_call_two_comma => {},
+            else => return null,
+        }
+
+        const builtin_token = tree.nodes.items(.main_token)[node_idx];
+        if (builtin_token >= token_tags.len) return null;
+        if (token_tags[builtin_token] != .builtin) return null;
+        return tree.tokenSlice(builtin_token);
+    }
+
+    /// Extract a nullability constraint from an assertion call.
     /// Handles patterns like:
     /// - testing.expect(x != null)
     /// - std.testing.expect(x != null)
-    /// - try testing.expect(x != null)
-    /// After such a call, we assume x is non-null (the assertion would have failed otherwise).
+    /// - std.testing.expectEqual(x, null)
+    /// After such a call, we assume the asserted relationship holds.
     fn extractAssertionConstraint(self: *AnalysisEngine, call_node: u32, current_cfg: *const Cfg) ?Constraint {
         const src = self.source orelse return null;
         const tree = src.ast() catch return null;
@@ -2243,90 +2301,80 @@ pub const AnalysisEngine = struct {
             else => null,
         } orelse return null;
 
-        // Check if this is an assertion function
-        if (!self.isAssertionCall(tree, full_call.ast.fn_expr)) return null;
+        const assertion_name = assertions.resolveAssertionName(tree, full_call.ast.fn_expr, false) orelse return null;
+        const assertion_kind = assertions.constraintKindForName(assertion_name) orelse return null;
 
         // Get the first argument (the condition being asserted)
         const args = full_call.ast.params;
         if (args.len == 0) return null;
-        const cond_node = @intFromEnum(args[0]);
 
-        // Check if the condition is a null check (x != null)
-        if (cond_node >= tags.len) return null;
-        const cond_tag = tags[cond_node];
+        switch (assertion_kind) {
+            .boolean => {
+                const cond_node = @intFromEnum(args[0]);
 
-        if (cond_tag == .bang_equal) {
-            // x != null pattern - after expect(x != null), x is non-null
-            const lhs = datas[cond_node].node_and_node[0];
-            const rhs = datas[cond_node].node_and_node[1];
+                // Check if the condition is a null check (x != null)
+                if (cond_node >= tags.len) return null;
+                const cond_tag = tags[cond_node];
 
-            const lhs_is_null = self.isNullLiteral(@intFromEnum(lhs));
-            const rhs_is_null = self.isNullLiteral(@intFromEnum(rhs));
+                if (cond_tag == .bang_equal) {
+                    // x != null pattern - after expect(x != null), x is non-null
+                    const lhs = datas[cond_node].node_and_node[0];
+                    const rhs = datas[cond_node].node_and_node[1];
 
-            if (lhs_is_null or rhs_is_null) {
-                const var_node = if (lhs_is_null) @intFromEnum(rhs) else @intFromEnum(lhs);
-                const var_key = self.resolveVarIdFromExpr(var_node, current_cfg) orelse return null;
-                // After expect(x != null), x is proven non-null (is_null=false)
-                return Constraint.nullCheck(var_key, false);
-            }
-        } else if (cond_tag == .equal_equal) {
-            // x == null pattern - after expect(x == null), x is proven null
-            // This is less common but we handle it for completeness
-            const lhs = datas[cond_node].node_and_node[0];
-            const rhs = datas[cond_node].node_and_node[1];
+                    const lhs_is_null = self.isNullLiteral(@intFromEnum(lhs));
+                    const rhs_is_null = self.isNullLiteral(@intFromEnum(rhs));
 
-            const lhs_is_null = self.isNullLiteral(@intFromEnum(lhs));
-            const rhs_is_null = self.isNullLiteral(@intFromEnum(rhs));
+                    if (lhs_is_null or rhs_is_null) {
+                        const var_node = if (lhs_is_null) @intFromEnum(rhs) else @intFromEnum(lhs);
+                        const var_key = self.resolveVarIdFromExpr(var_node, current_cfg) orelse return null;
+                        // After expect(x != null), x is proven non-null (is_null=false)
+                        return Constraint.nullCheck(var_key, false);
+                    }
+                } else if (cond_tag == .equal_equal) {
+                    // x == null pattern - after expect(x == null), x is proven null
+                    // This is less common but we handle it for completeness
+                    const lhs = datas[cond_node].node_and_node[0];
+                    const rhs = datas[cond_node].node_and_node[1];
 
-            if (lhs_is_null or rhs_is_null) {
-                const var_node = if (lhs_is_null) @intFromEnum(rhs) else @intFromEnum(lhs);
-                const var_key = self.resolveVarIdFromExpr(var_node, current_cfg) orelse return null;
-                // After expect(x == null), x is proven null (is_null=true)
-                return Constraint.nullCheck(var_key, true);
-            }
+                    const lhs_is_null = self.isNullLiteral(@intFromEnum(lhs));
+                    const rhs_is_null = self.isNullLiteral(@intFromEnum(rhs));
+
+                    if (lhs_is_null or rhs_is_null) {
+                        const var_node = if (lhs_is_null) @intFromEnum(rhs) else @intFromEnum(lhs);
+                        const var_key = self.resolveVarIdFromExpr(var_node, current_cfg) orelse return null;
+                        // After expect(x == null), x is proven null (is_null=true)
+                        return Constraint.nullCheck(var_key, true);
+                    }
+                }
+
+                return null;
+            },
+            .equality => {
+                if (args.len < 2) return null;
+                const lhs_node = @intFromEnum(args[0]);
+                const rhs_node = @intFromEnum(args[1]);
+
+                const lhs_is_null = self.isNullLiteral(lhs_node);
+                const rhs_is_null = self.isNullLiteral(rhs_node);
+
+                if (lhs_is_null or rhs_is_null) {
+                    const var_node = if (lhs_is_null) rhs_node else lhs_node;
+                    const var_key = self.resolveVarIdFromExpr(var_node, current_cfg) orelse return null;
+                    return Constraint.nullCheck(var_key, true);
+                }
+
+                const lhs_is_non_null = self.isNonNullLiteral(lhs_node);
+                const rhs_is_non_null = self.isNonNullLiteral(rhs_node);
+
+                if (lhs_is_non_null or rhs_is_non_null) {
+                    const var_node = if (lhs_is_non_null) rhs_node else lhs_node;
+                    const var_key = self.resolveVarIdFromExpr(var_node, current_cfg) orelse return null;
+                    return Constraint.nullCheck(var_key, false);
+                }
+
+                return null;
+            },
         }
-
-        return null;
-    }
-
-    /// Check if a call expression is to a known assertion function.
-    fn isAssertionCall(self: *AnalysisEngine, tree: *const std.zig.Ast, fn_expr: std.zig.Ast.Node.Index) bool {
-        _ = self;
-        const tags = tree.nodes.items(.tag);
-        const datas = tree.nodes.items(.data);
-        const fn_node = @intFromEnum(fn_expr);
-
-        if (fn_node >= tags.len) return false;
-
-        // Handle field access patterns like testing.expect or std.testing.expect
-        if (tags[fn_node] == .field_access) {
-            const field_data = datas[fn_node].node_and_token;
-            const field_token = field_data[1];
-            const field_name = tree.tokenSlice(field_token);
-
-            // Check if the field name is a known assertion function
-            if (std.mem.eql(u8, field_name, "expect") or
-                std.mem.eql(u8, field_name, "expectEqual") or
-                std.mem.eql(u8, field_name, "assert"))
-            {
-                return true;
-            }
-        }
-
-        // Handle direct identifier calls (rare but possible)
-        if (tags[fn_node] == .identifier) {
-            const main_tokens = tree.nodes.items(.main_token);
-            const token = main_tokens[fn_node];
-            const name = tree.tokenSlice(token);
-
-            if (std.mem.eql(u8, name, "assert") or
-                std.mem.eql(u8, name, "expect"))
-            {
-                return true;
-            }
-        }
-
-        return false;
     }
 
     /// Extract a non-null constraint from a try expression wrapping an assertion call.
@@ -2380,6 +2428,17 @@ pub const AnalysisEngine = struct {
         }
 
         return false;
+    }
+
+    fn hasPayloadCapture(self: *AnalysisEngine, ast_node: u32) bool {
+        const src = self.source orelse return false;
+        const tree = src.ast() catch return false;
+        const tags = tree.nodes.items(.tag);
+
+        if (ast_node >= tags.len) return false;
+        if (tags[ast_node] != .@"if" and tags[ast_node] != .if_simple) return false;
+        const full_if = tree.fullIf(@enumFromInt(ast_node)) orelse return false;
+        return full_if.payload_token != null;
     }
 
     fn hasMultiplePredecessors(cfg: *const Cfg, node_index: CfgNodeId) bool {

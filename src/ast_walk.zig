@@ -1,0 +1,310 @@
+const std = @import("std");
+
+const Ast = std.zig.Ast;
+
+pub fn walk(
+    comptime Visitor: type,
+    tree: *const Ast,
+    node: u32,
+    visitor: *Visitor,
+) !void {
+    if (visitor.stop) return;
+    if (node == 0) return;
+
+    const tags = tree.nodes.items(.tag);
+    if (node >= tags.len) return;
+
+    try visitor.visit(tree, node, tags[node]);
+    if (visitor.stop) return;
+
+    if (tree.fullSwitchCase(@enumFromInt(node))) |full_case| {
+        for (full_case.ast.values) |value| {
+            try walk(Visitor, tree, @intFromEnum(value), visitor);
+            if (visitor.stop) return;
+        }
+        try walk(Visitor, tree, @intFromEnum(full_case.ast.target_expr), visitor);
+        return;
+    }
+
+    const datas = tree.nodes.items(.data);
+
+    switch (tags[node]) {
+        .block, .block_semicolon => {
+            const extra_range = datas[node].extra_range;
+            const start = @intFromEnum(extra_range.start);
+            const end = @intFromEnum(extra_range.end);
+            const statements = tree.extra_data[start..end];
+            for (statements) |stmt| {
+                try walk(Visitor, tree, stmt, visitor);
+                if (visitor.stop) return;
+            }
+            return;
+        },
+        .block_two, .block_two_semicolon => {
+            const pair = datas[node].opt_node_and_opt_node;
+            if (pair[0].unwrap()) |n| {
+                try walk(Visitor, tree, @intFromEnum(n), visitor);
+                if (visitor.stop) return;
+            }
+            if (pair[1].unwrap()) |n| {
+                try walk(Visitor, tree, @intFromEnum(n), visitor);
+                if (visitor.stop) return;
+            }
+            return;
+        },
+        .fn_decl => {
+            const body = @intFromEnum(datas[node].node_and_node[1]);
+            if (body != 0) {
+                try walk(Visitor, tree, body, visitor);
+            }
+            return;
+        },
+        .test_decl => {
+            const body = @intFromEnum(datas[node].opt_token_and_node[1]);
+            if (body != 0) {
+                try walk(Visitor, tree, body, visitor);
+            }
+            return;
+        },
+        .simple_var_decl, .local_var_decl, .global_var_decl, .aligned_var_decl => {
+            const full = tree.fullVarDecl(@enumFromInt(node)) orelse return;
+            if (full.ast.init_node.unwrap()) |init| {
+                try walk(Visitor, tree, @intFromEnum(init), visitor);
+            }
+            return;
+        },
+        .@"if", .if_simple => {
+            const full = tree.fullIf(@enumFromInt(node)) orelse return;
+            try walk(Visitor, tree, @intFromEnum(full.ast.cond_expr), visitor);
+            if (visitor.stop) return;
+            try walk(Visitor, tree, @intFromEnum(full.ast.then_expr), visitor);
+            if (visitor.stop) return;
+            if (full.ast.else_expr.unwrap()) |else_node| {
+                try walk(Visitor, tree, @intFromEnum(else_node), visitor);
+            }
+            return;
+        },
+        .@"while", .while_simple, .while_cont => {
+            const full = tree.fullWhile(@enumFromInt(node)) orelse return;
+            try walk(Visitor, tree, @intFromEnum(full.ast.cond_expr), visitor);
+            if (visitor.stop) return;
+            try walk(Visitor, tree, @intFromEnum(full.ast.then_expr), visitor);
+            if (visitor.stop) return;
+            if (full.ast.else_expr.unwrap()) |else_node| {
+                try walk(Visitor, tree, @intFromEnum(else_node), visitor);
+                if (visitor.stop) return;
+            }
+            if (full.ast.cont_expr.unwrap()) |cont| {
+                try walk(Visitor, tree, @intFromEnum(cont), visitor);
+            }
+            return;
+        },
+        .@"for", .for_simple => {
+            const full = tree.fullFor(@enumFromInt(node)) orelse return;
+            for (full.ast.inputs) |input| {
+                try walk(Visitor, tree, @intFromEnum(input), visitor);
+                if (visitor.stop) return;
+            }
+            try walk(Visitor, tree, @intFromEnum(full.ast.then_expr), visitor);
+            if (visitor.stop) return;
+            if (full.ast.else_expr.unwrap()) |else_node| {
+                try walk(Visitor, tree, @intFromEnum(else_node), visitor);
+            }
+            return;
+        },
+        .call, .call_comma, .call_one, .call_one_comma => {
+            var buf: [1]Ast.Node.Index = undefined;
+            const full = tree.fullCall(&buf, @enumFromInt(node)) orelse return;
+            try walk(Visitor, tree, @intFromEnum(full.ast.fn_expr), visitor);
+            if (visitor.stop) return;
+            for (full.ast.params) |param| {
+                try walk(Visitor, tree, @intFromEnum(param), visitor);
+                if (visitor.stop) return;
+            }
+            return;
+        },
+        .builtin_call, .builtin_call_comma, .builtin_call_two, .builtin_call_two_comma => {
+            var buf: [2]Ast.Node.Index = undefined;
+            const params = tree.builtinCallParams(&buf, @enumFromInt(node)) orelse return;
+            for (params) |param| {
+                try walk(Visitor, tree, @intFromEnum(param), visitor);
+                if (visitor.stop) return;
+            }
+            return;
+        },
+        .@"switch", .switch_comma => {
+            const full = tree.switchFull(@enumFromInt(node));
+            try walk(Visitor, tree, @intFromEnum(full.ast.condition), visitor);
+            if (visitor.stop) return;
+            for (full.ast.cases) |case_node| {
+                try walk(Visitor, tree, @intFromEnum(case_node), visitor);
+                if (visitor.stop) return;
+            }
+            return;
+        },
+        .@"return" => {
+            if (datas[node].opt_node.unwrap()) |ret_node| {
+                try walk(Visitor, tree, @intFromEnum(ret_node), visitor);
+            }
+            return;
+        },
+        .@"errdefer" => {
+            const body = @intFromEnum(datas[node].opt_token_and_node[1]);
+            if (body != 0) {
+                try walk(Visitor, tree, body, visitor);
+            }
+            return;
+        },
+        .ptr_type, .ptr_type_aligned, .ptr_type_sentinel, .ptr_type_bit_range => {
+            const ptr_info = tree.fullPtrType(@enumFromInt(node)) orelse return;
+            try walk(Visitor, tree, @intFromEnum(ptr_info.ast.child_type), visitor);
+            return;
+        },
+        .array_type, .array_type_sentinel => {
+            const pair = datas[node].node_and_node;
+            const lhs = @intFromEnum(pair[0]);
+            const rhs = @intFromEnum(pair[1]);
+            if (lhs != 0) {
+                try walk(Visitor, tree, lhs, visitor);
+                if (visitor.stop) return;
+            }
+            if (rhs != 0) {
+                try walk(Visitor, tree, rhs, visitor);
+            }
+            return;
+        },
+        .slice, .slice_open, .slice_sentinel => {
+            const pair = datas[node].node_and_node;
+            const lhs = @intFromEnum(pair[0]);
+            const rhs = @intFromEnum(pair[1]);
+            if (lhs != 0) {
+                try walk(Visitor, tree, lhs, visitor);
+                if (visitor.stop) return;
+            }
+            if (rhs != 0) {
+                try walk(Visitor, tree, rhs, visitor);
+            }
+            return;
+        },
+        .optional_type => {
+            const child = @intFromEnum(datas[node].node);
+            if (child != 0) {
+                try walk(Visitor, tree, child, visitor);
+            }
+            return;
+        },
+        .error_union => {
+            const pair = datas[node].node_and_node;
+            try walk(Visitor, tree, @intFromEnum(pair[0]), visitor);
+            if (visitor.stop) return;
+            try walk(Visitor, tree, @intFromEnum(pair[1]), visitor);
+            return;
+        },
+        .bool_not, .negation, .address_of, .@"try", .deref, .@"defer", .@"comptime", .@"nosuspend" => {
+            const child = @intFromEnum(datas[node].node);
+            if (child != 0) {
+                try walk(Visitor, tree, child, visitor);
+            }
+            return;
+        },
+        .unwrap_optional, .grouped_expression, .field_access => {
+            const child = @intFromEnum(datas[node].node_and_token[0]);
+            if (child != 0) {
+                try walk(Visitor, tree, child, visitor);
+            }
+            return;
+        },
+        .bool_and, .bool_or, .assign, .bang_equal, .equal_equal, .less_than, .greater_than, .less_or_equal, .greater_or_equal, .add, .sub, .mul, .div, .mod, .@"orelse", .@"catch", .array_access => {
+            const pair = datas[node].node_and_node;
+            const lhs = @intFromEnum(pair[0]);
+            const rhs = @intFromEnum(pair[1]);
+            if (lhs != 0) {
+                try walk(Visitor, tree, lhs, visitor);
+                if (visitor.stop) return;
+            }
+            if (rhs != 0) {
+                try walk(Visitor, tree, rhs, visitor);
+            }
+            return;
+        },
+        else => {},
+    }
+}
+
+pub fn collectNodesByTag(
+    allocator: std.mem.Allocator,
+    tree: *const Ast,
+    root: u32,
+    tag: Ast.Node.Tag,
+    out: *std.ArrayList(u32),
+) !void {
+    var collector = TagCollector{
+        .allocator = allocator,
+        .tag = tag,
+        .out = out,
+    };
+    try walk(TagCollector, tree, root, &collector);
+}
+
+pub fn containsIdentifier(tree: *const Ast, root: u32, target_name: []const u8) bool {
+    var finder = IdentifierFinder{
+        .target_name = target_name,
+    };
+    walk(IdentifierFinder, tree, root, &finder) catch return false;
+    return finder.found;
+}
+
+pub fn containsNode(tree: *const Ast, root: u32, target: u32) bool {
+    if (root == target) return true;
+    var finder = NodeFinder{
+        .target = target,
+    };
+    walk(NodeFinder, tree, root, &finder) catch return false;
+    return finder.found;
+}
+
+const TagCollector = struct {
+    allocator: std.mem.Allocator,
+    tag: Ast.Node.Tag,
+    out: *std.ArrayList(u32),
+    stop: bool = false,
+
+    pub fn visit(self: *TagCollector, _: *const Ast, node: u32, tag: Ast.Node.Tag) !void {
+        if (tag == self.tag) {
+            try self.out.append(self.allocator, node);
+        }
+    }
+};
+
+const IdentifierFinder = struct {
+    target_name: []const u8,
+    found: bool = false,
+    stop: bool = false,
+
+    pub fn visit(self: *IdentifierFinder, tree: *const Ast, node: u32, tag: Ast.Node.Tag) !void {
+        if (self.found) {
+            self.stop = true;
+            return;
+        }
+        if (tag != .identifier) return;
+        const token = tree.nodes.items(.main_token)[node];
+        const name = tree.tokenSlice(token);
+        if (std.mem.eql(u8, name, self.target_name)) {
+            self.found = true;
+            self.stop = true;
+        }
+    }
+};
+
+const NodeFinder = struct {
+    target: u32,
+    found: bool = false,
+    stop: bool = false,
+
+    pub fn visit(self: *NodeFinder, _: *const Ast, node: u32, _: Ast.Node.Tag) !void {
+        if (node == self.target) {
+            self.found = true;
+            self.stop = true;
+        }
+    }
+};
