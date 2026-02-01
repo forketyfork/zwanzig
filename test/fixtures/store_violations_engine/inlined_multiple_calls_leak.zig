@@ -20,4 +20,14 @@ fn helper(allocator: std.mem.Allocator, should_free: bool) void {
     // Leaks when should_free is false - this path is detected
 }
 
+// Caller that exercises the multi-call scenario from the PR #41 concern:
+// first call leaks, second call frees.
+fn caller(allocator: std.mem.Allocator) void {
+    helper(allocator, false); // leaks
+    helper(allocator, true); // frees
+}
+
+// The leak is detected when analyzing helper() directly.
+// Two diagnostics are emitted (one from each analysis path).
+// EXPECT: line=16 rule=store-violations-engine severity=error message=resource leak
 // EXPECT: line=16 rule=store-violations-engine severity=error message=resource leak
