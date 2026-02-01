@@ -16,7 +16,7 @@ const ShadowedVariableRule = src.rules.shadowed_variable.ShadowedVariableRule;
 const IdentifierStyleRule = src.rules.identifier_style.IdentifierStyleRule;
 const SentinelAllocRule = src.rules.sentinel_alloc.SentinelAllocRule;
 const UnusedParameterRule = src.rules.unused_parameter.UnusedParameterRule;
-const OptionalUnwrapRule = src.rules.optional_unwrap.OptionalUnwrapRule;
+const OptionalUnwrapEngineChecker = src.checkers.optional_unwrap_engine.OptionalUnwrapEngineChecker;
 const UnreachableCodeChecker = src.checkers.unreachable_code_checker.UnreachableCodeChecker;
 const StoreViolationsEngineChecker = src.checkers.store_violations_engine.StoreViolationsEngineChecker;
 
@@ -65,7 +65,7 @@ test "unused_parameter fixtures" {
 }
 
 test "optional_unwrap fixtures" {
-    try runFixturesInDir(std.testing.allocator, &OptionalUnwrapRule.rule, "test/fixtures/optional_unwrap");
+    try runCheckerFixturesInDir(std.testing.allocator, &OptionalUnwrapEngineChecker.checker, "test/fixtures/optional_unwrap");
 }
 
 test "unreachable_code_engine fixtures" {

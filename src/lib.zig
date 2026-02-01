@@ -22,10 +22,10 @@ pub const rules = struct {
     pub const identifier_style = @import("rules/identifier_style.zig");
     pub const sentinel_alloc = @import("rules/sentinel_alloc.zig");
     pub const unused_parameter = @import("rules/unused_parameter.zig");
-    pub const optional_unwrap = @import("rules/optional_unwrap.zig");
 };
 
 pub const checkers = struct {
     pub const unreachable_code_checker = @import("checkers/unreachable_code_checker.zig");
     pub const store_violations_engine = @import("checkers/store_violations_engine.zig");
+    pub const optional_unwrap_engine = @import("checkers/optional_unwrap_engine.zig");
 };

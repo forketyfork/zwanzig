@@ -384,6 +384,21 @@ pub const ProgramState = struct {
         return self.constraints.size();
     }
 
+    /// Check if there's a constraint proving a variable is non-null.
+    pub fn hasNonNullConstraint(self: *const ProgramState, var_id: VarId) bool {
+        for (self.constraints.constraints.items) |constraint| {
+            switch (constraint) {
+                .null_check => |nc| {
+                    if (nc.var_id == var_id and !nc.is_null) {
+                        return true;
+                    }
+                },
+                else => {},
+            }
+        }
+        return false;
+    }
+
     /// Set the error state of this program state.
     pub fn setErrorState(self: *ProgramState, error_state: ErrorState) void {
         self.error_state = error_state;

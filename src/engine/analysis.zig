@@ -1978,26 +1978,19 @@ pub const AnalysisEngine = struct {
     /// Extract a constraint from a branch node's condition.
     /// Returns null if no constraint can be extracted.
     fn extractBranchConstraint(self: *AnalysisEngine, cfg_node: *const CfgNode, current_cfg: *const Cfg) ?Constraint {
-        // The branch node has ast_node pointing to the if expression
-        // In a more complete implementation, we would analyze the condition expression
-        // to extract constraints like "x == 5" or "x != null"
-        //
-        // For now, we support a simple pattern where the branch node's operand_node
-        // contains the variable being tested, and operand2_node contains information
-        // about the comparison.
-        //
-        // This is a placeholder that can be enhanced when the CFG builder provides
-        // more detailed information about branch conditions.
         const ir_node = cfg_node.ir_node;
         if (ir_node.operand_node) |cond_node| {
             // First check if the condition is a literal boolean
             if (self.evaluateLiteral(cond_node)) |literal_val| {
                 if (literal_val.toBool()) |bool_val| {
-                    // Literal true/false - create a constraint on a synthetic var
-                    // that will be checked against the known literal value
                     const var_key = ids.varId(cond_node);
                     return Constraint.boolCheck(var_key, bool_val);
                 }
+            }
+
+            // Check if the condition is a null comparison (x == null or x != null)
+            if (self.extractNullCheckConstraint(cond_node, current_cfg)) |null_constraint| {
+                return null_constraint;
             }
 
             const var_key = if (self.source != null)
@@ -2005,16 +1998,88 @@ pub const AnalysisEngine = struct {
             else
                 ids.varId(cond_node);
             if (ir_node.operand2_node) |cmp_info| {
-                // Interpret operand2_node as encoded comparison info:
-                // High 32 bits of the value represent the comparison constant
-                // This is a simplified encoding for now
                 return Constraint.intCompare(var_key, .eq, @as(i64, cmp_info));
             }
-            // If we only have a variable and no comparison info, assume it's a boolean check
-            // (for branches like `if (flag) ...` where flag is a boolean)
+            // If we only have a variable and no comparison info, check if it's an optional
+            // being used as a boolean (if (optional_var) ...)
+            if (self.isOptionalType(cond_node, current_cfg)) {
+                // When optional is used as condition: true branch means non-null
+                return Constraint.nullCheck(var_key, false);
+            }
             return Constraint.boolCheck(var_key, true);
         }
         return null;
+    }
+
+    /// Extract a null check constraint from a comparison expression.
+    /// Handles patterns like `x == null` and `x != null`.
+    fn extractNullCheckConstraint(self: *AnalysisEngine, cond_node: u32, current_cfg: *const Cfg) ?Constraint {
+        const src = self.source orelse return null;
+        const tree = src.ast() catch return null;
+        const tags = tree.nodes.items(.tag);
+        const datas = tree.nodes.items(.data);
+
+        if (cond_node >= tags.len) return null;
+
+        const tag = tags[cond_node];
+        if (tag != .equal_equal and tag != .bang_equal) return null;
+
+        // Get both operands of the comparison
+        const lhs = datas[cond_node].node_and_node[0];
+        const rhs = datas[cond_node].node_and_node[1];
+
+        // Check if either operand is `null`
+        const lhs_is_null = self.isNullLiteral(@intFromEnum(lhs));
+        const rhs_is_null = self.isNullLiteral(@intFromEnum(rhs));
+
+        if (!lhs_is_null and !rhs_is_null) return null;
+
+        // The other operand is the variable being compared
+        const var_node = if (lhs_is_null) @intFromEnum(rhs) else @intFromEnum(lhs);
+        const var_key = self.resolveVarIdFromExpr(var_node, current_cfg) orelse ids.varId(var_node);
+
+        // For == null: is_null=true (true branch means var is null)
+        // For != null: is_null=false (true branch means var is non-null)
+        const is_null = (tag == .equal_equal);
+        return Constraint.nullCheck(var_key, is_null);
+    }
+
+    fn isNullLiteral(self: *AnalysisEngine, node: u32) bool {
+        const src = self.source orelse return false;
+        const tree = src.ast() catch return false;
+        const tags = tree.nodes.items(.tag);
+        const main_tokens = tree.nodes.items(.main_token);
+
+        if (node >= tags.len) return false;
+        if (tags[node] != .identifier) return false;
+
+        const token = main_tokens[node];
+        const token_slice = tree.tokenSlice(token);
+        return std.mem.eql(u8, token_slice, "null");
+    }
+
+    /// Check if a condition expression is an optional type.
+    fn isOptionalType(self: *AnalysisEngine, cond_node: u32, current_cfg: *const Cfg) bool {
+        _ = current_cfg;
+        const src = self.source orelse return false;
+        const tree = src.ast() catch return false;
+        const tags = tree.nodes.items(.tag);
+
+        if (cond_node >= tags.len) return false;
+
+        // If it's an identifier, check if the type context knows it's optional
+        if (tags[cond_node] == .identifier) {
+            if (self.type_context) |type_ctx| {
+                const main_tokens = tree.nodes.items(.main_token);
+                const token = main_tokens[cond_node];
+                const name = tree.tokenSlice(token);
+                if (type_ctx.getDeclType(name)) |type_info| {
+                    return type_info.kind == .optional;
+                }
+            }
+        }
+
+        return false;
     }
 
     fn hasMultiplePredecessors(cfg: *const Cfg, node_index: CfgNodeId) bool {
