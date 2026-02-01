@@ -2790,7 +2790,7 @@ test "AnalysisEngine simple CFG traversal" {
     const graph = engine.getGraph();
     try testing.expect(graph.nodeCount() >= 4);
 
-    const node0 = graph.getNode(0).?;
+    const node0 = graph.getNode(0) orelse return error.TestUnexpectedResult;
     try testing.expectEqual(entry, node0.point.node_index);
     try testing.expectEqual(ProgramPoint.Kind.pre, node0.point.kind);
 }

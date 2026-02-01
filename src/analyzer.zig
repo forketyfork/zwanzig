@@ -304,14 +304,15 @@ pub const Analyzer = struct {
             }
 
             sortRuleNames(enabled_rules_buf.items);
-            cache_key = CacheKey.init(
+            const key = CacheKey.init(
                 content,
                 self.getBuildMetadata(),
                 self.tool_version,
                 enabled_rules_buf.items,
             );
+            cache_key = key;
             if (self.cache) |*c| {
-                if (try c.get(cache_key.?)) |cached_data| {
+                if (try c.get(key)) |cached_data| {
                     defer self.allocator.free(cached_data);
                     log.debug("analyzeResult: cache hit {s}, loading artifacts", .{file_path});
 

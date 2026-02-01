@@ -267,7 +267,8 @@ pub const ZirBridge = struct {
     fn extractDeclarations(self: *ZirBridge) ZirBridgeError!void {
         const tree = self.ast orelse return;
         const zir = self.zir orelse return;
-        const source_content = self.source.?.getContent();
+        const source = self.source orelse return;
+        const source_content = source.getContent();
 
         for (tree.rootDecls()) |root_decl| {
             const node_idx: u32 = @intFromEnum(root_decl);
@@ -1041,7 +1042,8 @@ pub const ZirBridge = struct {
     pub fn getFunctionReturnType(self: *const ZirBridge, fn_ast_node: u32) ?TypeInfo {
         const tree = self.ast orelse return null;
         const zir = self.zir orelse return null;
-        const source_content = self.source.?.getContent();
+        const source = self.source orelse return null;
+        const source_content = source.getContent();
         const tags = tree.nodes.items(.tag);
         const main_tokens = tree.nodes.items(.main_token);
         const token_tags = tree.tokens.items(.tag);
@@ -1083,7 +1085,8 @@ pub const ZirBridge = struct {
     pub fn getTypeFromAstNode(self: *const ZirBridge, ast_node: u32) ?TypeInfo {
         const tree = self.ast orelse return null;
         const zir = self.zir orelse return null;
-        const source_content = self.source.?.getContent();
+        const source = self.source orelse return null;
+        const source_content = source.getContent();
         if (ast_node >= tree.nodes.items(.tag).len) return null;
         return extractTypeFromAstNode(tree, zir, ast_node, source_content);
     }

@@ -152,15 +152,15 @@ pub const OptionalUnwrapEngineChecker = struct {
 
             // Find the CFG node containing this AST node
             const cfg_node_idx = findCfgNodeForAst(cfg, ast_node, tree);
-            if (cfg_node_idx == null) {
+            const node_idx = cfg_node_idx orelse {
                 // AST node not in CFG (possibly unreachable code) - report conservatively
                 try reportUnsafeUnwrap(src, allocator, diagnostics, main_tokens[ast_node], token_starts);
                 try reported.put(ast_node, {});
                 continue;
-            }
+            };
 
             // Check if the variable is proven non-null at this point
-            if (!isProvenNonNull(engine, cfg_node_idx.?, unwrapped_node, cfg, fn_node)) {
+            if (!isProvenNonNull(engine, node_idx, unwrapped_node, cfg, fn_node)) {
                 try reportUnsafeUnwrap(src, allocator, diagnostics, main_tokens[ast_node], token_starts);
                 try reported.put(ast_node, {});
             }
