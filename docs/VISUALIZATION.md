@@ -20,7 +20,7 @@ dot -Tpng ./output/myfile_functionName.dot -o output.png
 Dumps Control Flow Graphs showing the structure of each function.
 
 ```bash
-zig build run -- --dump-cfg ./cfg_output src/myfile.zig
+zwanzig --dump-cfg ./cfg_output src/myfile.zig
 ```
 
 ### Node Styling
@@ -44,7 +44,7 @@ The `Cfg` struct provides `dumpDot(allocator)` for quick stderr output during de
 
 Engine-based checkers build exploded graphs showing all reachable (CFG node, state) pairs during abstract interpretation. Three visualization options are available.
 
-> **Note:** These visualizations only show data from engine-based checkers (`store-violations-engine`, `empty-catch-engine`, `swallowed-error`). Violations from AST-based rules (like `unused-decl`) won't appear in path traces.
+> **Note:** These visualizations only show data from engine-based checkers (`store-violations-engine`, `empty-catch-engine`, `swallowed-error`). Findings from AST-based rules or checkers (like `unused-decl` or `unreachable-code-engine`) won't appear in path traces.
 
 ### Exploded Graph
 
@@ -53,7 +53,7 @@ Engine-based checkers build exploded graphs showing all reachable (CFG node, sta
 Shows the full state space explored during analysis. Each node represents a unique (CFG location, abstract state) pair.
 
 ```bash
-zig build run -- --dump-exploded-graph ./eg_output src/myfile.zig
+zwanzig --dump-exploded-graph ./eg_output src/myfile.zig
 ```
 
 **Node information:**
@@ -98,7 +98,7 @@ Generated exploded graph:
 Overlays state information onto the CFG structure. Shows how many unique states reached each CFG node.
 
 ```bash
-zig build run -- --dump-annotated-cfg ./acfg_output src/myfile.zig
+zwanzig --dump-annotated-cfg ./acfg_output src/myfile.zig
 ```
 
 **Node information:**
@@ -140,7 +140,7 @@ Generated annotated CFG:
 Shows execution paths from function entry to each detected violation. Useful for understanding how a bug is reached.
 
 ```bash
-zig build run -- --dump-path-trace ./traces src/myfile.zig
+zwanzig --dump-path-trace ./traces src/myfile.zig
 ```
 
 **Output structure:**
@@ -200,7 +200,7 @@ Where `<suffix>` is:
 You can dump multiple visualizations in a single run:
 
 ```bash
-zig build run -- \
+zwanzig \
   --dump-cfg ./output \
   --dump-exploded-graph ./output \
   --dump-annotated-cfg ./output \

@@ -50,10 +50,10 @@ The `Analyzer` (`src/analyzer.zig`) is the main engine that coordinates the anal
 
 1. Reads source files from disk
 2. Creates a `Source` instance with parsed content
-3. Runs all registered rules against the source
-4. Collects and reports violations
+3. Runs all registered checkers and rules against the source (checkers first)
+4. Collects and reports diagnostics
 
-The analyzer ensures that each file is parsed once and the resulting `Source` object is shared across all rules.
+The analyzer ensures that each file is parsed once and the resulting `Source` object is shared across all rules and checkers. It applies the configured rule filter to both rule and checker names and builds a `CheckerContext` (build metadata, type info, analysis limits/stats, config, and dump directories) for checker execution.
 
 #### Rule Interface (Legacy)
 
@@ -62,10 +62,11 @@ The `Rule` interface (`src/rule.zig`) defines the contract for legacy analysis r
 ```zig
 pub const Rule = struct {
     name: []const u8,
+    default_severity: Severity = .err,
     checkFn: *const fn (
         source: *Source,
         allocator: std.mem.Allocator,
-        violations: *std.ArrayList(Violation),
+        diagnostics: *std.ArrayList(Diagnostic),
     ) RuleError!void,
 };
 ```
@@ -88,6 +89,7 @@ pub const Checker = struct {
         source: *Source,
         allocator: std.mem.Allocator,
         diagnostics: *std.ArrayList(Diagnostic),
+        context: CheckerContext,
     ) CheckerError!void = null,
 
     pub fn checkAst(...) CheckerError!void { ... }
@@ -99,6 +101,7 @@ pub const Checker = struct {
 - **Hook-based design**: Checkers implement specific hooks (currently `checkAstFn`) rather than a single check function
 - **Multiple analysis stages**: Future versions will add CFG and IR hooks for control-flow and dataflow analysis
 - **Backward compatibility**: The `CheckerManagerWithRules` supports both new checkers and legacy rules
+- **Context-aware analysis**: `CheckerContext` exposes build metadata, type information, analysis limits/stats, config, and visualization outputs
 
 #### CheckerManager
 
@@ -109,13 +112,13 @@ pub const CheckerManager = struct {
     pub fn init(allocator: std.mem.Allocator) CheckerManager { ... }
     pub fn deinit(self: *CheckerManager) void { ... }
     pub fn registerChecker(self: *CheckerManager, checker: *const Checker) !void { ... }
-    pub fn runAstChecks(self: *const CheckerManager, source: *Source, diagnostics: *std.ArrayList(Diagnostic), filter_fn: ?*const fn ([]const u8) bool) CheckerError!void { ... }
+    pub fn runAstChecks(self: *const CheckerManager, source: *Source, diagnostics: *std.ArrayList(Diagnostic), filter_fn: ?*const fn ([]const u8) bool, context: CheckerContext) CheckerError!void { ... }
 };
 ```
 
 #### CheckerManagerWithRules
 
-For backward compatibility, `CheckerManagerWithRules` supports both new-style checkers and legacy rules:
+For backward compatibility, `CheckerManagerWithRules` supports both new-style checkers and legacy rules. Checkers run first, then adapted rules.
 
 ```zig
 pub const CheckerManagerWithRules = struct {
@@ -137,12 +140,13 @@ try manager.registerChecker(&MyChecker.checker);
 try manager.registerRule(&MyRule.rule);
 
 // Run all checks
-try manager.runAstChecks(&source, &diagnostics, null);
+const context = CheckerContext{ .build_metadata = null };
+try manager.runAstChecks(&source, &diagnostics, null, context);
 ```
 
 #### Diagnostics
 
-Diagnostics represent issues found by rules. Each diagnostic includes:
+Diagnostics represent issues found by rules and checkers. Each diagnostic includes:
 - **File path**: The source file containing the issue
 - **Source range**: Start and end locations (line, column) for precise highlighting
 - **Rule ID**: The identifier of the rule that detected the issue
@@ -187,6 +191,8 @@ The analyzer supports multiple output formats via the `Analyzer.OutputFormat` en
   }
   ```
 
+- **SARIF format**: Code scanning format for GitHub and other tooling (SARIF 2.1.0)
+
 The output format is controlled by the `--format` CLI flag and defaults to text. The `Analyzer.printResults()` method takes an `OutputFormat` parameter and dispatches to the appropriate formatter.
 
 ## Parsing Strategy
@@ -195,15 +201,19 @@ Zwanzig uses Zig's standard library parser (`std.zig.Ast.parse`) to build the AS
 
 1. When `analyzeFile()` is called, the analyzer reads the file content
 2. A `Source` object is created but no parsing occurs yet
-3. When a rule calls `source.ast()` or `source.tokens()`, parsing happens
+3. When a checker or rule calls `source.ast()` or `source.tokens()`, parsing happens
 4. The parsed AST is cached in the `Source` object
 5. Subsequent calls to `ast()` or `tokens()` return the cached result
-6. After all rules complete, `source.deinit()` releases the cached AST
+6. After all checks complete, `source.deinit()` releases the cached AST
 
 This design ensures:
-- No wasted parsing if no rule needs the AST
-- No redundant parsing when multiple rules need the AST
+- No wasted parsing if no rule or checker needs the AST
+- No redundant parsing when multiple rules or checkers need the AST
 - Proper memory management via RAII pattern
+
+## Parallel Analysis
+
+File-level analysis runs in parallel by default. The CLI `--threads` flag controls the size of the thread pool. Each worker uses a per-task arena allocator to reduce allocator contention, and diagnostics are merged and sorted for deterministic output ordering.
 
 ## Adding New Checkers
 
@@ -235,13 +245,16 @@ pub const MyChecker = struct {
         src: *Source,
         allocator: std.mem.Allocator,
         diagnostics: *std.ArrayList(Diagnostic),
+        context: checker_mod.CheckerContext,
     ) CheckerError!void {
+        _ = context;
         const tree = try src.ast();
 
         // Analyze the AST...
 
         // Report issues
         try diagnostics.append(allocator, Diagnostic.initAtLocation(
+            allocator,
             src.getFilePath(),
             "my-checker",
             .warning,
@@ -301,6 +314,7 @@ pub const MyRule = struct {
 
         // Report diagnostics with location
         try diagnostics.append(allocator, Diagnostic.initAtLocation(
+            allocator,
             src.getFilePath(),
             "my-rule",
             .warning,
@@ -312,6 +326,7 @@ pub const MyRule = struct {
         // Or with a source range for better highlighting
         const range = try src.byteRangeToSourceRange(start_byte, end_byte);
         try diagnostics.append(allocator, Diagnostic.init(
+            allocator,
             src.getFilePath(),
             "my-rule",
             .warning,
@@ -535,7 +550,7 @@ The rules:
 1. Scan AST nodes for `defer` or `errdefer` tags
 2. Extract the defer body from the AST node data
 3. Check if the body is an empty block by examining the block structure
-4. Report empty blocks as violations
+4. Report empty blocks as diagnostics
 
 These rules help detect:
 - `defer {}` - empty defer blocks that do nothing
@@ -1901,6 +1916,19 @@ zwanzig --target aarch64-macos src/
 
 The target triple is parsed and converted to a `BuildMetadata` struct that is propagated through the analyzer.
 
+Other CLI flags feed into analyzer configuration and execution:
+
+- `--do` / `--skip`: Build a `RuleFilter` for rule and checker names
+- `--config`: Load `.zwanzig.json` (or a custom path) and merge with CLI overrides
+- `--format`: Select `Analyzer.OutputFormat` (`text`, `json`, `sarif`)
+- `--max-steps`, `--max-states-per-point`, `--use-widening`: Configure `AnalysisLimits`
+- `--threads`: Control the file-level thread pool for parallel analysis
+- `--cache`: Enable incremental caching
+
+`use_widening` defaults to true when neither CLI nor config overrides it; set it to `false` in the config file to disable widening.
+
+When no config file is present and no `--do`/`--skip` flags are used, the analyzer applies a default blocklist for `sentinel-alloc`.
+
 ### Analysis Engine Integration
 
 Build metadata is stored in both the `Analyzer` and `AnalysisEngine`, and is propagated to `ProgramState`:
@@ -1972,7 +2000,7 @@ pub fn fromNative() BuildMetadata {
 
 ## Incremental Cache
 
-The analyzer supports incremental caching to track analysis metadata across runs. Currently, the cache stores metadata (e.g., whether type info was loaded) but CFG caching is not yet implemented - CFGs are recomputed on each run.
+The analyzer supports incremental caching to track analysis metadata across runs. The current implementation stores minimal metadata (e.g., whether type info was loaded). CFG caching is planned but not yet wired into the analyzer, so CFGs are still recomputed on each run.
 
 ### Cache Architecture
 
@@ -2002,14 +2030,14 @@ pub const CacheKey = struct {
 
 ### Cache Behavior
 
-**Key principle:** The cache never skips analysis. Currently, it only stores metadata (e.g., whether type info was loaded). CFG caching is not yet implemented.
+**Key principle:** The cache never skips analysis. It currently stores minimal metadata and is structured to hold CFGs in the future.
 
 When analyzing a file:
 1. Compute cache key from file content, target, version, and enabled rules
 2. Check if cached artifacts exist for this key
-3. If cache hit: load cached metadata (CFG caching is planned but not yet implemented)
+3. If cache hit: load cached artifacts (currently metadata only)
 4. **Always run analysis** - diagnostics are produced on every run
-5. Store metadata back to cache
+5. Store artifacts back to cache (currently metadata only)
 
 This ensures diagnostics are always reported regardless of cache state.
 
@@ -2035,6 +2063,8 @@ The `CachedArtifacts` struct stores:
 
 - **CFGs per function**: Control-flow graphs keyed by function AST node index
 - **Type info availability**: Whether ZIR/type info was available during caching
+
+At the moment, the analyzer only populates the `had_type_info` field; CFG serialization is in place but not yet emitted by the analysis pipeline.
 
 ```zig
 pub const CachedArtifacts = struct {
