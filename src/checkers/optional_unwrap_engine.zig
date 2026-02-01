@@ -143,6 +143,10 @@ pub const OptionalUnwrapEngineChecker = struct {
             // Skip if already reported
             if (reported.contains(ast_node)) continue;
 
+            // Skip unwraps inside test assertion calls (expectEqual, expectEqualStrings, etc.)
+            // These are intentional - the test will panic if the value is null
+            if (isInsideTestAssertion(tree, ast_node, fn_index)) continue;
+
             // Get the variable being unwrapped
             const unwrapped_node = @intFromEnum(datas[ast_node].node_and_token[0]);
 
@@ -161,6 +165,142 @@ pub const OptionalUnwrapEngineChecker = struct {
                 try reported.put(ast_node, {});
             }
         }
+    }
+
+    /// Check if an unwrap_optional AST node is inside a test assertion call.
+    /// Test assertions like expectEqual, expectEqualStrings, etc. are intentional
+    /// uses where a panic is acceptable (the test would fail anyway).
+    fn isInsideTestAssertion(tree: *const std.zig.Ast, unwrap_node: u32, fn_root: u32) bool {
+        // Walk up the AST to find if this unwrap is inside a call to a test assertion
+        // We do this by checking parent nodes for call expressions
+        return findParentAssertionCall(tree, unwrap_node, fn_root, 0);
+    }
+
+    fn findParentAssertionCall(tree: *const std.zig.Ast, node: u32, fn_root: u32, depth: u32) bool {
+        // Limit recursion depth to avoid infinite loops
+        if (depth > 20) return false;
+
+        const tags = tree.nodes.items(.tag);
+
+        if (node >= tags.len) return false;
+        if (node == fn_root) return false;
+
+        // Check if this node is a call to a test assertion
+        switch (tags[node]) {
+            .call, .call_comma, .call_one, .call_one_comma => {
+                if (isTestAssertionCall(tree, node)) {
+                    return true;
+                }
+            },
+            else => {},
+        }
+
+        // Walk up to parent by checking which nodes contain this one
+        // This is expensive but we limit the search depth
+        for (0..tags.len) |i| {
+            const parent: u32 = @intCast(i);
+            if (parent == node) continue;
+            if (nodeContainsChild(tree, parent, node)) {
+                if (findParentAssertionCall(tree, parent, fn_root, depth + 1)) {
+                    return true;
+                }
+            }
+        }
+
+        return false;
+    }
+
+    fn nodeContainsChild(tree: *const std.zig.Ast, parent: u32, child: u32) bool {
+        const tags = tree.nodes.items(.tag);
+        const datas = tree.nodes.items(.data);
+
+        if (parent >= tags.len) return false;
+
+        const tag = tags[parent];
+        switch (tag) {
+            // Two children
+            .bool_and, .bool_or, .assign, .bang_equal, .equal_equal, .@"orelse", .@"catch", .array_access => {
+                const pair = datas[parent].node_and_node;
+                return @intFromEnum(pair[0]) == child or @intFromEnum(pair[1]) == child;
+            },
+            // Single child via node
+            .bool_not, .negation, .address_of, .@"try", .deref => {
+                return @intFromEnum(datas[parent].node) == child;
+            },
+            // node_and_token
+            .unwrap_optional, .grouped_expression, .field_access => {
+                return @intFromEnum(datas[parent].node_and_token[0]) == child;
+            },
+            // Call expressions
+            .call, .call_comma, .call_one, .call_one_comma => {
+                var buf: [1]std.zig.Ast.Node.Index = undefined;
+                const full = tree.fullCall(&buf, @enumFromInt(parent)) orelse return false;
+                if (@intFromEnum(full.ast.fn_expr) == child) return true;
+                for (full.ast.params) |param| {
+                    if (@intFromEnum(param) == child) return true;
+                }
+                return false;
+            },
+            // Builtin calls
+            .builtin_call, .builtin_call_comma, .builtin_call_two, .builtin_call_two_comma => {
+                var buf: [2]std.zig.Ast.Node.Index = undefined;
+                const params = tree.builtinCallParams(&buf, @enumFromInt(parent)) orelse return false;
+                for (params) |param| {
+                    if (@intFromEnum(param) == child) return true;
+                }
+                return false;
+            },
+            else => return false,
+        }
+    }
+
+    fn isTestAssertionCall(tree: *const std.zig.Ast, call_node: u32) bool {
+        const tags = tree.nodes.items(.tag);
+
+        if (call_node >= tags.len) return false;
+
+        var buf: [1]std.zig.Ast.Node.Index = undefined;
+        const full = tree.fullCall(&buf, @enumFromInt(call_node)) orelse return false;
+
+        // Get the function name being called
+        const fn_expr = @intFromEnum(full.ast.fn_expr);
+        if (fn_expr >= tags.len) return false;
+
+        // Handle field access: testing.expectEqual, std.testing.expect, etc.
+        if (tags[fn_expr] == .field_access) {
+            const field_token = tree.nodes.items(.data)[fn_expr].node_and_token[1];
+            const field_name = tree.tokenSlice(field_token);
+            return isTestAssertionName(field_name);
+        }
+
+        // Handle direct identifier
+        if (tags[fn_expr] == .identifier) {
+            const main_token = tree.nodes.items(.main_token)[fn_expr];
+            const name = tree.tokenSlice(main_token);
+            return isTestAssertionName(name);
+        }
+
+        return false;
+    }
+
+    fn isTestAssertionName(name: []const u8) bool {
+        // Common test assertion function names
+        const assertion_names = [_][]const u8{
+            "expect",
+            "expectEqual",
+            "expectEqualStrings",
+            "expectEqualSlices",
+            "expectEqualDeep",
+            "expectApproxEqAbs",
+            "expectApproxEqRel",
+            "expectError",
+            "expectFmt",
+            "assert",
+        };
+        for (assertion_names) |assertion_name| {
+            if (std.mem.eql(u8, name, assertion_name)) return true;
+        }
+        return false;
     }
 
     fn collectUnwrapsInSubtree(

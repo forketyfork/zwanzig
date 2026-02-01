@@ -1790,10 +1790,11 @@ pub const AnalysisEngine = struct {
 
                 // Check if this is a branch node - if so, we need to extract constraints
                 const is_branch_node = if (cfg_node) |node| node.ir_node.tag == .branch else false;
-                const branch_constraint = if (is_branch_node)
-                    self.extractBranchConstraint(cfg_node.?, current_cfg)
+                var branch_constraints: [4]?Constraint = .{ null, null, null, null };
+                const branch_constraint_count: usize = if (is_branch_node)
+                    self.extractBranchConstraints(cfg_node.?, current_cfg, &branch_constraints)
                 else
-                    null;
+                    0;
 
                 for (current_cfg.edges.items) |edge| {
                     if (edge.from == point.node_index) {
@@ -1830,25 +1831,29 @@ pub const AnalysisEngine = struct {
                             try self.applyPayloadBindings(node, edge.kind, &succ_state, current_cfg);
                         }
 
-                        // Determine the constraint to apply based on the edge kind
-                        var constraint_to_apply: ?Constraint = null;
-                        if (branch_constraint) |bc| {
-                            if (edge.kind == .branch_true) {
-                                constraint_to_apply = bc;
-                            } else if (edge.kind == .branch_false) {
-                                constraint_to_apply = bc.negate();
-                            }
-                        }
+                        // Apply all branch constraints based on the edge kind
+                        var path_pruned = false;
+                        if (branch_constraint_count > 0) {
+                            for (branch_constraints[0..branch_constraint_count]) |maybe_constraint| {
+                                if (maybe_constraint) |bc| {
+                                    const constraint_to_apply = if (edge.kind == .branch_true)
+                                        bc
+                                    else if (edge.kind == .branch_false)
+                                        bc.negate()
+                                    else
+                                        continue;
 
-                        // If we have a constraint, apply it to the state before deduplication
-                        if (constraint_to_apply) |constraint| {
-                            try succ_state.addConstraint(constraint);
-                            if (!succ_state.isSatisfiable()) {
-                                self.pruned_path_count += 1;
-                                succ_state.deinit();
-                                continue;
+                                    try succ_state.addConstraint(constraint_to_apply);
+                                    if (!succ_state.isSatisfiable()) {
+                                        self.pruned_path_count += 1;
+                                        succ_state.deinit();
+                                        path_pruned = true;
+                                        break;
+                                    }
+                                }
                             }
                         }
+                        if (path_pruned) continue;
 
                         // Determine if widening should be applied at this point.
                         // Widening triggers on loop-back edges into loop headers and on other join points
@@ -2077,6 +2082,31 @@ pub const AnalysisEngine = struct {
         return null;
     }
 
+    /// Extract multiple constraints from a branch condition.
+    /// This handles compound null checks like `a == null or b == null`.
+    fn extractBranchConstraints(
+        self: *AnalysisEngine,
+        cfg_node: *const CfgNode,
+        current_cfg: *const Cfg,
+        out_constraints: *[4]?Constraint,
+    ) usize {
+        const ir_node = cfg_node.ir_node;
+        if (ir_node.operand_node) |cond_node| {
+            // Try compound null constraints first (for bool_or/bool_and patterns)
+            const count = self.extractCompoundNullConstraints(cond_node, current_cfg, out_constraints);
+            if (count > 0) {
+                return count;
+            }
+
+            // Fall back to single constraint
+            if (self.extractBranchConstraint(cfg_node, current_cfg)) |c| {
+                out_constraints[0] = c;
+                return 1;
+            }
+        }
+        return 0;
+    }
+
     /// Extract a null check constraint from a comparison expression.
     /// Handles patterns like `x == null` and `x != null`.
     fn extractNullCheckConstraint(self: *AnalysisEngine, cond_node: u32, current_cfg: *const Cfg) ?Constraint {
@@ -2108,6 +2138,74 @@ pub const AnalysisEngine = struct {
         // For != null: is_null=false (true branch means var is non-null)
         const is_null = (tag == .equal_equal);
         return Constraint.nullCheck(var_key, is_null);
+    }
+
+    /// Extract multiple null check constraints from compound expressions.
+    /// Handles patterns like:
+    /// - `a == null or b == null` -> on false branch, both a and b are non-null
+    /// - `a != null and b != null` -> on true branch, both a and b are non-null
+    /// Returns constraints for the TRUE branch; caller should negate for false branch.
+    fn extractCompoundNullConstraints(
+        self: *AnalysisEngine,
+        cond_node: u32,
+        current_cfg: *const Cfg,
+        out_constraints: *[4]?Constraint,
+    ) usize {
+        const src = self.source orelse return 0;
+        const tree = src.ast() catch return 0;
+        const tags = tree.nodes.items(.tag);
+        const datas = tree.nodes.items(.data);
+
+        if (cond_node >= tags.len) return 0;
+
+        const tag = tags[cond_node];
+
+        // Handle bool_or: (a == null or b == null)
+        // On TRUE branch: at least one is null (can't use easily)
+        // On FALSE branch: both are non-null (useful!)
+        // We return the TRUE branch constraint, so for bool_or we return is_null=true for both
+        if (tag == .bool_or) {
+            const lhs = @intFromEnum(datas[cond_node].node_and_node[0]);
+            const rhs = @intFromEnum(datas[cond_node].node_and_node[1]);
+
+            var count: usize = 0;
+            if (self.extractNullCheckConstraint(lhs, current_cfg)) |c| {
+                out_constraints[count] = c;
+                count += 1;
+            }
+            if (self.extractNullCheckConstraint(rhs, current_cfg)) |c| {
+                out_constraints[count] = c;
+                count += 1;
+            }
+            return count;
+        }
+
+        // Handle bool_and: (a != null and b != null)
+        // On TRUE branch: both are non-null (useful!)
+        // On FALSE branch: at least one is null (can't use easily)
+        if (tag == .bool_and) {
+            const lhs = @intFromEnum(datas[cond_node].node_and_node[0]);
+            const rhs = @intFromEnum(datas[cond_node].node_and_node[1]);
+
+            var count: usize = 0;
+            if (self.extractNullCheckConstraint(lhs, current_cfg)) |c| {
+                out_constraints[count] = c;
+                count += 1;
+            }
+            if (self.extractNullCheckConstraint(rhs, current_cfg)) |c| {
+                out_constraints[count] = c;
+                count += 1;
+            }
+            return count;
+        }
+
+        // Fall back to single constraint
+        if (self.extractNullCheckConstraint(cond_node, current_cfg)) |c| {
+            out_constraints[0] = c;
+            return 1;
+        }
+
+        return 0;
     }
 
     fn isNullLiteral(self: *AnalysisEngine, node: u32) bool {
