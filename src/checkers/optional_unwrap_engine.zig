@@ -188,6 +188,10 @@ pub const OptionalUnwrapEngineChecker = struct {
             // e.g., `x = foo() orelse return error; x.?`
             if (isGuardedByPriorAssignment(tree, ast_node, unwrapped_node, parent_map)) continue;
 
+            // Check if this is a method call with catch/early exit that ensures the field
+            // e.g., `self.ensureTexture() catch return; ... self.texture.?`
+            if (isGuardedByMethodCallWithCatch(tree, ast_node, unwrapped_node, parent_map, fn_node)) continue;
+
             // Find the CFG node containing this AST node
             const cfg_node_idx = findCfgNodeForAst(cfg, ast_node, tree);
             const node_idx = cfg_node_idx orelse {
@@ -844,6 +848,299 @@ pub const OptionalUnwrapEngineChecker = struct {
         }
 
         return false;
+    }
+
+    /// Check if an unwrap is guarded by a method call with catch/early exit.
+    /// Pattern: `self.ensureX() catch return;` followed by `self.x.?`
+    /// This uses interprocedural analysis to check if the method assigns to the field.
+    fn isGuardedByMethodCallWithCatch(
+        tree: *const std.zig.Ast,
+        unwrap_node: u32,
+        unwrapped_var: u32,
+        parent_map: []const u32,
+        fn_node: ids.AstNodeId,
+    ) bool {
+        const tags = tree.nodes.items(.tag);
+        const datas = tree.nodes.items(.data);
+        const main_tokens = tree.nodes.items(.main_token);
+        const token_starts = tree.tokens.items(.start);
+
+        // First, check if the unwrapped variable is a field access on self (e.g., self.texture)
+        if (unwrapped_var >= tags.len) return false;
+        if (tags[unwrapped_var] != .field_access) return false;
+
+        // Get the object being accessed and the field name
+        const obj = @intFromEnum(datas[unwrapped_var].node_and_token[0]);
+        const field_token = datas[unwrapped_var].node_and_token[1];
+        const field_name = tree.tokenSlice(field_token);
+
+        // Check if the object is `self`
+        if (obj >= tags.len) return false;
+        if (tags[obj] != .identifier) return false;
+        const obj_name = tree.tokenSlice(main_tokens[obj]);
+        if (!std.mem.eql(u8, obj_name, "self")) return false;
+
+        // Find the containing block
+        var node = unwrap_node;
+        var block_node: ?u32 = null;
+        var depth: u32 = 0;
+
+        while (node < parent_map.len and depth < 64) : (depth += 1) {
+            const parent = parent_map[node];
+            if (parent == 0 or parent >= tags.len) break;
+
+            if (tags[parent] == .block or tags[parent] == .block_two or
+                tags[parent] == .block_semicolon or tags[parent] == .block_two_semicolon)
+            {
+                block_node = parent;
+                break;
+            }
+            node = parent;
+        }
+
+        const block = block_node orelse return false;
+
+        // Scan for method calls with catch before the unwrap
+        return scanBlockForMethodCallWithCatch(tree, block, unwrap_node, field_name, tags, datas, main_tokens, token_starts, fn_node);
+    }
+
+    /// Scan a block for method call with catch pattern
+    fn scanBlockForMethodCallWithCatch(
+        tree: *const std.zig.Ast,
+        block: u32,
+        unwrap_node: u32,
+        field_name: []const u8,
+        tags: []const std.zig.Ast.Node.Tag,
+        datas: []const std.zig.Ast.Node.Data,
+        main_tokens: []const u32,
+        token_starts: []const u32,
+        fn_node: ids.AstNodeId,
+    ) bool {
+        if (block >= tags.len) return false;
+
+        // Get position of the unwrap node
+        if (unwrap_node >= main_tokens.len) return false;
+        const unwrap_pos = token_starts[main_tokens[unwrap_node]];
+
+        // Get statements from the block
+        var stmts_buf: [max_block_statements]u32 = undefined;
+        const stmt_count = getBlockStatements(tree, block, tags, datas, &stmts_buf) orelse return false;
+
+        // Look for catch expressions before the unwrap
+        for (stmts_buf[0..stmt_count]) |stmt| {
+            if (stmt >= tags.len) continue;
+            if (stmt >= main_tokens.len) continue;
+
+            const stmt_pos = token_starts[main_tokens[stmt]];
+
+            // Only look at statements before the unwrap
+            if (stmt_pos >= unwrap_pos) continue;
+
+            // Check if this is a catch expression with early exit handler
+            if (tags[stmt] != .@"catch") continue;
+
+            // Get the operand and handler
+            const operand = @intFromEnum(datas[stmt].node_and_node[0]);
+            const handler = @intFromEnum(datas[stmt].node_and_node[1]);
+
+            // Check if handler is an early exit
+            if (handler >= tags.len) continue;
+            const handler_tag = tags[handler];
+            if (handler_tag != .@"return" and handler_tag != .@"continue" and handler_tag != .@"break") continue;
+
+            // Check if the operand is a method call on self
+            if (!isMethodCallOnSelf(operand, tags, datas, main_tokens, tree)) continue;
+
+            // Get the method name from the call
+            const method_name = getMethodNameFromCall(operand, tags, datas, tree) orelse continue;
+
+            // Look up the method and check if it assigns to self.field_name
+            if (methodAssignsToField(tree, method_name, field_name, fn_node)) {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    /// Check if a node is a method call on self (self.method(...))
+    fn isMethodCallOnSelf(
+        node: u32,
+        tags: []const std.zig.Ast.Node.Tag,
+        datas: []const std.zig.Ast.Node.Data,
+        main_tokens: []const u32,
+        tree: *const std.zig.Ast,
+    ) bool {
+        if (node >= tags.len) return false;
+
+        // Node should be a call expression
+        var buf: [1]std.zig.Ast.Node.Index = undefined;
+        const full = tree.fullCall(&buf, @enumFromInt(node)) orelse return false;
+
+        // The fn_expr should be a field_access (self.method)
+        const fn_expr = @intFromEnum(full.ast.fn_expr);
+        if (fn_expr >= tags.len) return false;
+        if (tags[fn_expr] != .field_access) return false;
+
+        // Get the object being accessed
+        const obj = @intFromEnum(datas[fn_expr].node_and_token[0]);
+        if (obj >= tags.len) return false;
+        if (tags[obj] != .identifier) return false;
+
+        // Check if it's `self`
+        const obj_name = tree.tokenSlice(main_tokens[obj]);
+        return std.mem.eql(u8, obj_name, "self");
+    }
+
+    /// Get the method name from a call expression
+    fn getMethodNameFromCall(
+        node: u32,
+        tags: []const std.zig.Ast.Node.Tag,
+        datas: []const std.zig.Ast.Node.Data,
+        tree: *const std.zig.Ast,
+    ) ?[]const u8 {
+        if (node >= tags.len) return null;
+
+        var buf: [1]std.zig.Ast.Node.Index = undefined;
+        const full = tree.fullCall(&buf, @enumFromInt(node)) orelse return null;
+
+        const fn_expr = @intFromEnum(full.ast.fn_expr);
+        if (fn_expr >= tags.len) return null;
+        if (tags[fn_expr] != .field_access) return null;
+
+        const method_token = datas[fn_expr].node_and_token[1];
+        return tree.tokenSlice(method_token);
+    }
+
+    /// Check if a method in the same struct assigns to self.field_name
+    fn methodAssignsToField(
+        tree: *const std.zig.Ast,
+        method_name: []const u8,
+        field_name: []const u8,
+        fn_node: ids.AstNodeId,
+    ) bool {
+        const tags = tree.nodes.items(.tag);
+        const datas = tree.nodes.items(.data);
+        const main_tokens = tree.nodes.items(.main_token);
+
+        // Find the struct containing this function
+        // Walk up from fn_node to find container_decl
+        const fn_idx = ids.astIndex(fn_node);
+        if (fn_idx >= tags.len) return false;
+
+        // Find all fn_decl nodes in the file and look for one with matching name
+        for (0..tags.len) |i| {
+            if (tags[i] != .fn_decl) continue;
+
+            // Get the function prototype
+            const fn_proto_idx = @intFromEnum(datas[i].node_and_node[0]);
+            if (fn_proto_idx >= tags.len) continue;
+
+            // Get the function name
+            var proto_buf: [1]std.zig.Ast.Node.Index = undefined;
+            const fn_proto = tree.fullFnProto(&proto_buf, @enumFromInt(fn_proto_idx)) orelse continue;
+            const name_token = fn_proto.name_token orelse continue;
+            const fn_name = tree.tokenSlice(name_token);
+
+            if (!std.mem.eql(u8, fn_name, method_name)) continue;
+
+            // Found the method, now check its body for assignments to self.field_name
+            const body_idx = @intFromEnum(datas[i].node_and_node[1]);
+            if (body_idx == 0 or body_idx >= tags.len) continue;
+
+            if (bodyAssignsToSelfField(tree, body_idx, field_name, tags, datas, main_tokens)) {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    /// Check if a function body assigns to self.field_name
+    fn bodyAssignsToSelfField(
+        tree: *const std.zig.Ast,
+        body: u32,
+        field_name: []const u8,
+        tags: []const std.zig.Ast.Node.Tag,
+        datas: []const std.zig.Ast.Node.Data,
+        main_tokens: []const u32,
+    ) bool {
+        if (body >= tags.len) return false;
+
+        return switch (tags[body]) {
+            .assign => {
+                // Check if LHS is self.field_name
+                const lhs = @intFromEnum(datas[body].node_and_node[0]);
+                return isSelfFieldAccess(lhs, field_name, tags, datas, main_tokens, tree);
+            },
+            .block, .block_semicolon => {
+                const extra = datas[body].extra_range;
+                const start: usize = @intFromEnum(extra.start);
+                const end: usize = @intFromEnum(extra.end);
+                for (start..end) |i| {
+                    const stmt = tree.extra_data[i];
+                    if (bodyAssignsToSelfField(tree, stmt, field_name, tags, datas, main_tokens)) {
+                        return true;
+                    }
+                }
+                return false;
+            },
+            .block_two, .block_two_semicolon => {
+                const opt_nodes = datas[body].opt_node_and_opt_node;
+                if (opt_nodes[0].unwrap()) |n| {
+                    if (bodyAssignsToSelfField(tree, @intFromEnum(n), field_name, tags, datas, main_tokens)) {
+                        return true;
+                    }
+                }
+                if (opt_nodes[1].unwrap()) |n| {
+                    if (bodyAssignsToSelfField(tree, @intFromEnum(n), field_name, tags, datas, main_tokens)) {
+                        return true;
+                    }
+                }
+                return false;
+            },
+            .@"if", .if_simple => {
+                const full = tree.fullIf(@enumFromInt(body)) orelse return false;
+                const then_expr = @intFromEnum(full.ast.then_expr);
+                if (bodyAssignsToSelfField(tree, then_expr, field_name, tags, datas, main_tokens)) {
+                    return true;
+                }
+                if (full.ast.else_expr.unwrap()) |else_idx| {
+                    const else_node = @intFromEnum(else_idx);
+                    if (bodyAssignsToSelfField(tree, else_node, field_name, tags, datas, main_tokens)) {
+                        return true;
+                    }
+                }
+                return false;
+            },
+            else => false,
+        };
+    }
+
+    /// Check if a node is self.field_name
+    fn isSelfFieldAccess(
+        node: u32,
+        field_name: []const u8,
+        tags: []const std.zig.Ast.Node.Tag,
+        datas: []const std.zig.Ast.Node.Data,
+        main_tokens: []const u32,
+        tree: *const std.zig.Ast,
+    ) bool {
+        if (node >= tags.len) return false;
+        if (tags[node] != .field_access) return false;
+
+        const obj = @intFromEnum(datas[node].node_and_token[0]);
+        const token = datas[node].node_and_token[1];
+
+        // Check field name
+        const access_name = tree.tokenSlice(token);
+        if (!std.mem.eql(u8, access_name, field_name)) return false;
+
+        // Check if object is `self`
+        if (obj >= tags.len) return false;
+        if (tags[obj] != .identifier) return false;
+        const obj_name = tree.tokenSlice(main_tokens[obj]);
+        return std.mem.eql(u8, obj_name, "self");
     }
 
     /// Check if an unwrap is guarded by short-circuit evaluation or ternary if expression.
