@@ -61,7 +61,7 @@ zwanzig --file src --file tests
 Add zwanzig to your project:
 
 ```bash
-zig fetch --save https://github.com/forketyfork/zwanzig/archive/refs/tags/v0.3.0.tar.gz
+zig fetch --save https://github.com/forketyfork/zwanzig/archive/refs/tags/v0.4.0.tar.gz
 ```
 
 Then wire a lint step in your `build.zig`:
