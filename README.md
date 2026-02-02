@@ -44,25 +44,25 @@ permissions:
 
 Rules (Rule interface):
 
-- dupe-import
-- todo
-- file-as-struct
-- unused-decl
-- unused-parameter
-- unreachable-code
-- empty-defer
-- empty-errdefer
-- shadowed-variable
-- sentinel-alloc
-- identifier-style
+- dupe-import: duplicate `@import` statements
+- todo: `// TODO` comments
+- file-as-struct: file naming based on struct-like top-level fields
+- unused-decl: unused container-level declarations
+- unused-parameter: unused function parameters
+- unreachable-code: code after unconditional terminators or fully terminating branches
+- empty-defer: empty `defer {}` blocks
+- empty-errdefer: empty `errdefer {}` blocks
+- shadowed-variable: name reuse across scopes
+- sentinel-alloc: sentinel-terminated allocations losing sentinel type
+- identifier-style: naming conventions for types/functions/values
 
 Checkers (Checker interface):
 
-- unreachable-code-engine
-- optional-unwrap
-- empty-catch-engine
-- swallowed-error
-- store-violations-engine
+- unreachable-code-engine: constant-condition unreachable code
+- optional-unwrap: forced optional unwraps with `.?`
+- empty-catch-engine: empty `catch {}` blocks
+- swallowed-error: catch blocks that ignore errors without rethrowing or logging
+- store-violations-engine: allocator/resource misuse (double-free, leaks, use-after-free/close)
 
 ## Limitations and in development
 
