@@ -859,8 +859,23 @@ pub const AnalysisEngine = struct {
                                                         }
                                                     }
                                                 }
-                                            } else if (declIsErrorUnionFromAst(tree, decl_info.decl_node) == true) {
-                                                new_state.setErrorState(.error_active);
+                                            } else {
+                                                const error_info = declErrorUnionInfo(tree, decl_info.decl_node);
+                                                if (error_info.status) |is_error_union| {
+                                                    if (is_error_union) {
+                                                        new_state.setErrorState(.error_active);
+                                                    }
+                                                } else if (self.type_context) |type_ctx| {
+                                                    if (error_info.init_node) |init_node| {
+                                                        if (initNodeIsCallExpr(tree, init_node)) {
+                                                            if (type_ctx.getExpressionTypeStrict(init_node)) |ti| {
+                                                                if (ti.kind == .error_union) {
+                                                                    new_state.setErrorState(.error_active);
+                                                                }
+                                                            }
+                                                        }
+                                                    }
+                                                }
                                             }
                                         }
                                     } else if (self.type_context) |type_ctx| {
@@ -916,9 +931,14 @@ pub const AnalysisEngine = struct {
         return new_state;
     }
 
-    fn declIsErrorUnionFromAst(tree: *const std.zig.Ast, decl_node: u32) ?bool {
+    const DeclErrorUnionInfo = struct {
+        status: ?bool,
+        init_node: ?u32,
+    };
+
+    fn declErrorUnionInfo(tree: *const std.zig.Ast, decl_node: u32) DeclErrorUnionInfo {
         const tags = tree.nodes.items(.tag);
-        if (decl_node >= tags.len) return null;
+        if (decl_node >= tags.len) return .{ .status = null, .init_node = null };
 
         switch (tags[decl_node]) {
             .simple_var_decl,
@@ -926,21 +946,25 @@ pub const AnalysisEngine = struct {
             .local_var_decl,
             .global_var_decl,
             => {},
-            else => return null,
+            else => return .{ .status = null, .init_node = null },
         }
 
-        const full_decl = tree.fullVarDecl(@enumFromInt(decl_node)) orelse return null;
+        const full_decl = tree.fullVarDecl(@enumFromInt(decl_node)) orelse
+            return .{ .status = null, .init_node = null };
         if (full_decl.ast.type_node.unwrap()) |type_node_idx| {
             const type_node = @intFromEnum(type_node_idx);
-            return isErrorUnionTypeNode(tree, type_node);
+            return .{ .status = isErrorUnionTypeNode(tree, type_node), .init_node = null };
         }
 
         if (full_decl.ast.init_node.unwrap()) |init_node_idx| {
             const init_node = @intFromEnum(init_node_idx);
-            if (initNodeImpliesErrorUnion(tree, init_node)) return true;
+            if (initNodeImpliesErrorUnion(tree, init_node)) {
+                return .{ .status = true, .init_node = null };
+            }
+            return .{ .status = null, .init_node = init_node };
         }
 
-        return null;
+        return .{ .status = null, .init_node = null };
     }
 
     fn isErrorUnionTypeNode(tree: *const std.zig.Ast, type_node: u32) bool {
@@ -973,6 +997,15 @@ pub const AnalysisEngine = struct {
             .@"try",
             .@"catch",
             => true,
+            else => false,
+        };
+    }
+
+    fn initNodeIsCallExpr(tree: *const std.zig.Ast, init_node: u32) bool {
+        const tags = tree.nodes.items(.tag);
+        if (init_node >= tags.len) return false;
+        return switch (tags[init_node]) {
+            .call, .call_comma, .call_one, .call_one_comma => true,
             else => false,
         };
     }
