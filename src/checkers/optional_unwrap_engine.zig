@@ -192,6 +192,10 @@ pub const OptionalUnwrapEngineChecker = struct {
             // e.g., `self.ensureTexture() catch return; ... self.texture.?`
             if (isGuardedByMethodCallWithCatch(tree, ast_node, unwrapped_node, parent_map, fn_node)) continue;
 
+            // Check if this is a labeled block invariant pattern
+            // e.g., `const flag = blk: { x orelse break :blk false; ... }; if (flag) { x.? }`
+            if (isGuardedByLabeledBlockInvariant(tree, ast_node, unwrapped_node, parent_map)) continue;
+
             // Find the CFG node containing this AST node
             const cfg_node_idx = findCfgNodeForAst(cfg, ast_node, tree);
             const node_idx = cfg_node_idx orelse {
@@ -1145,6 +1149,237 @@ pub const OptionalUnwrapEngineChecker = struct {
         if (tags[obj] != .identifier) return false;
         const obj_name = tree.tokenSlice(main_tokens[obj]);
         return std.mem.eql(u8, obj_name, "self");
+    }
+
+    /// Check if ancestor_node is an ancestor of descendant_node using parent_map
+    fn isAncestor(ancestor_node: u32, descendant_node: u32, parent_map: []const u32) bool {
+        if (ancestor_node == descendant_node) return true;
+
+        var node = descendant_node;
+        var depth: u32 = 0;
+        while (node < parent_map.len and depth < 64) : (depth += 1) {
+            const parent = parent_map[node];
+            if (parent == 0) break;
+            if (parent == ancestor_node) return true;
+            node = parent;
+        }
+        return false;
+    }
+
+    /// Check if an unwrap is guarded by a labeled block invariant.
+    /// Pattern: `const flag = blk: { x orelse break :blk false; ... }; if (flag) { x.? }`
+    /// If the block breaks with false when x is null, and we're in `if (flag)`,
+    /// then x must be non-null.
+    fn isGuardedByLabeledBlockInvariant(
+        tree: *const std.zig.Ast,
+        unwrap_node: u32,
+        unwrapped_var: u32,
+        parent_map: []const u32,
+    ) bool {
+        const tags = tree.nodes.items(.tag);
+        const datas = tree.nodes.items(.data);
+        const main_tokens = tree.nodes.items(.main_token);
+        const token_starts = tree.tokens.items(.start);
+
+        // Walk up to find if we're inside an `if` statement
+        var node = unwrap_node;
+        var depth: u32 = 0;
+
+        while (node < parent_map.len and depth < 64) : (depth += 1) {
+            const parent = parent_map[node];
+            if (parent == 0 or parent >= tags.len) break;
+
+            if (tags[parent] == .@"if" or tags[parent] == .if_simple) {
+                // Found an if statement - check if condition is a variable
+                // that was assigned from a labeled block with null-guard
+                const full = tree.fullIf(@enumFromInt(parent)) orelse {
+                    node = parent;
+                    continue;
+                };
+                const cond = @intFromEnum(full.ast.cond_expr);
+                const then_expr = @intFromEnum(full.ast.then_expr);
+
+                // Only check if unwrap is in the then branch
+                // Use parent_map to check if unwrap_node's ancestors include then_expr
+                if (!isAncestor(then_expr, unwrap_node, parent_map)) {
+                    node = parent;
+                    continue;
+                }
+
+                // Check if condition is a simple identifier
+                if (cond >= tags.len or tags[cond] != .identifier) {
+                    node = parent;
+                    continue;
+                }
+
+                const cond_name = tree.tokenSlice(main_tokens[cond]);
+
+                // Find the block containing this if statement and look for
+                // the assignment of the condition variable
+                if (findLabeledBlockGuard(tree, parent, cond_name, unwrapped_var, parent_map, tags, datas, main_tokens, token_starts)) {
+                    return true;
+                }
+            }
+            node = parent;
+        }
+
+        return false;
+    }
+
+    /// Find a labeled block assignment that guards the unwrapped variable
+    fn findLabeledBlockGuard(
+        tree: *const std.zig.Ast,
+        if_node: u32,
+        cond_name: []const u8,
+        unwrapped_var: u32,
+        parent_map: []const u32,
+        tags: []const std.zig.Ast.Node.Tag,
+        datas: []const std.zig.Ast.Node.Data,
+        main_tokens: []const u32,
+        token_starts: []const u32,
+    ) bool {
+        // Find the containing block of the if statement
+        var node = if_node;
+        var block_node: ?u32 = null;
+        var depth: u32 = 0;
+
+        while (node < parent_map.len and depth < 64) : (depth += 1) {
+            const parent = parent_map[node];
+            if (parent == 0 or parent >= tags.len) break;
+
+            if (tags[parent] == .block or tags[parent] == .block_two or
+                tags[parent] == .block_semicolon or tags[parent] == .block_two_semicolon)
+            {
+                block_node = parent;
+                break;
+            }
+            node = parent;
+        }
+
+        const block = block_node orelse return false;
+
+        // Get position of the if node
+        if (if_node >= main_tokens.len) return false;
+        const if_pos = token_starts[main_tokens[if_node]];
+
+        // Scan block for variable declaration with labeled block initializer
+        var stmts_buf: [max_block_statements]u32 = undefined;
+        const stmt_count = getBlockStatements(tree, block, tags, datas, &stmts_buf) orelse return false;
+
+        for (stmts_buf[0..stmt_count]) |stmt| {
+            if (stmt >= tags.len or stmt >= main_tokens.len) continue;
+
+            const stmt_pos = token_starts[main_tokens[stmt]];
+            if (stmt_pos >= if_pos) continue; // Only look before the if
+
+            // Check for variable declaration
+            if (tags[stmt] != .simple_var_decl and tags[stmt] != .local_var_decl and
+                tags[stmt] != .aligned_var_decl) continue;
+
+            const full = tree.fullVarDecl(@enumFromInt(stmt)) orelse continue;
+            const name_token = full.ast.mut_token + 1;
+            const token_tags = tree.tokens.items(.tag);
+            if (name_token >= token_tags.len or token_tags[name_token] != .identifier) continue;
+
+            const decl_name = tree.tokenSlice(name_token);
+            if (!std.mem.eql(u8, decl_name, cond_name)) continue;
+
+            // Found the declaration - check if init is a labeled block
+            const init_node = @intFromEnum(full.ast.init_node);
+            if (init_node == 0 or init_node >= tags.len) continue;
+
+            // Check if the initializer is a block (labeled blocks are also blocks)
+            if (tags[init_node] != .block and tags[init_node] != .block_two and
+                tags[init_node] != .block_semicolon and tags[init_node] != .block_two_semicolon) continue;
+            // Scan the block for `unwrapped_var orelse break :label false` pattern
+            if (blockHasNullGuardBreak(tree, init_node, unwrapped_var, tags, datas)) {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    /// Check if a block contains `var orelse break :label false` for the given variable
+    fn blockHasNullGuardBreak(
+        tree: *const std.zig.Ast,
+        block: u32,
+        unwrapped_var: u32,
+        tags: []const std.zig.Ast.Node.Tag,
+        datas: []const std.zig.Ast.Node.Data,
+    ) bool {
+        if (block >= tags.len) return false;
+
+        // Get statements from the block
+        var stmts_buf: [max_block_statements]u32 = undefined;
+        const stmt_count = getBlockStatements(tree, block, tags, datas, &stmts_buf) orelse return false;
+
+        for (stmts_buf[0..stmt_count]) |stmt| {
+            if (stmt >= tags.len) continue;
+
+            // Look for variable declarations with orelse break pattern
+            if (tags[stmt] == .simple_var_decl or tags[stmt] == .local_var_decl or
+                tags[stmt] == .aligned_var_decl)
+            {
+                const full = tree.fullVarDecl(@enumFromInt(stmt)) orelse continue;
+                const init_node = @intFromEnum(full.ast.init_node);
+                if (init_node == 0 or init_node >= tags.len) continue;
+
+                // Check for orelse expression
+                if (tags[init_node] == .@"orelse") {
+                    const lhs = @intFromEnum(datas[init_node].node_and_node[0]);
+                    const rhs = @intFromEnum(datas[init_node].node_and_node[1]);
+
+                    // Check if LHS matches the unwrapped variable
+                    if (sameVariable(tree, lhs, unwrapped_var)) {
+                        // Check if RHS is a break with false value
+                        if (isBreakWithFalse(rhs, tags, datas, tree)) {
+                            return true;
+                        }
+                    }
+                }
+            }
+
+            // Also check for standalone orelse expressions (e.g., `_ = x orelse break :blk false`)
+            if (tags[stmt] == .@"orelse") {
+                const lhs = @intFromEnum(datas[stmt].node_and_node[0]);
+                const rhs = @intFromEnum(datas[stmt].node_and_node[1]);
+
+                if (sameVariable(tree, lhs, unwrapped_var)) {
+                    if (isBreakWithFalse(rhs, tags, datas, tree)) {
+                        return true;
+                    }
+                }
+            }
+        }
+
+        return false;
+    }
+
+    /// Check if a node is `break :label false`
+    fn isBreakWithFalse(
+        node: u32,
+        tags: []const std.zig.Ast.Node.Tag,
+        datas: []const std.zig.Ast.Node.Data,
+        tree: *const std.zig.Ast,
+    ) bool {
+        if (node >= tags.len) return false;
+        if (tags[node] != .@"break") return false;
+
+        // break data is opt_token_and_opt_node
+        // [0] is optional label token, [1] is optional break value
+        const break_value = datas[node].opt_token_and_opt_node[1].unwrap() orelse return false;
+        const break_value_idx = @intFromEnum(break_value);
+
+        if (break_value_idx >= tags.len) return false;
+
+        // Check if break value is `false`
+        if (tags[break_value_idx] == .identifier) {
+            const value_text = tree.tokenSlice(tree.nodes.items(.main_token)[break_value_idx]);
+            return std.mem.eql(u8, value_text, "false");
+        }
+
+        return false;
     }
 
     /// Check if an unwrap is guarded by short-circuit evaluation or ternary if expression.
