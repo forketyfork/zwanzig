@@ -37,6 +37,22 @@ pub fn mixin(comptime _Engine: type) type {
             return ids.varId(token);
         }
 
+        pub fn resolveDeclInfoFromIdentifier(self: *_Engine, identifier_node: u32, current_cfg: *const Cfg) ?VarResolver.DeclInfo {
+            const src = self.source orelse return null;
+            const tree = src.ast() catch return null;
+            const tags = tree.nodes.items(.tag);
+
+            if (identifier_node >= tags.len or tags[identifier_node] != .identifier) return null;
+
+            if (current_cfg.fn_ast_node) |fn_node| {
+                if (getOrBuildVarResolver(self, fn_node)) |resolver| {
+                    return resolver.resolveDeclInfo(identifier_node);
+                }
+            }
+
+            return null;
+        }
+
         /// Resolve a variable ID from an expression node.
         /// This handles identifiers, grouped expressions, unwrap operations, etc.
         /// Uses the VarResolver when available to correctly handle variable shadowing.

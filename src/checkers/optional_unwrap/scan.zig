@@ -190,10 +190,17 @@ fn collectUnwrapsInSubtree(
                 try collectUnwrapsInSubtree(tree, @intFromEnum(init_node), allocator, out);
             }
         },
-        .assign, .assign_destructure => {
+        .assign => {
             const pair = datas[root].node_and_node;
             try collectUnwrapsInSubtree(tree, @intFromEnum(pair[0]), allocator, out);
             try collectUnwrapsInSubtree(tree, @intFromEnum(pair[1]), allocator, out);
+        },
+        .assign_destructure => {
+            const full = tree.assignDestructure(@enumFromInt(root));
+            for (full.ast.variables) |var_node| {
+                try collectUnwrapsInSubtree(tree, @intFromEnum(var_node), allocator, out);
+            }
+            try collectUnwrapsInSubtree(tree, @intFromEnum(full.ast.value_expr), allocator, out);
         },
         .call, .call_comma, .call_one, .call_one_comma => {
             var call_buf: [1]std.zig.Ast.Node.Index = undefined;

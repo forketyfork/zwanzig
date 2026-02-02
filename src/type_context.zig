@@ -503,13 +503,11 @@ pub const TypeContext = struct {
 
         const name = tree.tokenSlice(ident_token);
 
-        // First try top-level declaration lookup
-        if (self.getDeclType(name)) |ti| {
+        if (self.getLocalVarType(tree, name)) |ti| {
             return ti;
         }
 
-        // For local variables, try to resolve the declared type or initializer type.
-        if (self.getLocalVarType(tree, name)) |ti| {
+        if (self.getDeclType(name)) |ti| {
             return ti;
         }
 
