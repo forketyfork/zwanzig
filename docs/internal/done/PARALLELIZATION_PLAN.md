@@ -46,7 +46,7 @@ Ensure allocations and cache I/O are safe under concurrency.
 ## Step 3: Add parallel scheduling and thread control
 
 ### Status Quo
-- `src/main.zig` loops through `files` and calls `analyzeFile` sequentially.
+- `src/cli/run.zig` loops through `files` and calls `analyzeFile` sequentially.
 - No CLI option for controlling concurrency.
 
 ### Objectives

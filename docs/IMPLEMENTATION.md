@@ -6,6 +6,17 @@ This document describes the internal architecture and implementation details of 
 
 Zwanzig is designed as a modular static analysis framework for Zig code. The architecture consists of several key components that work together to analyze source files and detect issues.
 
+### Module Layout
+
+Zwanzig splits larger subsystems into focused submodules and exposes thin facades for convenience:
+
+- `src/cli/` - CLI parsing (`args.zig`), config merge (`config_merge.zig`), default rule/checker registry (`registry.zig`), and the run loop (`run.zig`)
+- `src/formatters/` - Output formatters (console text and SARIF)
+- `src/cfg/` - CFG graph types, builder, and DOT output (facade: `src/cfg.zig`)
+- `src/engine/` - Analysis engine internals (analysis, state, values, constraints, summaries, store) (facade: `src/engine.zig`)
+- `src/zir/` + `src/types/` - ZIR bridge implementation and shared type info (facade: `src/zir_bridge.zig`)
+- `src/lib.zig` - Public library exports for embedding
+
 ### Core Components
 
 #### Source Parsing Cache
@@ -194,6 +205,7 @@ The analyzer supports multiple output formats via the `Analyzer.OutputFormat` en
 - **SARIF format**: Code scanning format for GitHub and other tooling (SARIF 2.1.0)
 
 The output format is controlled by the `--format` CLI flag and defaults to text. The `Analyzer.printResults()` method takes an `OutputFormat` parameter and dispatches to the appropriate formatter.
+Formatter implementations live in `src/formatters/` (`console.zig`, `sarif.zig`).
 
 ## Parsing Strategy
 
@@ -266,7 +278,7 @@ pub const MyChecker = struct {
 };
 ```
 
-4. Register the checker in `main.zig`:
+4. Register the checker in `src/cli/registry.zig` (for the CLI):
 ```zig
 try analyzer.registerChecker(&MyChecker.checker);
 ```
@@ -287,7 +299,7 @@ To add a legacy rule:
        diagnostics: *std.ArrayList(Diagnostic),
    ) RuleError!void
    ```
-4. Register the rule in `main.zig`
+4. Register the rule in `src/cli/registry.zig` (for the CLI)
 
 Example:
 ```zig
@@ -600,7 +612,7 @@ pub const IrNode = struct {
 
 ## Control Flow Graph (CFG)
 
-The CFG (`src/cfg.zig`) represents the control flow within a single function. It is built from the AST and maps IR nodes to their control flow relationships.
+The CFG (`src/cfg.zig`) represents the control flow within a single function. It is built from the AST and maps IR nodes to their control flow relationships. The facade in `src/cfg.zig` re-exports the implementation from `src/cfg/` (`graph.zig`, `builder.zig`, `dot.zig`).
 
 ### CFG Structure
 
@@ -859,7 +871,7 @@ var_decl ◄──────────┘
 
 ## Typed IR Bridge (ZIR Integration)
 
-The `ZirBridge` module (`src/zir_bridge.zig`) provides a bridge between Zwanzig's analysis pipeline and Zig's typed intermediate representation (ZIR). This enables access to type information that is not available in the raw AST.
+The `ZirBridge` module (`src/zir_bridge.zig`) provides a bridge between Zwanzig's analysis pipeline and Zig's typed intermediate representation (ZIR). This enables access to type information that is not available in the raw AST. The implementation lives in `src/zir/bridge.zig`, with declaration models in `src/zir/decls.zig` and shared type definitions in `src/types/type_info.zig`.
 
 ### Overview
 
@@ -873,7 +885,7 @@ ZIR (Zig Intermediate Representation) is the typed IR produced by the Zig compil
 
 #### TypeInfo
 
-Represents type information for a declaration or expression:
+Represents type information for a declaration or expression (defined in `src/types/type_info.zig`):
 
 ```zig
 pub const TypeInfo = struct {
@@ -1133,7 +1145,7 @@ Key annotations:
 
 ## Analysis Engine
 
-The analysis engine (`src/engine.zig`) implements a worklist-based traversal of the CFG to build an exploded graph. This is the foundation for path-sensitive static analysis.
+The analysis engine (`src/engine.zig`) implements a worklist-based traversal of the CFG to build an exploded graph. This is the foundation for path-sensitive static analysis. The facade in `src/engine.zig` re-exports modular internals from `src/engine/` (analysis, state, values, constraints, summaries, store, dot).
 
 ### Key Concepts
 
@@ -1663,11 +1675,13 @@ if (context.config) |config| {
 
 ### Registration
 
-These checkers are registered in `main.zig`:
+These checkers are registered in `src/cli/registry.zig`:
 
 ```zig
 try analyzer.registerChecker(&EmptyCatchEngineChecker.checker);
+try analyzer.registerChecker(&OptionalUnwrapEngineChecker.checker);
 try analyzer.registerChecker(&SwallowedErrorChecker.checker);
+try analyzer.registerChecker(&UnreachableCodeChecker.checker);
 try analyzer.registerChecker(&StoreViolationsEngineChecker.checker);
 ```
 

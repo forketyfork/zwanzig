@@ -135,109 +135,6 @@ fn add(value: i32) i32 {
 }
 ```
 
-### optional-unwrap
-
-Flags forced optional unwraps using `.?`, which panic at runtime if the value is `null`. Prefer handling the optional with `if (opt) |value|` or `orelse` to make the null case explicit.
-
-**Bad:**
-```zig
-fn readConfig(opt: ?[]const u8) []const u8 {
-    return opt.?; // Panics if opt is null
-}
-```
-
-**Good:**
-```zig
-fn readConfig(opt: ?[]const u8) []const u8 {
-    return opt orelse "default";
-}
-```
-
-#### Guarded patterns recognized
-
-The checker uses flow analysis to recognize patterns where the optional is proven non-null before the unwrap. These safe patterns **do not produce warnings**:
-
-**Null check guard:**
-```zig
-if (opt != null) {
-    const value = opt.?;  // Safe: guarded by null check
-}
-```
-
-**Early return guard:**
-```zig
-if (opt == null) {
-    return null;
-}
-const value = opt.?;  // Safe: null case already returned
-```
-
-**Compound null check:**
-```zig
-if (a == null or b == null) {
-    return null;
-}
-const sum = a.? + b.?;  // Safe: both guarded
-```
-
-**Short-circuit evaluation:**
-```zig
-// Safe: .? only evaluated when opt is non-null
-return opt != null and opt.? == expected;
-return opt == null or opt.? != expected;
-```
-
-**Ternary if expression:**
-```zig
-const value = if (opt != null) opt.? else 0;  // Safe: then branch guarded
-```
-
-**Lazy initialization:**
-```zig
-if (self.cached == null) {
-    self.cached = computeValue();
-}
-return &self.cached.?;  // Safe: initialized above if null
-```
-
-**Payload capture:**
-```zig
-if (opt) |value| {
-    _ = value;  // Safe: payload binding
-}
-```
-
-**Comptime type expressions:**
-```zig
-// Safe: evaluated at compile time, fails as compile error not runtime panic
-const ReturnType = @typeInfo(@TypeOf(func)).@"fn".return_type.?;
-```
-
-**Method call with catch guard:**
-```zig
-fn render(self: *Self) void {
-    self.ensureTexture() catch return;  // Returns early if texture init fails
-    draw(self.texture.?);  // Safe: ensureTexture assigns self.texture on success
-}
-```
-
-**Try-assign guard:**
-```zig
-self.path = try allocator.dupe(u8, input);
-const basename = getBasename(self.path.?);  // Safe: try succeeded, so path is non-null
-```
-
-**Labeled block invariant:**
-```zig
-const should_process = blk: {
-    const value = opt orelse break :blk false;  // Break with false if null
-    break :blk value.isValid();
-};
-if (should_process) {
-    use(opt.?);  // Safe: should_process=true implies opt was non-null
-}
-```
-
 ### unreachable-code
 
 Detects code that can never execute after an unconditional terminator (e.g., `return`) or after fully terminating branches (`if`, `switch`, `while`).
@@ -441,6 +338,109 @@ fn foo(condition: bool) i32 {
         return 1;
     }
     return 0;
+}
+```
+
+### optional-unwrap
+
+Engine-based checker that flags forced optional unwraps using `.?`, which panic at runtime if the value is `null`. Prefer handling the optional with `if (opt) |value|` or `orelse` to make the null case explicit.
+
+**Bad:**
+```zig
+fn readConfig(opt: ?[]const u8) []const u8 {
+    return opt.?; // Panics if opt is null
+}
+```
+
+**Good:**
+```zig
+fn readConfig(opt: ?[]const u8) []const u8 {
+    return opt orelse "default";
+}
+```
+
+#### Guarded patterns recognized
+
+The checker uses flow analysis to recognize patterns where the optional is proven non-null before the unwrap. These safe patterns **do not produce warnings**:
+
+**Null check guard:**
+```zig
+if (opt != null) {
+    const value = opt.?;  // Safe: guarded by null check
+}
+```
+
+**Early return guard:**
+```zig
+if (opt == null) {
+    return null;
+}
+const value = opt.?;  // Safe: null case already returned
+```
+
+**Compound null check:**
+```zig
+if (a == null or b == null) {
+    return null;
+}
+const sum = a.? + b.?;  // Safe: both guarded
+```
+
+**Short-circuit evaluation:**
+```zig
+// Safe: .? only evaluated when opt is non-null
+return opt != null and opt.? == expected;
+return opt == null or opt.? != expected;
+```
+
+**Ternary if expression:**
+```zig
+const value = if (opt != null) opt.? else 0;  // Safe: then branch guarded
+```
+
+**Lazy initialization:**
+```zig
+if (self.cached == null) {
+    self.cached = computeValue();
+}
+return &self.cached.?;  // Safe: initialized above if null
+```
+
+**Payload capture:**
+```zig
+if (opt) |value| {
+    _ = value;  // Safe: payload binding
+}
+```
+
+**Comptime type expressions:**
+```zig
+// Safe: evaluated at compile time, fails as compile error not runtime panic
+const ReturnType = @typeInfo(@TypeOf(func)).@"fn".return_type.?;
+```
+
+**Method call with catch guard:**
+```zig
+fn render(self: *Self) void {
+    self.ensureTexture() catch return;  // Returns early if texture init fails
+    draw(self.texture.?);  // Safe: ensureTexture assigns self.texture on success
+}
+```
+
+**Try-assign guard:**
+```zig
+self.path = try allocator.dupe(u8, input);
+const basename = getBasename(self.path.?);  // Safe: try succeeded, so path is non-null
+```
+
+**Labeled block invariant:**
+```zig
+const should_process = blk: {
+    const value = opt orelse break :blk false;  // Break with false if null
+    break :blk value.isValid();
+};
+if (should_process) {
+    use(opt.?);  // Safe: should_process=true implies opt was non-null
 }
 ```
 
