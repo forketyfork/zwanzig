@@ -84,7 +84,7 @@ pub const AnalysisLimits = struct {
 pub const CheckerContext = struct {
     build_metadata: ?*const BuildMetadata,
     /// Type context for ZIR-based type queries.
-    /// This is null if typed IR is not enabled or ZIR generation failed.
+    /// This is null if the caller did not provide a type context or ZIR generation failed.
     type_context: ?*TypeContext = null,
     analysis_stats: ?*AnalysisStats = null,
     analysis_limits: AnalysisLimits = .{},
@@ -145,6 +145,7 @@ pub const CheckerContext = struct {
     pub fn createCfgBuilder(self: *const CheckerContext, allocator: std.mem.Allocator) CfgBuilder {
         var builder = CfgBuilder.init(allocator);
         builder.setDumpCfgDir(self.dump_cfg_dir);
+        builder.setTypeContext(self.type_context);
         return builder;
     }
 };

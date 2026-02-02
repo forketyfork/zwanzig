@@ -7,6 +7,7 @@ const Rule = src.Rule;
 const checker_mod = src.checker;
 const Checker = checker_mod.Checker;
 const CheckerContext = checker_mod.CheckerContext;
+const TypeContext = checker_mod.TypeContext;
 const config_mod = src.config;
 
 /// Expected diagnostic parsed from fixture comments.
@@ -244,6 +245,8 @@ pub fn runCheckerFixture(
 
     var source = Source.init(allocator, fixture_path, fixture_content);
     defer source.deinit();
+    var type_ctx = TypeContext.init(allocator, &source);
+    defer type_ctx.deinit();
 
     var diagnostics: std.ArrayList(Diagnostic) = .empty;
     defer {
@@ -255,7 +258,7 @@ pub fn runCheckerFixture(
 
     const context = CheckerContext{
         .build_metadata = null,
-        .type_context = null,
+        .type_context = &type_ctx,
         .config = if (config_opt) |*cfg| cfg else null,
     };
     try checker.checkAst(&source, allocator, &diagnostics, context);

@@ -10,7 +10,6 @@ const TypeContext = checker_mod.TypeContext;
 const Config = checker_mod.Config;
 pub const AnalysisResult = checker_mod.AnalysisResult;
 pub const AnalysisStats = checker_mod.AnalysisStats;
-const ZirBridge = @import("zir_bridge.zig").ZirBridge;
 const BuildMetadata = @import("build_metadata.zig").BuildMetadata;
 const cache_mod = @import("cache.zig");
 const Cache = cache_mod.Cache;
@@ -29,8 +28,6 @@ pub const Analyzer = struct {
     diagnostics: std.ArrayList(Diagnostic),
     rule_filter: RuleFilter,
     tool_version: []const u8 = "unknown",
-    zir_bridge: ?ZirBridge = null,
-    use_typed_ir: bool = false,
     build_metadata: ?BuildMetadata = null,
     cache: ?Cache = null,
     use_cache: bool = false,
@@ -59,9 +56,6 @@ pub const Analyzer = struct {
             diag.deinit(self.allocator);
         }
         self.diagnostics.deinit(self.allocator);
-        if (self.zir_bridge) |*bridge| {
-            bridge.deinit();
-        }
         if (self.build_metadata) |*meta| {
             var meta_mut = meta.*;
             meta_mut.deinit(self.allocator);
@@ -71,28 +65,12 @@ pub const Analyzer = struct {
         }
     }
 
-    /// Enable typed IR analysis using ZirBridge.
-    pub fn enableTypedIr(self: *Analyzer) void {
-        self.use_typed_ir = true;
-        if (self.zir_bridge == null) {
-            self.zir_bridge = ZirBridge.init(self.allocator);
-        }
-    }
-
     /// Enable incremental caching.
     pub fn enableCache(self: *Analyzer) !void {
         self.use_cache = true;
         if (self.cache == null) {
             self.cache = try Cache.init(self.allocator);
         }
-    }
-
-    /// Get the ZirBridge if typed IR is enabled and loaded.
-    pub fn getZirBridge(self: *Analyzer) ?*ZirBridge {
-        if (self.zir_bridge) |*bridge| {
-            return bridge;
-        }
-        return null;
     }
 
     /// Register a legacy Rule with the analyzer.
@@ -353,7 +331,7 @@ pub const Analyzer = struct {
                 var artifacts = CachedArtifacts.init(scratch_allocator);
                 defer artifacts.deinit();
 
-                artifacts.had_type_info = self.use_typed_ir;
+                artifacts.had_type_info = source.hasTypeInfo();
 
                 const serialized = artifacts.serialize(scratch_allocator) catch |err| {
                     log.debug("analyzeResult: failed to serialize artifacts: {}", .{err});
@@ -402,20 +380,16 @@ pub const Analyzer = struct {
         diagnostics: *std.ArrayList(Diagnostic),
         analysis_stats: *checker_mod.AnalysisStats,
     ) !void {
-        // Create type context if typed IR is enabled
-        var type_ctx: ?TypeContext = null;
-        if (self.use_typed_ir) {
-            type_ctx = TypeContext.init(scratch_allocator, source);
-            log.debug("type context: created for {s}, available={}", .{
-                source.getFilePath(),
-                if (type_ctx) |*tc| tc.isAvailable() else false,
-            });
-        }
-        defer if (type_ctx) |*tc| tc.deinit();
+        var type_ctx = TypeContext.init(scratch_allocator, source);
+        defer type_ctx.deinit();
+        log.debug("type context: created for {s}, available={}", .{
+            source.getFilePath(),
+            type_ctx.isAvailable(),
+        });
 
         const context = checker_mod.CheckerContext{
             .build_metadata = self.getBuildMetadata(),
-            .type_context = if (type_ctx) |*tc| tc else null,
+            .type_context = &type_ctx,
             .analysis_stats = analysis_stats,
             .analysis_limits = .{
                 .max_worklist_steps = self.max_worklist_steps,
