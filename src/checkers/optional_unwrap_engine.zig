@@ -753,6 +753,10 @@ pub const OptionalUnwrapEngineChecker = struct {
                     if (isOrelseWithEarlyExit(rhs, tags, datas)) {
                         return true;
                     }
+                    // Check if RHS is a try expression - try only succeeds with non-null value
+                    if (rhs < tags.len and tags[rhs] == .@"try") {
+                        return true;
+                    }
                     // Check if RHS is an identifier that was assigned via `try` earlier
                     if (isNonNullIdentifier(tree, rhs, block, stmt_pos, tags, datas, main_tokens, token_starts)) {
                         return true;
