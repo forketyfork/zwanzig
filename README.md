@@ -4,7 +4,7 @@
 [![MIT License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![Zig](https://img.shields.io/badge/language-Zig-f7a41d.svg)](https://ziglang.org/)
 
-Zwanzig is a static analyzer and linter for Zig code, combining fast AST/token rules with engine-backed checkers.
+Zwanzig is a static analyzer and linter for Zig code, combining fast AST/token rules with CFG-driven analysis built on ZIR output.
 
 ## Quick usage
 
@@ -38,6 +38,7 @@ permissions:
 - Lazy parsing with cached AST/tokens per file
 - Type-aware analysis via ZIR
 - CFG-based, path-sensitive checkers
+- Graphviz DOT dumps for CFGs, exploded graphs, and path traces
 - Parallel analysis across files
 
 ## Rules
