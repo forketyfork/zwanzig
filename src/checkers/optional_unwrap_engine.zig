@@ -892,8 +892,8 @@ pub const OptionalUnwrapEngineChecker = struct {
                         return true;
                     }
                 },
-                .@"if" => {
-                    // Ternary if expression: `if (cond) then else otherwise`
+                .@"if", .if_simple => {
+                    // If statement/expression: `if (cond) then else otherwise`
                     // Check if the unwrap is in a guarded branch
                     const full = tree.fullIf(@enumFromInt(parent)) orelse continue;
                     const cond = @intFromEnum(full.ast.cond_expr);
