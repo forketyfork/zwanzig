@@ -51,14 +51,12 @@ pub const StoreViolationsEngineChecker = struct {
         if (cfg_opt) |*cfg| {
             defer cfg.deinit();
 
-            // Create a TypeContext for type-aware analysis
-            var type_ctx = TypeContext.init(allocator, src);
-            defer type_ctx.deinit();
-
             var engine = AnalysisEngine.initWithSource(allocator, cfg, src);
             defer engine.deinit();
             engine.setCheckerName("store-violations-engine");
-            engine.setTypeContext(&type_ctx);
+            if (context.type_context) |type_ctx| {
+                engine.setTypeContext(type_ctx);
+            }
             if (context.build_metadata) |metadata| {
                 engine.setBuildMetadata(metadata);
             }
@@ -168,6 +166,8 @@ test "store_violations_engine reports double free" {
 
     var source = Source.init(allocator, "test.zig", code);
     defer source.deinit();
+    var type_ctx = TypeContext.init(allocator, &source);
+    defer type_ctx.deinit();
 
     var diagnostics: std.ArrayList(Diagnostic) = .empty;
     defer {
@@ -177,7 +177,7 @@ test "store_violations_engine reports double free" {
         diagnostics.deinit(allocator);
     }
 
-    try StoreViolationsEngineChecker.checker.checkAst(&source, allocator, &diagnostics, .{ .build_metadata = null, .type_context = null });
+    try StoreViolationsEngineChecker.checker.checkAst(&source, allocator, &diagnostics, .{ .build_metadata = null, .type_context = &type_ctx });
     try testing.expectEqual(@as(usize, 1), diagnostics.items.len);
     try testing.expectEqualStrings("store-violations-engine", diagnostics.items[0].rule_id);
     try testing.expect(std.mem.indexOf(u8, diagnostics.items[0].message, "double-free") != null);
@@ -198,6 +198,8 @@ test "store_violations_engine reports free without alloc" {
 
     var source = Source.init(allocator, "test.zig", code);
     defer source.deinit();
+    var type_ctx = TypeContext.init(allocator, &source);
+    defer type_ctx.deinit();
 
     var diagnostics: std.ArrayList(Diagnostic) = .empty;
     defer {
@@ -207,7 +209,7 @@ test "store_violations_engine reports free without alloc" {
         diagnostics.deinit(allocator);
     }
 
-    try StoreViolationsEngineChecker.checker.checkAst(&source, allocator, &diagnostics, .{ .build_metadata = null, .type_context = null });
+    try StoreViolationsEngineChecker.checker.checkAst(&source, allocator, &diagnostics, .{ .build_metadata = null, .type_context = &type_ctx });
     try testing.expectEqual(@as(usize, 1), diagnostics.items.len);
     try testing.expectEqualStrings("store-violations-engine", diagnostics.items[0].rule_id);
     try testing.expect(std.mem.indexOf(u8, diagnostics.items[0].message, "free without tracked allocation") != null);
@@ -228,6 +230,8 @@ test "store_violations_engine reports use after free" {
 
     var source = Source.init(allocator, "test.zig", code);
     defer source.deinit();
+    var type_ctx = TypeContext.init(allocator, &source);
+    defer type_ctx.deinit();
 
     var diagnostics: std.ArrayList(Diagnostic) = .empty;
     defer {
@@ -237,7 +241,7 @@ test "store_violations_engine reports use after free" {
         diagnostics.deinit(allocator);
     }
 
-    try StoreViolationsEngineChecker.checker.checkAst(&source, allocator, &diagnostics, .{ .build_metadata = null, .type_context = null });
+    try StoreViolationsEngineChecker.checker.checkAst(&source, allocator, &diagnostics, .{ .build_metadata = null, .type_context = &type_ctx });
     try testing.expectEqual(@as(usize, 1), diagnostics.items.len);
     try testing.expectEqualStrings("store-violations-engine", diagnostics.items[0].rule_id);
     try testing.expect(std.mem.indexOf(u8, diagnostics.items[0].message, "use after free") != null);
@@ -257,6 +261,8 @@ test "store_violations_engine reports leak" {
 
     var source = Source.init(allocator, "test.zig", code);
     defer source.deinit();
+    var type_ctx = TypeContext.init(allocator, &source);
+    defer type_ctx.deinit();
 
     var diagnostics: std.ArrayList(Diagnostic) = .empty;
     defer {
@@ -266,7 +272,7 @@ test "store_violations_engine reports leak" {
         diagnostics.deinit(allocator);
     }
 
-    try StoreViolationsEngineChecker.checker.checkAst(&source, allocator, &diagnostics, .{ .build_metadata = null, .type_context = null });
+    try StoreViolationsEngineChecker.checker.checkAst(&source, allocator, &diagnostics, .{ .build_metadata = null, .type_context = &type_ctx });
     try testing.expectEqual(@as(usize, 1), diagnostics.items.len);
     try testing.expectEqualStrings("store-violations-engine", diagnostics.items[0].rule_id);
     try testing.expect(std.mem.indexOf(u8, diagnostics.items[0].message, "resource leak") != null);
@@ -290,6 +296,8 @@ test "store_violations_engine detects config-driven resource model" {
 
     var source = Source.init(allocator, "test.zig", code);
     defer source.deinit();
+    var type_ctx = TypeContext.init(allocator, &source);
+    defer type_ctx.deinit();
 
     var diagnostics: std.ArrayList(Diagnostic) = .empty;
     defer {
@@ -309,7 +317,7 @@ test "store_violations_engine detects config-driven resource model" {
 
     const context = checker_mod.CheckerContext{
         .build_metadata = null,
-        .type_context = null,
+        .type_context = &type_ctx,
         .config = &cfg,
     };
     try StoreViolationsEngineChecker.checker.checkAst(&source, allocator, &diagnostics, context);
@@ -340,6 +348,8 @@ test "store_violations_engine detects config-driven fqn model with field access 
 
     var source = Source.init(allocator, "test.zig", code);
     defer source.deinit();
+    var type_ctx = TypeContext.init(allocator, &source);
+    defer type_ctx.deinit();
 
     var diagnostics: std.ArrayList(Diagnostic) = .empty;
     defer {
@@ -358,7 +368,7 @@ test "store_violations_engine detects config-driven fqn model with field access 
 
     const context = checker_mod.CheckerContext{
         .build_metadata = null,
-        .type_context = null,
+        .type_context = &type_ctx,
         .config = &cfg,
     };
     try StoreViolationsEngineChecker.checker.checkAst(&source, allocator, &diagnostics, context);

@@ -6,7 +6,6 @@ const Checker = checker_mod.Checker;
 const CheckerError = checker_mod.CheckerError;
 const Diagnostic = checker_mod.Diagnostic;
 const Source = @import("../source.zig").Source;
-const TypeContext = @import("../type_context.zig").TypeContext;
 const ids = @import("../ids.zig");
 const engine_mod = @import("../engine.zig");
 const AnalysisEngine = engine_mod.AnalysisEngine;
@@ -63,14 +62,12 @@ pub const OptionalUnwrapEngineChecker = struct {
         if (cfg_opt) |*cfg| {
             defer cfg.deinit();
 
-            // Create a TypeContext for type-aware analysis
-            var type_ctx = TypeContext.init(allocator, src);
-            defer type_ctx.deinit();
-
             var engine = AnalysisEngine.initWithSource(allocator, cfg, src);
             defer engine.deinit();
             engine.setCheckerName("optional-unwrap");
-            engine.setTypeContext(&type_ctx);
+            if (context.type_context) |type_ctx| {
+                engine.setTypeContext(type_ctx);
+            }
             if (context.build_metadata) |metadata| {
                 engine.setBuildMetadata(metadata);
             }
