@@ -83,6 +83,12 @@ In development (planned improvements):
 
 ## Docs
 
+- Usage and CLI: [docs/USAGE.md](docs/USAGE.md)
+- Configuration: [docs/CONFIG.md](docs/CONFIG.md)
+- Output formats: [docs/OUTPUT.md](docs/OUTPUT.md)
+- CI integration: [docs/CI.md](docs/CI.md)
+- Inline suppressions: [docs/SUPPRESSIONS.md](docs/SUPPRESSIONS.md)
+- Development notes: [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md)
 - Rules and checker details: [docs/RULES.md](docs/RULES.md)
 - Implementation notes: [docs/IMPLEMENTATION.md](docs/IMPLEMENTATION.md)
 - CFG/analysis visualization: [docs/VISUALIZATION.md](docs/VISUALIZATION.md)
