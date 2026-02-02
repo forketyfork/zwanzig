@@ -483,17 +483,21 @@ See the `examples/` directory for sample code demonstrating both violations and 
 
 The main components:
 
+- `cli/` - CLI parsing, config merge, default registry, and run loop
+- `main.zig` - CLI entrypoint that delegates to `cli/run.zig`
+- `analyzer.zig` - File reading, rule/checker execution, and result collection
+- `formatters/` - Output formatters (console, SARIF)
 - `source.zig` - Lazy AST/token parsing with caching
 - `diagnostic.zig` - Diagnostic model with severity and locations
-- `analyzer.zig` - File reading and rule/checker execution
 - `rule.zig` - Rule interface for AST-based checks
-- `checker.zig` - Checker interface for CFG/dataflow analysis
+- `checker.zig` - Checker interface for AST/CFG-based analysis
 - `rules/` - Individual rule implementations
-- `checkers/` - Engine-based checker implementations
-- `cfg.zig` - Control-flow graph builder
-- `engine.zig` - Symbolic execution engine
+- `checkers/` - Checker implementations (AST and engine-backed)
+- `cfg.zig` / `cfg/` - CFG facade and modular CFG builder/graph/dot code
+- `engine.zig` / `engine/` - Engine facade and modular analysis/state/value code
+- `zir_bridge.zig` / `zir/` / `types/` - ZIR bridge and type info plumbing
 - `file_discovery.zig` - Recursive file discovery
-- `main.zig` - CLI and rule registration
+- `lib.zig` - Public library exports for embedding
 
 ### Parsing Cache
 
@@ -511,7 +515,7 @@ file.zig:5:10: warning: [empty-catch-engine] Empty catch block
 
 1. Create `src/rules/my_rule.zig`
 2. Implement the `Rule` interface
-3. Register in `src/main.zig`
+3. Register in `src/cli/registry.zig` (for the CLI)
 
 Example:
 

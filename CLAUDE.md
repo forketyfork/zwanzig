@@ -53,7 +53,7 @@ nix develop
 ## Architecture
 
 ### Data Flow
-1. `main.zig` parses CLI args and registers rules/checkers with `Analyzer`
+1. `cli/run.zig` parses CLI args (via `cli/args.zig`), merges config, and registers defaults via `cli/registry.zig`
 2. `Analyzer` reads files, creates `Source` objects, runs enabled rules and checkers
 3. Rules/checkers receive `Source` and append `Diagnostic`s to a shared list
 4. Analyzer reports results and exits with code 1 if diagnostics found
@@ -63,6 +63,8 @@ nix develop
 - **`Rule`** (`src/rule.zig`): Interface with `name` and `checkFn`. Rules implement `check(source, allocator, diagnostics)`.
 - **`Checker`** (`src/checker.zig`): Engine-based interface with `checkAstFn`. Checkers use CFG and analysis engine for sophisticated analysis. Checkers receive a `CheckerContext` with optional `TypeContext` for type-aware analysis.
 - **`Analyzer`** (`src/analyzer.zig`): Orchestrates file reading, rule/checker execution, result collection.
+- **`cli/`** (`src/cli/*.zig`): CLI parsing, config merge, registry, and run loop.
+- **`formatters/`** (`src/formatters/*.zig`): Output formatters for text and SARIF.
 - **`Diagnostic`**: Issue report with file path, line/column, rule name, severity, and message. Diagnostics own their message strings; `Analyzer.deinit()` frees them.
 - **`TypeContext`** (`src/type_context.zig`): Unified interface for type queries wrapping the ZIR bridge. Use `getDeclType()`, `classifyIdentifier()`, `isDeclFunction()`, etc.
 - **`ZirBridge`** (`src/zir_bridge.zig`): Generates ZIR from source and extracts typed information (`TypeInfo`, `DeclInfo`).
@@ -72,7 +74,7 @@ nix develop
 ### Adding a New Rule
 
 1. Create `src/rules/my_rule.zig` implementing the `Rule` interface
-2. Register in `src/main.zig`: `try analyzer.registerRule(&MyRule.rule);`
+2. Register in `src/cli/registry.zig`: `try analyzer.registerRule(&MyRule.rule);`
 
 See existing rules in `src/rules/` for patterns. For CFG-based checkers, see `src/checkers/`.
 

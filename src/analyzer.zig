@@ -521,6 +521,41 @@ test "Analyzer JSON output format" {
     try testing.expect(std.mem.indexOf(u8, output, "other-rule") != null);
 }
 
+test "Analyzer.isRuleEnabled: no filter" {
+    const allocator = std.testing.allocator;
+    var analyzer = Analyzer.init(allocator);
+    defer analyzer.deinit();
+
+    try std.testing.expect(analyzer.isRuleEnabled("empty-catch"));
+    try std.testing.expect(analyzer.isRuleEnabled("any-rule"));
+}
+
+test "Analyzer.isRuleEnabled: allowlist" {
+    const allocator = std.testing.allocator;
+    var analyzer = Analyzer.init(allocator);
+    defer analyzer.deinit();
+
+    const allowlist = [_][]const u8{ "empty-catch", "unused-var" };
+    analyzer.setRuleFilter(.{ .allowlist = &allowlist });
+
+    try std.testing.expect(analyzer.isRuleEnabled("empty-catch"));
+    try std.testing.expect(analyzer.isRuleEnabled("unused-var"));
+    try std.testing.expect(!analyzer.isRuleEnabled("other-rule"));
+}
+
+test "Analyzer.isRuleEnabled: blocklist" {
+    const allocator = std.testing.allocator;
+    var analyzer = Analyzer.init(allocator);
+    defer analyzer.deinit();
+
+    const blocklist = [_][]const u8{ "empty-catch", "unused-var" };
+    analyzer.setRuleFilter(.{ .blocklist = &blocklist });
+
+    try std.testing.expect(!analyzer.isRuleEnabled("empty-catch"));
+    try std.testing.expect(!analyzer.isRuleEnabled("unused-var"));
+    try std.testing.expect(analyzer.isRuleEnabled("other-rule"));
+}
+
 test "Analyzer text output format" {
     const testing = std.testing;
     const allocator = testing.allocator;
