@@ -27,9 +27,17 @@ jobs:
         with:
           filters: |
             code:
-              - '**'
-              - '!**/*.md'
-              - '!docs/**'
+              - 'src/**'
+              - 'test/**'
+              - 'build.zig'
+              - 'build.zig.zon'
+              - 'flake.nix'
+              - 'flake.lock'
+              - 'justfile'
+              - 'scripts/**'
+              - 'validate.sh'
+              - 'examples/**'
+              - '.github/workflows/**'
 
   build-matrix:
     needs: changes
