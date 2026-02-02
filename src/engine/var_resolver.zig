@@ -8,7 +8,13 @@ pub const VarResolver = struct {
     allocator: std.mem.Allocator,
     tree: *const std.zig.Ast,
     mappings: std.AutoHashMap(u32, VarId),
+    decl_mappings: std.AutoHashMap(VarId, DeclInfo),
     scope_stack: std.ArrayListUnmanaged(std.ArrayListUnmanaged(NameBinding)),
+
+    pub const DeclInfo = struct {
+        decl_node: u32,
+        is_top_level: bool,
+    };
 
     const NameBinding = struct {
         name: []const u8,
@@ -20,6 +26,7 @@ pub const VarResolver = struct {
             .allocator = allocator,
             .tree = tree,
             .mappings = std.AutoHashMap(u32, VarId).init(allocator),
+            .decl_mappings = std.AutoHashMap(VarId, DeclInfo).init(allocator),
             .scope_stack = .empty,
         };
         errdefer resolver.deinit();
@@ -45,6 +52,7 @@ pub const VarResolver = struct {
 
     pub fn deinit(self: *VarResolver) void {
         self.mappings.deinit();
+        self.decl_mappings.deinit();
 
         for (self.scope_stack.items) |*scope| {
             scope.deinit(self.allocator);
@@ -54,6 +62,16 @@ pub const VarResolver = struct {
 
     pub fn resolve(self: *const VarResolver, identifier_node: u32) ?VarId {
         return self.mappings.get(identifier_node);
+    }
+
+    pub fn resolveDeclInfo(self: *const VarResolver, identifier_node: u32) ?DeclInfo {
+        const var_id = self.resolve(identifier_node) orelse return null;
+        return self.decl_mappings.get(var_id);
+    }
+
+    pub fn resolveDeclNode(self: *const VarResolver, identifier_node: u32) ?u32 {
+        const info = self.resolveDeclInfo(identifier_node) orelse return null;
+        return info.decl_node;
     }
 
     fn pushScope(self: *VarResolver) ResolveError!void {
@@ -66,10 +84,13 @@ pub const VarResolver = struct {
         scope.deinit(self.allocator);
     }
 
-    fn addBinding(self: *VarResolver, name: []const u8, var_id: VarId) ResolveError!void {
+    fn addBinding(self: *VarResolver, name: []const u8, var_id: VarId, decl_node: ?u32, is_top_level: bool) ResolveError!void {
         if (self.scope_stack.items.len == 0) return;
         var scope = &self.scope_stack.items[self.scope_stack.items.len - 1];
         try scope.append(self.allocator, .{ .name = name, .var_id = var_id });
+        if (decl_node) |node| {
+            try self.decl_mappings.put(var_id, .{ .decl_node = node, .is_top_level = is_top_level });
+        }
     }
 
     fn resolveName(self: *const VarResolver, name: []const u8) ?VarId {
@@ -120,7 +141,7 @@ pub const VarResolver = struct {
                     const name_token = full.ast.mut_token + 1;
                     if (name_token >= token_tags.len or token_tags[name_token] != .identifier) continue;
                     const name = self.tree.tokenSlice(name_token);
-                    try self.addBinding(name, ids.varId(name_token));
+                    try self.addBinding(name, ids.varId(name_token), node, true);
                 },
                 else => {},
             }
@@ -151,7 +172,7 @@ pub const VarResolver = struct {
         while (it.next()) |param| {
             if (param.name_token) |name_tok| {
                 const name = self.tree.tokenSlice(name_tok);
-                try self.addBinding(name, ids.varId(name_tok));
+                try self.addBinding(name, ids.varId(name_tok), null, false);
             }
         }
     }
@@ -378,7 +399,7 @@ pub const VarResolver = struct {
         const name_token = full.ast.mut_token + 1;
         if (name_token >= token_tags.len or token_tags[name_token] != .identifier) return;
         const name = self.tree.tokenSlice(name_token);
-        try self.addBinding(name, ids.varId(name_token));
+        try self.addBinding(name, ids.varId(name_token), node, false);
     }
 
     fn scanBlock(self: *VarResolver, node: u32) ResolveError!void {
@@ -588,7 +609,7 @@ pub const VarResolver = struct {
 
         if (tok < token_tags.len and token_tags[tok] == .identifier) {
             const name = self.tree.tokenSlice(tok);
-            try self.addBinding(name, ids.varId(tok));
+            try self.addBinding(name, ids.varId(tok), null, false);
         }
     }
 
@@ -607,11 +628,11 @@ pub const VarResolver = struct {
                 idx += 1;
                 if (idx < token_tags.len and token_tags[idx] == .identifier) {
                     const name = self.tree.tokenSlice(idx);
-                    try self.addBinding(name, ids.varId(idx));
+                    try self.addBinding(name, ids.varId(idx), null, false);
                 }
             } else if (tag == .identifier) {
                 const name = self.tree.tokenSlice(idx);
-                try self.addBinding(name, ids.varId(idx));
+                try self.addBinding(name, ids.varId(idx), null, false);
             }
         }
     }

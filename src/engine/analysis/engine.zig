@@ -849,9 +849,23 @@ pub const AnalysisEngine = struct {
                                     // Fast path: literal error value (e.g., return error.Foo)
                                     if (ret_expr_idx < tags.len and tags[ret_expr_idx] == .error_value) {
                                         new_state.setErrorState(.error_active);
+                                    } else if (ret_expr_idx < tags.len and tags[ret_expr_idx] == .identifier) {
+                                        if (var_resolution.resolveDeclInfoFromIdentifier(self, ret_expr_idx, current_cfg)) |decl_info| {
+                                            if (decl_info.is_top_level) {
+                                                if (self.type_context) |type_ctx| {
+                                                    if (type_ctx.getNodeType(decl_info.decl_node)) |ti| {
+                                                        if (ti.kind == .error_union) {
+                                                            new_state.setErrorState(.error_active);
+                                                        }
+                                                    }
+                                                }
+                                            } else if (declIsErrorUnionFromAst(tree, decl_info.decl_node) == true) {
+                                                new_state.setErrorState(.error_active);
+                                            }
+                                        }
                                     } else if (self.type_context) |type_ctx| {
                                         // Type-based check: return expression is an error union
-                                        // This handles cases like `return err;` or `return someFn();`
+                                        // This handles cases like `return someFn();`
                                         if (type_ctx.getExpressionTypeStrict(ret_expr_idx)) |ti| {
                                             if (ti.kind == .error_union) {
                                                 new_state.setErrorState(.error_active);
@@ -900,6 +914,67 @@ pub const AnalysisEngine = struct {
         }
 
         return new_state;
+    }
+
+    fn declIsErrorUnionFromAst(tree: *const std.zig.Ast, decl_node: u32) ?bool {
+        const tags = tree.nodes.items(.tag);
+        if (decl_node >= tags.len) return null;
+
+        switch (tags[decl_node]) {
+            .simple_var_decl,
+            .aligned_var_decl,
+            .local_var_decl,
+            .global_var_decl,
+            => {},
+            else => return null,
+        }
+
+        const full_decl = tree.fullVarDecl(@enumFromInt(decl_node)) orelse return null;
+        if (full_decl.ast.type_node.unwrap()) |type_node_idx| {
+            const type_node = @intFromEnum(type_node_idx);
+            return isErrorUnionTypeNode(tree, type_node);
+        }
+
+        if (full_decl.ast.init_node.unwrap()) |init_node_idx| {
+            const init_node = @intFromEnum(init_node_idx);
+            if (initNodeImpliesErrorUnion(tree, init_node)) return true;
+        }
+
+        return null;
+    }
+
+    fn isErrorUnionTypeNode(tree: *const std.zig.Ast, type_node: u32) bool {
+        const tags = tree.nodes.items(.tag);
+        if (type_node >= tags.len) return false;
+
+        switch (tags[type_node]) {
+            .error_union,
+            .error_set_decl,
+            .merge_error_sets,
+            => return true,
+            .identifier => {
+                const main_tokens = tree.nodes.items(.main_token);
+                const token_tags = tree.tokens.items(.tag);
+                const token = main_tokens[type_node];
+                if (token < token_tags.len and token_tags[token] == .identifier) {
+                    return std.mem.eql(u8, tree.tokenSlice(token), "anyerror");
+                }
+                return false;
+            },
+            else => return false,
+        }
+    }
+
+    fn initNodeImpliesErrorUnion(tree: *const std.zig.Ast, init_node: u32) bool {
+        const tags = tree.nodes.items(.tag);
+        if (init_node >= tags.len) return false;
+        return switch (tags[init_node]) {
+            .error_value,
+            .@"try",
+            .@"catch",
+            => true,
+            else => false,
+        };
     }
 
     /// Get the count of pruned paths
