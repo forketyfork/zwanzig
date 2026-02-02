@@ -310,7 +310,6 @@ pub const OptionalUnwrapEngineChecker = struct {
         return std.mem.eql(u8, builtin_name, "@typeInfo") or
             std.mem.eql(u8, builtin_name, "@TypeOf") or
             std.mem.eql(u8, builtin_name, "@Type") or
-            std.mem.eql(u8, builtin_name, "@field") or
             std.mem.eql(u8, builtin_name, "@compileError");
     }
 
