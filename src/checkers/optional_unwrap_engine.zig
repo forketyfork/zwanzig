@@ -174,6 +174,14 @@ pub const OptionalUnwrapEngineChecker = struct {
             // the optional before unwrapping it
             if (isGuardedByLazyInit(tree, ast_node, unwrapped_node, parent_map)) continue;
 
+            // Check if this is an early exit pattern where a null check leads to
+            // continue/break/return, making subsequent code only reachable when non-null
+            if (isGuardedByEarlyExit(tree, ast_node, unwrapped_node, parent_map)) continue;
+
+            // Check if this is an assignment followed by immediate unwrap pattern
+            // e.g., `x = foo() orelse return error; x.?`
+            if (isGuardedByPriorAssignment(tree, ast_node, unwrapped_node, parent_map)) continue;
+
             // Find the CFG node containing this AST node
             const cfg_node_idx = findCfgNodeForAst(cfg, ast_node, tree);
             const node_idx = cfg_node_idx orelse {
@@ -485,6 +493,319 @@ pub const OptionalUnwrapEngineChecker = struct {
             },
             else => return false,
         }
+    }
+
+    /// Check if an unwrap is guarded by an early exit pattern.
+    /// Pattern: `if (x == null) continue/break/return;` before the unwrap
+    /// After this check, the code is only reachable when x is non-null.
+    fn isGuardedByEarlyExit(
+        tree: *const std.zig.Ast,
+        unwrap_node: u32,
+        unwrapped_var: u32,
+        parent_map: []const u32,
+    ) bool {
+        const tags = tree.nodes.items(.tag);
+        const datas = tree.nodes.items(.data);
+        const main_tokens = tree.nodes.items(.main_token);
+        const token_starts = tree.tokens.items(.start);
+
+        // Find the containing block (could be loop body or function body)
+        var node = unwrap_node;
+        var block_node: ?u32 = null;
+        var depth: u32 = 0;
+
+        while (node < parent_map.len and depth < 64) : (depth += 1) {
+            const parent = parent_map[node];
+            if (parent == 0 or parent >= tags.len) break;
+
+            if (tags[parent] == .block or tags[parent] == .block_two or
+                tags[parent] == .block_semicolon or tags[parent] == .block_two_semicolon)
+            {
+                block_node = parent;
+                break;
+            }
+            node = parent;
+        }
+
+        const block = block_node orelse return false;
+
+        // Scan the block for early exit pattern
+        return scanBlockForEarlyExit(tree, block, unwrap_node, unwrapped_var, tags, datas, main_tokens, token_starts);
+    }
+
+    /// Scan a block for early exit pattern (if null then continue/break/return)
+    fn scanBlockForEarlyExit(
+        tree: *const std.zig.Ast,
+        block: u32,
+        unwrap_node: u32,
+        unwrapped_var: u32,
+        tags: []const std.zig.Ast.Node.Tag,
+        datas: []const std.zig.Ast.Node.Data,
+        main_tokens: []const u32,
+        token_starts: []const u32,
+    ) bool {
+        if (block >= tags.len) return false;
+
+        // Get position of the unwrap node
+        if (unwrap_node >= main_tokens.len) return false;
+        const unwrap_pos = token_starts[main_tokens[unwrap_node]];
+
+        // Get statements based on block type
+        var stmts_buf: [32]u32 = undefined;
+        var stmt_count: usize = 0;
+
+        switch (tags[block]) {
+            .block, .block_semicolon => {
+                const extra = datas[block].extra_range;
+                const start: usize = @intFromEnum(extra.start);
+                const end: usize = @intFromEnum(extra.end);
+                const len = @min(end - start, stmts_buf.len);
+                for (0..len) |i| {
+                    stmts_buf[i] = tree.extra_data[start + i];
+                    stmt_count += 1;
+                }
+            },
+            .block_two, .block_two_semicolon => {
+                const opt_nodes = datas[block].opt_node_and_opt_node;
+                if (opt_nodes[0].unwrap()) |n| {
+                    stmts_buf[stmt_count] = @intFromEnum(n);
+                    stmt_count += 1;
+                }
+                if (opt_nodes[1].unwrap()) |n| {
+                    stmts_buf[stmt_count] = @intFromEnum(n);
+                    stmt_count += 1;
+                }
+            },
+            else => return false,
+        }
+
+        // Look for an if statement before the unwrap that exits on null
+        for (stmts_buf[0..stmt_count]) |stmt| {
+            if (stmt >= tags.len) continue;
+            if (stmt >= main_tokens.len) continue;
+
+            const stmt_pos = token_starts[main_tokens[stmt]];
+
+            // Only look at statements before the unwrap
+            if (stmt_pos >= unwrap_pos) continue;
+
+            // Check if this is an if statement
+            if (tags[stmt] != .@"if" and tags[stmt] != .if_simple) continue;
+
+            // Check if the condition is `var == null`
+            const full = tree.fullIf(@enumFromInt(stmt)) orelse continue;
+            const cond = @intFromEnum(full.ast.cond_expr);
+
+            if (!checksNull(tree, cond, unwrapped_var)) continue;
+
+            // Check if the then branch is an early exit (continue, break, return)
+            const then_expr = @intFromEnum(full.ast.then_expr);
+            if (isEarlyExitExpr(tree, then_expr, tags, datas)) {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    /// Check if an expression is an early exit (continue, break, return)
+    fn isEarlyExitExpr(
+        tree: *const std.zig.Ast,
+        node: u32,
+        tags: []const std.zig.Ast.Node.Tag,
+        datas: []const std.zig.Ast.Node.Data,
+    ) bool {
+        if (node >= tags.len) return false;
+
+        return switch (tags[node]) {
+            .@"continue", .@"break", .@"return" => true,
+            // Handle blocks that contain a single early exit statement
+            .block, .block_semicolon => {
+                const extra = datas[node].extra_range;
+                const start: usize = @intFromEnum(extra.start);
+                const end: usize = @intFromEnum(extra.end);
+                if (end > start) {
+                    // Check if any statement in the block is an early exit
+                    for (start..end) |i| {
+                        const stmt = tree.extra_data[i];
+                        if (stmt < tags.len) {
+                            switch (tags[stmt]) {
+                                .@"continue", .@"break", .@"return" => return true,
+                                else => {},
+                            }
+                        }
+                    }
+                }
+                return false;
+            },
+            .block_two, .block_two_semicolon => {
+                const opt_nodes = datas[node].opt_node_and_opt_node;
+                if (opt_nodes[0].unwrap()) |n| {
+                    const n_idx = @intFromEnum(n);
+                    if (n_idx < tags.len) {
+                        switch (tags[n_idx]) {
+                            .@"continue", .@"break", .@"return" => return true,
+                            else => {},
+                        }
+                    }
+                }
+                if (opt_nodes[1].unwrap()) |n| {
+                    const n_idx = @intFromEnum(n);
+                    if (n_idx < tags.len) {
+                        switch (tags[n_idx]) {
+                            .@"continue", .@"break", .@"return" => return true,
+                            else => {},
+                        }
+                    }
+                }
+                return false;
+            },
+            else => false,
+        };
+    }
+
+    /// Check if an unwrap is guarded by a prior assignment that guarantees non-null.
+    /// Pattern: `x = foo() orelse return error;` followed by `x.?`
+    /// After the assignment, x is guaranteed to be non-null because the orelse
+    /// handles the null case.
+    fn isGuardedByPriorAssignment(
+        tree: *const std.zig.Ast,
+        unwrap_node: u32,
+        unwrapped_var: u32,
+        parent_map: []const u32,
+    ) bool {
+        const tags = tree.nodes.items(.tag);
+        const datas = tree.nodes.items(.data);
+        const main_tokens = tree.nodes.items(.main_token);
+        const token_starts = tree.tokens.items(.start);
+
+        // Find the containing block
+        var node = unwrap_node;
+        var block_node: ?u32 = null;
+        var depth: u32 = 0;
+
+        while (node < parent_map.len and depth < 64) : (depth += 1) {
+            const parent = parent_map[node];
+            if (parent == 0 or parent >= tags.len) break;
+
+            if (tags[parent] == .block or tags[parent] == .block_two or
+                tags[parent] == .block_semicolon or tags[parent] == .block_two_semicolon)
+            {
+                block_node = parent;
+                break;
+            }
+            node = parent;
+        }
+
+        const block = block_node orelse return false;
+
+        return scanBlockForPriorAssignment(tree, block, unwrap_node, unwrapped_var, tags, datas, main_tokens, token_starts);
+    }
+
+    /// Scan a block for prior assignment pattern
+    fn scanBlockForPriorAssignment(
+        tree: *const std.zig.Ast,
+        block: u32,
+        unwrap_node: u32,
+        unwrapped_var: u32,
+        tags: []const std.zig.Ast.Node.Tag,
+        datas: []const std.zig.Ast.Node.Data,
+        main_tokens: []const u32,
+        token_starts: []const u32,
+    ) bool {
+        if (block >= tags.len) return false;
+
+        // Get position of the unwrap node
+        if (unwrap_node >= main_tokens.len) return false;
+        const unwrap_pos = token_starts[main_tokens[unwrap_node]];
+
+        // Get statements based on block type
+        var stmts_buf: [32]u32 = undefined;
+        var stmt_count: usize = 0;
+
+        switch (tags[block]) {
+            .block, .block_semicolon => {
+                const extra = datas[block].extra_range;
+                const start: usize = @intFromEnum(extra.start);
+                const end: usize = @intFromEnum(extra.end);
+                const len = @min(end - start, stmts_buf.len);
+                for (0..len) |i| {
+                    stmts_buf[i] = tree.extra_data[start + i];
+                    stmt_count += 1;
+                }
+            },
+            .block_two, .block_two_semicolon => {
+                const opt_nodes = datas[block].opt_node_and_opt_node;
+                if (opt_nodes[0].unwrap()) |n| {
+                    stmts_buf[stmt_count] = @intFromEnum(n);
+                    stmt_count += 1;
+                }
+                if (opt_nodes[1].unwrap()) |n| {
+                    stmts_buf[stmt_count] = @intFromEnum(n);
+                    stmt_count += 1;
+                }
+            },
+            else => return false,
+        }
+
+        // Look for an assignment statement before the unwrap
+        // Start from the statement closest to the unwrap and work backwards
+        var i: usize = stmt_count;
+        while (i > 0) {
+            i -= 1;
+            const stmt = stmts_buf[i];
+            if (stmt >= tags.len) continue;
+            if (stmt >= main_tokens.len) continue;
+
+            const stmt_pos = token_starts[main_tokens[stmt]];
+
+            // Only look at statements before the unwrap
+            if (stmt_pos >= unwrap_pos) continue;
+
+            // Check if this is an assignment to the variable
+            if (tags[stmt] == .assign) {
+                const lhs = @intFromEnum(datas[stmt].node_and_node[0]);
+                const rhs = @intFromEnum(datas[stmt].node_and_node[1]);
+
+                if (sameVariable(tree, lhs, unwrapped_var)) {
+                    // Check if RHS is an orelse with early exit
+                    if (isOrelseWithEarlyExit(rhs, tags, datas)) {
+                        return true;
+                    }
+                    // Check if RHS is a non-null expression (literal, call result, etc.)
+                    // For simple cases, just having an assignment is enough if followed by unwrap
+                    // But we should be conservative - only handle orelse return for now
+                }
+            }
+        }
+
+        return false;
+    }
+
+    /// Check if an expression is an orelse with an early exit handler
+    fn isOrelseWithEarlyExit(
+        node: u32,
+        tags: []const std.zig.Ast.Node.Tag,
+        datas: []const std.zig.Ast.Node.Data,
+    ) bool {
+        if (node >= tags.len) return false;
+
+        // Check for orelse expression
+        if (tags[node] != .@"orelse") return false;
+
+        // The RHS of orelse is in data[1]
+        const rhs = @intFromEnum(datas[node].node_and_node[1]);
+        if (rhs >= tags.len) return false;
+
+        // Check if the RHS is an early exit
+        return switch (tags[rhs]) {
+            .@"return" => true,
+            .@"break" => true,
+            .@"continue" => true,
+            // Also handle error_value for `orelse return error.Foo`
+            .error_value => true,
+            else => false,
+        };
     }
 
     /// Check if an unwrap is guarded by short-circuit evaluation or ternary if expression.
