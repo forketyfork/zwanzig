@@ -13,6 +13,12 @@ const AnalysisEngine = engine_mod.AnalysisEngine;
 const cfg_mod = @import("../cfg.zig");
 const Cfg = cfg_mod.Cfg;
 
+const log = std.log.scoped(.optional_unwrap);
+
+/// Maximum number of statements to scan in a block for guard pattern detection.
+/// If a block exceeds this limit, a warning is logged and later statements are not analyzed.
+const max_block_statements = 64;
+
 /// Engine-based checker that detects forced optional unwraps (.?) that may panic at runtime.
 /// Uses CFG analysis to track when optionals have been checked for null.
 ///
@@ -337,6 +343,52 @@ pub const OptionalUnwrapEngineChecker = struct {
         return isInSubtree(tree, return_type, target_node) or return_type == target_node;
     }
 
+    /// Extract statements from a block node into a buffer.
+    /// Returns the number of statements, or null if the node is not a block.
+    /// Logs a warning if the block has more statements than the buffer can hold.
+    fn getBlockStatements(
+        tree: *const std.zig.Ast,
+        block: u32,
+        tags: []const std.zig.Ast.Node.Tag,
+        datas: []const std.zig.Ast.Node.Data,
+        stmts_buf: *[max_block_statements]u32,
+    ) ?usize {
+        if (block >= tags.len) return null;
+
+        var stmt_count: usize = 0;
+
+        switch (tags[block]) {
+            .block, .block_semicolon => {
+                const extra = datas[block].extra_range;
+                const start: usize = @intFromEnum(extra.start);
+                const end: usize = @intFromEnum(extra.end);
+                const total_stmts = end - start;
+                if (total_stmts > max_block_statements) {
+                    log.warn("block has {d} statements, exceeding limit of {d}; guard detection may be incomplete", .{ total_stmts, max_block_statements });
+                }
+                const len = @min(total_stmts, max_block_statements);
+                for (0..len) |i| {
+                    stmts_buf[i] = tree.extra_data[start + i];
+                    stmt_count += 1;
+                }
+            },
+            .block_two, .block_two_semicolon => {
+                const opt_nodes = datas[block].opt_node_and_opt_node;
+                if (opt_nodes[0].unwrap()) |n| {
+                    stmts_buf[stmt_count] = @intFromEnum(n);
+                    stmt_count += 1;
+                }
+                if (opt_nodes[1].unwrap()) |n| {
+                    stmts_buf[stmt_count] = @intFromEnum(n);
+                    stmt_count += 1;
+                }
+            },
+            else => return null,
+        }
+
+        return stmt_count;
+    }
+
     /// Check if an unwrap follows a lazy initialization pattern.
     /// Pattern: `if (x == null) { x = init(); } ... x.?`
     /// After the if block, x is guaranteed to be non-null.
@@ -392,34 +444,9 @@ pub const OptionalUnwrapEngineChecker = struct {
         if (unwrap_node >= main_tokens.len) return false;
         const unwrap_pos = token_starts[main_tokens[unwrap_node]];
 
-        // Get statements based on block type
-        var stmts_buf: [16]u32 = undefined;
-        var stmt_count: usize = 0;
-
-        switch (tags[block]) {
-            .block, .block_semicolon => {
-                const extra = datas[block].extra_range;
-                const start: usize = @intFromEnum(extra.start);
-                const end: usize = @intFromEnum(extra.end);
-                const len = @min(end - start, stmts_buf.len);
-                for (0..len) |i| {
-                    stmts_buf[i] = tree.extra_data[start + i];
-                    stmt_count += 1;
-                }
-            },
-            .block_two, .block_two_semicolon => {
-                const opt_nodes = datas[block].opt_node_and_opt_node;
-                if (opt_nodes[0].unwrap()) |n| {
-                    stmts_buf[stmt_count] = @intFromEnum(n);
-                    stmt_count += 1;
-                }
-                if (opt_nodes[1].unwrap()) |n| {
-                    stmts_buf[stmt_count] = @intFromEnum(n);
-                    stmt_count += 1;
-                }
-            },
-            else => return false,
-        }
+        // Get statements from the block
+        var stmts_buf: [max_block_statements]u32 = undefined;
+        const stmt_count = getBlockStatements(tree, block, tags, datas, &stmts_buf) orelse return false;
 
         // Look for an if statement before the unwrap that initializes the variable
         for (stmts_buf[0..stmt_count]) |stmt| {
@@ -550,34 +577,9 @@ pub const OptionalUnwrapEngineChecker = struct {
         if (unwrap_node >= main_tokens.len) return false;
         const unwrap_pos = token_starts[main_tokens[unwrap_node]];
 
-        // Get statements based on block type
-        var stmts_buf: [32]u32 = undefined;
-        var stmt_count: usize = 0;
-
-        switch (tags[block]) {
-            .block, .block_semicolon => {
-                const extra = datas[block].extra_range;
-                const start: usize = @intFromEnum(extra.start);
-                const end: usize = @intFromEnum(extra.end);
-                const len = @min(end - start, stmts_buf.len);
-                for (0..len) |i| {
-                    stmts_buf[i] = tree.extra_data[start + i];
-                    stmt_count += 1;
-                }
-            },
-            .block_two, .block_two_semicolon => {
-                const opt_nodes = datas[block].opt_node_and_opt_node;
-                if (opt_nodes[0].unwrap()) |n| {
-                    stmts_buf[stmt_count] = @intFromEnum(n);
-                    stmt_count += 1;
-                }
-                if (opt_nodes[1].unwrap()) |n| {
-                    stmts_buf[stmt_count] = @intFromEnum(n);
-                    stmt_count += 1;
-                }
-            },
-            else => return false,
-        }
+        // Get statements from the block
+        var stmts_buf: [max_block_statements]u32 = undefined;
+        const stmt_count = getBlockStatements(tree, block, tags, datas, &stmts_buf) orelse return false;
 
         // Look for an if statement before the unwrap that exits on null
         for (stmts_buf[0..stmt_count]) |stmt| {
@@ -719,34 +721,9 @@ pub const OptionalUnwrapEngineChecker = struct {
         if (unwrap_node >= main_tokens.len) return false;
         const unwrap_pos = token_starts[main_tokens[unwrap_node]];
 
-        // Get statements based on block type
-        var stmts_buf: [32]u32 = undefined;
-        var stmt_count: usize = 0;
-
-        switch (tags[block]) {
-            .block, .block_semicolon => {
-                const extra = datas[block].extra_range;
-                const start: usize = @intFromEnum(extra.start);
-                const end: usize = @intFromEnum(extra.end);
-                const len = @min(end - start, stmts_buf.len);
-                for (0..len) |i| {
-                    stmts_buf[i] = tree.extra_data[start + i];
-                    stmt_count += 1;
-                }
-            },
-            .block_two, .block_two_semicolon => {
-                const opt_nodes = datas[block].opt_node_and_opt_node;
-                if (opt_nodes[0].unwrap()) |n| {
-                    stmts_buf[stmt_count] = @intFromEnum(n);
-                    stmt_count += 1;
-                }
-                if (opt_nodes[1].unwrap()) |n| {
-                    stmts_buf[stmt_count] = @intFromEnum(n);
-                    stmt_count += 1;
-                }
-            },
-            else => return false,
-        }
+        // Get statements from the block
+        var stmts_buf: [max_block_statements]u32 = undefined;
+        const stmt_count = getBlockStatements(tree, block, tags, datas, &stmts_buf) orelse return false;
 
         // Look for an assignment statement before the unwrap
         // Start from the statement closest to the unwrap and work backwards
