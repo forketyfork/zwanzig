@@ -4,440 +4,27 @@
 [![MIT License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![Zig](https://img.shields.io/badge/language-Zig-f7a41d.svg)](https://ziglang.org/)
 
-A static analyzer and linter for Zig code.
+Zwanzig is a static analyzer and linter for Zig code, combining fast AST/token rules with engine-backed checkers.
 
-## Features
+## Quick usage
 
-- Adding new rules takes one file and one line of registration code
-- Lazy parsing and caching keep analysis fast
-- Diagnostics include severity, precise locations, and rule IDs
-- Parallel analysis across files with configurable threads
-
-## Rules and Checkers
-
-See [docs/RULES.md](docs/RULES.md) for the full list of rules and checkers, with descriptions and examples.
-
-## Building
+### Local
 
 ```bash
 zig build
+zig build run -- src/
 ```
 
-## Usage
-
-Run on the current directory (discovers `.zig` files recursively):
-
-```bash
-zwanzig
-```
-
-Show the version:
-
-```bash
-zwanzig --version
-```
-
-Or specify files and directories:
-
-```bash
-# Single file
-zwanzig path/to/file.zig
-
-# Multiple files
-zwanzig file1.zig file2.zig file3.zig
-
-# Directory (recursively scans for .zig files)
-zwanzig src/
-
-# Mix of files and directories
-zwanzig src/ tests/ main.zig
-
-# Using --file flag (can be repeated)
-zwanzig --file src --file tests
-```
-
-## Using as a dependency
-
-Add zwanzig to your project:
-
-```bash
-zig fetch --save https://github.com/forketyfork/zwanzig/archive/refs/tags/v0.5.0.tar.gz
-```
-
-Then wire a lint step in your `build.zig`:
-
-```zig
-const target = b.standardTargetOptions(.{});
-const optimize = b.standardOptimizeOption(.{});
-
-const zw = b.dependency("zwanzig", .{
-    .target = target,
-    .optimize = optimize,
-});
-const zw_exe = zw.artifact("zwanzig");
-
-const run = b.addRunArtifact(zw_exe);
-run.addArgs(&.{ "--format", "sarif", "src" });
-
-const lint_step = b.step("lint", "Run zwanzig");
-lint_step.dependOn(&run.step);
-```
-
-### File Discovery
-
-Without arguments, zwanzig scans the current directory for `.zig` files. These directories are skipped:
-
-- `zig-cache/`
-- `zig-out/`
-- `.zigmod/`
-- `.gyro/`
-
-### Parallel Analysis
-
-Zwanzig analyzes files in parallel by default, using one worker per CPU core. Control the worker count with `--threads`:
-
-```bash
-zwanzig --threads 4 src/
-```
-
-### Rule Selection
-
-With no config file and no `--do`/`--skip` flags, Zwanzig runs all rules and checkers except `sentinel-alloc`, which is blocklisted by default. Any config file or explicit `--do`/`--skip` flags replace that default. Rule and checker names share the same namespace.
-
-**Run only specific rules (allowlist):**
-
-```bash
-# Run only the empty-catch-engine checker
-zwanzig --do empty-catch-engine file.zig
-
-# Run multiple specific rules
-zwanzig --do dupe-import --do unused-decl file.zig
-```
-
-**Skip specific rules (blocklist):**
-
-```bash
-# Run all rules except todo
-zwanzig --skip todo file.zig
-
-# Skip multiple rules
-zwanzig --skip todo --skip unused-decl file.zig
-```
-
-Note: `--do` and `--skip` are mutually exclusive and cannot be used together.
-
-Tip: The default `sentinel-alloc` blocklist only applies when you do not pass a config file or `--do`/`--skip`. To enable it, provide a config file (even one without rule filters) or define your own allowlist/blocklist.
-
-### Configuration File
-
-Create `.zwanzig.json` for persistent settings. It's loaded automatically from the current directory, or specify a path with `--config`.
-
-**Example `.zwanzig.json`:**
-
-```json
-{
-  "enabled_rules": ["empty-catch-engine", "dupe-import", "todo"],
-  "max_worklist_steps": 200000,
-  "max_states_per_point": 50
-}
-```
-
-Or to disable specific rules:
-
-```json
-{
-  "disabled_rules": ["todo", "unused-decl"],
-  "max_worklist_steps": 200000,
-  "max_states_per_point": 50
-}
-```
-
-**Configuration precedence:**
-
-1. CLI flags (`--do` and `--skip`) always override config file settings
-2. If no CLI flags are provided, config file settings are used (if present)
-3. If no config file exists and no CLI flags are provided, the default blocklist applies (`sentinel-alloc`)
-4. If a config file exists but does not include `enabled_rules`/`disabled_rules`, all rules and checkers run
-
-**Using a custom config file:**
-
-```bash
-zwanzig --config path/to/custom.json src/
-```
-
-**Override limits via CLI:**
-
-```bash
-zwanzig --max-steps 300000 --max-states-per-point 100 src/
-```
-
-**Enable loop-header widening:**
-
-```bash
-zwanzig --use-widening src/
-```
-
-Widening is enabled by default. Use `--use-widening` to force it on from the CLI (overriding config), or set `use_widening: false` in the config file to disable it. Widening improves convergence of the analysis engine on loops by applying sound approximations at loop headers. The per-point state cap (`--max-states-per-point`) remains as a safety net.
-
-**Config file format:**
-
-- `enabled_rules`: Array of rule names to run (allowlist mode)
-- `disabled_rules`: Array of rule names to skip (blocklist mode)
-- `max_worklist_steps`: Maximum worklist steps per engine run (positive integer)
-- `max_states_per_point`: Maximum unique states per CFG point (positive integer)
-- `use_widening`: Enable loop-header widening for convergence (boolean, default: true)
-- `resource_models`: Array of custom resource model definitions (see below)
-- `enabled_rules` and `disabled_rules` are mutually exclusive - only one can be present
-
-Sample config: [docs/zwanzig.sample.json](docs/zwanzig.sample.json)
-
-### Custom Resource Models
-
-The `resource_models` configuration allows defining custom resource acquisition/release patterns for the `store-violations-engine` checker. This is useful for project-specific APIs or third-party libraries.
-
-**Example `.zwanzig.json` with resource models:**
-
-```json
-{
-  "resource_models": [
-    {
-      "kind": "open",
-      "method_name": "acquire",
-      "return_type": "MyResource"
-    },
-    {
-      "kind": "close",
-      "method_name": "release",
-      "receiver_type": "MyResource"
-    },
-    {
-      "kind": "alloc",
-      "fqn": "my_pool.allocate"
-    },
-    {
-      "kind": "free",
-      "fqn": "my_pool.deallocate"
-    }
-  ]
-}
-```
-
-**Resource model fields:**
-
-| Field | Description |
-|-------|-------------|
-| `kind` | Resource operation type: `alloc`, `free`, `open`, or `close` |
-| `method_name` | Method name to match (e.g., `"acquire"`) |
-| `receiver_type` | Type of the receiver object (e.g., `"MyResource"`) |
-| `return_type` | Return type of the function (e.g., `"FileHandle"`) |
-| `fqn` | Fully-qualified name pattern (e.g., `"my_module.create"`) |
-
-**Match precedence:**
-
-1. Config-defined models (checked first, in order)
-2. Built-in patterns (`alloc`/`free`, `create`/`destroy`, `open`/`close`)
-3. Type-based detection (return types like `File`, `Dir`, etc.)
-
-### Inline Suppression
-
-Suppress diagnostics directly in your code using special comments:
-
-**Suppress all rules on the next line:**
-
-```zig
-// zwanzig-disable-next-line
-const x = problematic_code();  // No diagnostics reported for this line
-```
-
-**Suppress specific rules on the next line:**
-
-```zig
-// zwanzig-disable-next-line: empty-catch, todo
-try foo() catch {};  // Only empty-catch and todo suppressed
-```
-
-**Suppress rules for a region of the file:**
-
-```zig
-// zwanzig-disable: unused-decl
-const unused1 = 1;  // Suppressed
-const unused2 = 2;  // Suppressed
-// zwanzig-enable: unused-decl
-const unused3 = 3;  // Reported again
-```
-
-**Suppress all rules for a region:**
-
-```zig
-// zwanzig-disable
-// Everything here is suppressed
-// zwanzig-enable
-```
-
-**Suppression comment format:**
-
-| Comment | Effect |
-|---------|--------|
-| `// zwanzig-disable-next-line` | Suppress all rules on the next line |
-| `// zwanzig-disable-next-line: rule1, rule2` | Suppress specific rules on the next line |
-| `// zwanzig-disable` | Suppress all rules until end of file or `enable` |
-| `// zwanzig-disable: rule1, rule2` | Suppress specific rules until end of file or `enable` |
-| `// zwanzig-enable` | Re-enable all rules |
-| `// zwanzig-enable: rule1, rule2` | Re-enable specific rules |
-
-### Target Configuration
-
-Specify a target platform with `--target`:
-
-```bash
-# Analyze for Linux x86_64
-zwanzig --target x86_64-linux-gnu src/
-
-# Analyze for macOS ARM64
-zwanzig --target aarch64-macos src/
-
-# Analyze for WebAssembly
-zwanzig --target wasm32-wasi src/
-
-# Analyze for freestanding (embedded/kernel)
-zwanzig --target aarch64-freestanding src/
-```
-
-Without `--target`, the native host configuration is used.
-
-### Incremental Caching
-
-Speed up repeated runs with `--cache`:
-
-```bash
-zwanzig --cache src/
-```
-
-Cache lives in `.zwanzig-cache/`. It's keyed by:
-- File content hash
-- Target platform (`--target`)
-- Zwanzig version
-- Enabled rules/checkers configuration
-
-The cache invalidates automatically when any of these change.
-
-**Important:** The cache stores metadata (e.g., whether type info was loaded) but never skips analysis - diagnostics are always produced on every run. CFG caching is not yet implemented.
-
-**Tip:** Add `.zwanzig-cache/` to `.gitignore`.
-
-### Debug Output
-
-Enable debug logging at build time with `-Dlog-level`:
-
-```bash
-zig build run -Dlog-level=debug -- src/
-```
-
-Available log levels: `err`, `warn`, `info` (default), `debug`.
-
-Debug output includes file discovery counts, rule counts, and analysis statistics.
-
-### CFG Visualization
-
-Dump Control Flow Graphs for engine-based checkers to understand analysis behavior:
-
-```bash
-# Dump CFG DOT files to a directory
-zwanzig --dump-cfg ./cfg_output src/myfile.zig
-
-# Convert to PNG with Graphviz
-dot -Tpng ./cfg_output/myfile_functionName.dot -o cfg.png
-```
-
-DOT files can also be viewed online at [edotor.net](https://edotor.net) or [viz-js.com](https://viz-js.com).
-
-The visualization shows:
-- Entry nodes (green) and exit nodes (red)
-- Branch/loop headers as diamonds
-- Edge colors indicating control flow type (green for true branches, red for false/error paths, blue dashed for loop back-edges)
-
-### Output Formats
-
-Use `--format` to choose the output style.
-
-**Text (default):**
-
-```bash
-zwanzig --format text src/
-# or simply
-zwanzig src/
-```
-
-Output example:
-```
-Found 2 issue(s):
-src/main.zig:10:5: error: [empty-catch] Empty catch block detected
-src/utils.zig:23:1: warning: [unused-decl] Unused declaration: helper
-```
-
-**JSON:**
-
-```bash
-zwanzig --format json src/
-```
-
-Example:
-```json
-{
-  "diagnostics": [
-    {
-      "file": "src/main.zig",
-      "rule": "empty-catch",
-      "severity": "error",
-      "message": "Empty catch block detected",
-      "location": {
-        "start": {"line": 10, "column": 5},
-        "end": {"line": 10, "column": 20}
-      }
-    },
-    {
-      "file": "src/utils.zig",
-      "rule": "unused-decl",
-      "severity": "warning",
-      "message": "Unused declaration: helper",
-      "location": {
-        "start": {"line": 23, "column": 1},
-        "end": {"line": 23, "column": 25}
-      }
-    }
-  ],
-  "total": 2
-}
-```
-
-JSON works well with CI pipelines and editor integrations.
-
-**SARIF:**
-
-```bash
-zwanzig --format sarif src/
-```
-
-[SARIF 2.1.0](https://docs.oasis-open.org/sarif/sarif/v2.1.0/sarif-v2.1.0.html) format, supported by GitHub code scanning, VS Code's SARIF extension, and SonarQube.
-
-### GitHub Actions Integration
-
-Publish zwanzig results to GitHub's code scanning to see issues directly in pull requests.
-
-**1. Add the required permission to your workflow:**
+### GitHub Actions (SARIF)
 
 ```yaml
 permissions:
   contents: read
-  security-events: write  # Required for uploading SARIF
-```
+  security-events: write
 
-**2. Add steps to run zwanzig and upload results:**
-
-```yaml
 - name: Run zwanzig analysis
   run: |
-    zwanzig --format sarif src/ > results.sarif || true
+    zig build run -- --format sarif src/ > results.sarif || true
 
 - name: Upload SARIF results
   uses: github/codeql-action/upload-sarif@v3
@@ -445,109 +32,62 @@ permissions:
     sarif_file: results.sarif
 ```
 
-The `|| true` ensures the workflow continues even if zwanzig finds issues, so results are always uploaded.
+## Current features
 
-**3. (Optional) Run on every push, even if other steps fail:**
+- Simple rule/checker registration with shared `--do`/`--skip` filtering
+- Lazy parsing and cached AST/tokens per file
+- Type-aware analysis when ZIR information is available
+- CFG-based, path-sensitive checkers for deeper issues
+- Parallel analysis across files
 
-```yaml
-- name: Run zwanzig analysis
-  if: always()
-  run: |
-    zwanzig --format sarif src/ > results.sarif || true
+## Supported rules
 
-- name: Upload SARIF results
-  if: always()
-  uses: github/codeql-action/upload-sarif@v3
-  with:
-    sarif_file: results.sarif
-```
+Rules (Rule interface):
 
-After setup, you'll find results in:
-- **Security** tab > **Code scanning alerts**
-- **Pull requests** > **Checks** > **Code scanning results**
-- Inline annotations on changed files
+- dupe-import
+- todo
+- file-as-struct
+- unused-decl
+- unused-parameter
+- unreachable-code
+- empty-defer
+- empty-errdefer
+- shadowed-variable
+- sentinel-alloc
+- identifier-style
 
-## Testing
+Checkers (Checker interface):
 
-Run the test suite:
+- unreachable-code-engine
+- optional-unwrap
+- empty-catch-engine
+- swallowed-error
+- store-violations-engine
 
-```bash
-zig build test
-```
+## Limitations and in development
 
-## Examples
+Limitations:
 
-See the `examples/` directory for sample code demonstrating both violations and proper error handling patterns.
+- ZIR/type info requires valid, parseable Zig code
+- Full type resolution needs complete build context; standalone analysis has limited type inference
+- Nested-scope type info is still limited to module-level declarations
+- Interprocedural analysis is limited to simple direct calls in a single file; cross-file calls are treated as external
+- Incremental cache stores metadata only; CFG caching is planned but not yet wired in
 
-## Architecture
+In development (planned improvements):
 
-The main components:
+- Richer abstract domains (symbolic values, arithmetic propagation, slice length tracking)
+- Cross-file analysis and module discovery
+- Constraint solver upgrades for more precise pruning
+- Expanded checker suite (more resource and bounds safety checks)
 
-- `cli/` - CLI parsing, config merge, default registry, and run loop
-- `main.zig` - CLI entrypoint that delegates to `cli/run.zig`
-- `analyzer.zig` - File reading, rule/checker execution, and result collection
-- `formatters/` - Output formatters (console, SARIF)
-- `source.zig` - Lazy AST/token parsing with caching
-- `diagnostic.zig` - Diagnostic model with severity and locations
-- `rule.zig` - Rule interface for AST-based checks
-- `checker.zig` - Checker interface for AST/CFG-based analysis
-- `rules/` - Individual rule implementations
-- `checkers/` - Checker implementations (AST and engine-backed)
-- `cfg.zig` / `cfg/` - CFG facade and modular CFG builder/graph/dot code
-- `engine.zig` / `engine/` - Engine facade and modular analysis/state/value code
-- `zir_bridge.zig` / `zir/` / `types/` - ZIR bridge and type info plumbing
-- `file_discovery.zig` - Recursive file discovery
-- `lib.zig` - Public library exports for embedding
+## Docs
 
-### Parsing Cache
-
-Parsing is lazy and cached. Each file is parsed at most once, regardless of how many rules inspect it.
-
-### Diagnostics
-
-Each diagnostic includes severity (`hint`, `warning`, `err`), precise location, and the rule that found it:
-
-```
-file.zig:5:10: warning: [empty-catch-engine] Empty catch block
-```
-
-## Adding New Rules
-
-1. Create `src/rules/my_rule.zig`
-2. Implement the `Rule` interface
-3. Register in `src/cli/registry.zig` (for the CLI)
-
-Example:
-
-```zig
-const std = @import("std");
-const Rule = @import("../rule.zig").Rule;
-const RuleError = @import("../rule.zig").RuleError;
-const Diagnostic = @import("../rule.zig").Diagnostic;
-const Source = @import("../source.zig").Source;
-
-pub const MyRule = struct {
-    pub const rule: Rule = .{
-        .name = "my-rule",
-        .checkFn = check,
-    };
-
-    fn check(
-        src: *Source,
-        allocator: std.mem.Allocator,
-        diagnostics: *std.ArrayList(Diagnostic),
-    ) RuleError!void {
-        const ast = try src.ast();
-        // Analyze the AST and append to diagnostics...
-        _ = allocator;
-        _ = ast;
-    }
-};
-```
-
-For CFG-based checkers, see `src/checkers/` for examples.
-
-For detailed implementation guidance, see [IMPLEMENTATION.md](docs/IMPLEMENTATION.md).
+- Rules and checker details: [docs/RULES.md](docs/RULES.md)
+- Implementation notes: [docs/IMPLEMENTATION.md](docs/IMPLEMENTATION.md)
+- CFG/analysis visualization: [docs/VISUALIZATION.md](docs/VISUALIZATION.md)
+- Release process: [docs/RELEASE.md](docs/RELEASE.md)
+- Sample config: [docs/zwanzig.sample.json](docs/zwanzig.sample.json)
 
 ## License
 
