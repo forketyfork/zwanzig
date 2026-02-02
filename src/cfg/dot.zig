@@ -2,6 +2,7 @@ const std = @import("std");
 const graph = @import("graph.zig");
 const Cfg = graph.Cfg;
 const ids = @import("../ids.zig");
+const dot_helpers = @import("../dot_helpers.zig");
 
 const log = std.log.scoped(.cfg_dot);
 
@@ -55,17 +56,7 @@ pub fn generate(cfg: *const Cfg, allocator: std.mem.Allocator) ![]const u8 {
         if (edge.kind == .normal) {
             try writer.print("  n{d} -> n{d};\n", .{ from_idx, to_idx });
         } else {
-            const style = switch (edge.kind) {
-                .branch_true => "color=green",
-                .branch_false => "color=red",
-                .loop_back => "color=blue, style=dashed",
-                .loop_exit => "color=orange",
-                .try_error, .catch_error, .errdefer_edge => "color=red, style=dotted",
-                .try_success, .catch_success => "color=green, style=dotted",
-                .defer_edge => "color=purple, style=dashed",
-                .jump => "style=bold",
-                .normal => "",
-            };
+            const style = dot_helpers.edgeStyle(edge.kind);
             try writer.print("  n{d} -> n{d} [label=\"{s}\", {s}];\n", .{
                 from_idx,
                 to_idx,
@@ -96,8 +87,7 @@ pub fn writeToFile(
 
     // Build filename: <source_basename>_<fn_name>_<ast_idx>.dot
     // The AST index suffix guarantees uniqueness for functions with the same name
-    const basename = std.fs.path.basename(source_path);
-    const stem = if (std.mem.lastIndexOf(u8, basename, ".")) |idx| basename[0..idx] else basename;
+    const stem = dot_helpers.stemFromPath(source_path);
     const fn_name = cfg.fn_name orelse "anonymous";
     const ast_idx = if (cfg.fn_ast_node) |node| ids.astIndex(node) else 0;
 
@@ -107,20 +97,7 @@ pub fn writeToFile(
         return;
     };
 
-    // Create directory if needed
-    std.fs.cwd().makePath(dir) catch |err| {
-        log.warn("failed to create CFG dump directory {s}: {}", .{ dir, err });
-        return;
-    };
-
-    // Write the file
-    const file = std.fs.cwd().createFile(file_path, .{}) catch |err| {
-        log.warn("failed to create CFG DOT file {s}: {}", .{ file_path, err });
-        return;
-    };
-    defer file.close();
-
-    file.writeAll(dot) catch |err| {
+    dot_helpers.writeDotFile(dir, file_path, dot) catch |err| {
         log.warn("failed to write CFG DOT file {s}: {}", .{ file_path, err });
         return;
     };

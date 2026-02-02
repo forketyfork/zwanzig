@@ -1816,12 +1816,13 @@ pub const AnalysisEngine = struct {
                 }
 
                 // Check if this is a branch node - if so, we need to extract constraints
-                const is_branch_node = if (cfg_node) |node| node.ir_node.tag == .branch else false;
                 var branch_constraints: [4]?Constraint = .{ null, null, null, null };
-                const branch_constraint_count: usize = if (is_branch_node)
-                    self.extractBranchConstraints(cfg_node.?, current_cfg, &branch_constraints)
-                else
-                    0;
+                const branch_constraint_count: usize = if (cfg_node) |node| blk: {
+                    if (node.ir_node.tag == .branch) {
+                        break :blk self.extractBranchConstraints(node, current_cfg, &branch_constraints);
+                    }
+                    break :blk 0;
+                } else 0;
 
                 for (current_cfg.edges.items) |edge| {
                     if (edge.from == point.node_index) {

@@ -7,6 +7,7 @@ const ProgramPoint = state_mod.ProgramPoint;
 const cfg_mod = @import("../cfg.zig");
 const Cfg = cfg_mod.Cfg;
 const ids = @import("../ids.zig");
+const dot_helpers = @import("../dot_helpers.zig");
 
 const log = std.log.scoped(.engine_dot);
 
@@ -179,17 +180,7 @@ pub fn generateAnnotatedCfg(
         if (edge.kind == .normal) {
             try writer.print("  n{d} -> n{d};\n", .{ from_idx, to_idx });
         } else {
-            const style = switch (edge.kind) {
-                .branch_true => "color=green",
-                .branch_false => "color=red",
-                .loop_back => "color=blue, style=dashed",
-                .loop_exit => "color=orange",
-                .try_error, .catch_error, .errdefer_edge => "color=red, style=dotted",
-                .try_success, .catch_success => "color=green, style=dotted",
-                .defer_edge => "color=purple, style=dashed",
-                .jump => "style=bold",
-                .normal => "",
-            };
+            const style = dot_helpers.edgeStyle(edge.kind);
             try writer.print("  n{d} -> n{d} [label=\"{s}\", {s}];\n", .{
                 from_idx,
                 to_idx,
@@ -370,8 +361,7 @@ fn writeToFile(
     suffix: []const u8,
     allocator: std.mem.Allocator,
 ) void {
-    const basename = std.fs.path.basename(source_path);
-    const stem = if (std.mem.lastIndexOf(u8, basename, ".")) |idx| basename[0..idx] else basename;
+    const stem = dot_helpers.stemFromPath(source_path);
     const name = fn_name orelse "anonymous";
 
     const file_path = std.fmt.allocPrint(allocator, "{s}/{s}_{s}_{s}.dot", .{ dir, stem, name, suffix }) catch {
@@ -380,18 +370,7 @@ fn writeToFile(
     };
     defer allocator.free(file_path);
 
-    std.fs.cwd().makePath(dir) catch |err| {
-        log.warn("failed to create DOT dump directory {s}: {}", .{ dir, err });
-        return;
-    };
-
-    const file = std.fs.cwd().createFile(file_path, .{}) catch |err| {
-        log.warn("failed to create DOT file {s}: {}", .{ file_path, err });
-        return;
-    };
-    defer file.close();
-
-    file.writeAll(dot) catch |err| {
+    dot_helpers.writeDotFile(dir, file_path, dot) catch |err| {
         log.warn("failed to write DOT file {s}: {}", .{ file_path, err });
         return;
     };

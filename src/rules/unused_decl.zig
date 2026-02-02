@@ -3,6 +3,7 @@ const Rule = @import("../rule.zig").Rule;
 const RuleError = @import("../rule.zig").RuleError;
 const Diagnostic = @import("../rule.zig").Diagnostic;
 const Source = @import("../source.zig").Source;
+const ast_walk = @import("../ast_walk.zig");
 
 /// Rule that detects unused const/var declarations and functions.
 ///
@@ -527,142 +528,6 @@ pub const UnusedDeclRule = struct {
             }
 
             return switch (tag) {
-                .string_literal,
-                .number_literal,
-                .char_literal,
-                .enum_literal,
-                .error_set_decl,
-                .@"continue",
-                .error_value,
-                .unreachable_literal,
-                .multiline_string_literal,
-                .asm_output,
-                .anyframe_literal,
-                => false,
-
-                .equal_equal,
-                .bang_equal,
-                .less_than,
-                .greater_than,
-                .less_or_equal,
-                .greater_or_equal,
-                .assign_mul,
-                .assign_div,
-                .assign_mod,
-                .assign_add,
-                .assign_sub,
-                .assign_shl,
-                .assign_shl_sat,
-                .assign_shr,
-                .assign_bit_and,
-                .assign_bit_xor,
-                .assign_bit_or,
-                .assign_mul_wrap,
-                .assign_add_wrap,
-                .assign_sub_wrap,
-                .assign_mul_sat,
-                .assign_add_sat,
-                .assign_sub_sat,
-                .assign,
-                .merge_error_sets,
-                .mul,
-                .div,
-                .mod,
-                .array_mult,
-                .mul_wrap,
-                .mul_sat,
-                .add,
-                .sub,
-                .array_cat,
-                .add_wrap,
-                .sub_wrap,
-                .add_sat,
-                .sub_sat,
-                .shl,
-                .shl_sat,
-                .shr,
-                .bit_and,
-                .bit_xor,
-                .bit_or,
-                .@"orelse",
-                .bool_and,
-                .bool_or,
-                .error_union,
-                .array_access,
-                .switch_range,
-                => {
-                    const pair = data.node_and_node;
-                    return self.scanBinary(pair[0], pair[1]);
-                },
-
-                .bool_not,
-                .negation,
-                .bit_not,
-                .negation_wrap,
-                .address_of,
-                .@"try",
-                .optional_type,
-                .@"suspend",
-                .@"resume",
-                .@"nosuspend",
-                .@"comptime",
-                .deref,
-                => self.scanUnary(data.node),
-
-                .unwrap_optional,
-                .grouped_expression,
-                .asm_input,
-                .asm_simple,
-                => self.scanUnary(data.node_and_token[0]),
-
-                .@"return" => self.scanOptionalNode(data.opt_node),
-                .@"defer" => self.scanUnary(data.node),
-                .test_decl => self.scanUnary(data.opt_token_and_node[1]),
-                .@"break" => self.scanOptionalNode(data.opt_token_and_opt_node[1]),
-                .anyframe_type => self.scanUnary(data.token_and_node[1]),
-                .for_range => {
-                    const pair = data.node_and_opt_node;
-                    if (try self.scanUnary(pair[0])) return true;
-                    return self.scanOptionalNode(pair[1]);
-                },
-
-                .slice => self.scanAstValuesForName(
-                    @TypeOf(self.tree.slice(@enumFromInt(node))),
-                    self.tree.slice(@enumFromInt(node)),
-                    &.{ .sliced, .start, .end, .sentinel },
-                ),
-                .slice_open => self.scanAstValuesForName(
-                    @TypeOf(self.tree.sliceOpen(@enumFromInt(node))),
-                    self.tree.sliceOpen(@enumFromInt(node)),
-                    &.{ .sliced, .start, .end, .sentinel },
-                ),
-                .slice_sentinel => self.scanAstValuesForName(
-                    @TypeOf(self.tree.sliceSentinel(@enumFromInt(node))),
-                    self.tree.sliceSentinel(@enumFromInt(node)),
-                    &.{ .sliced, .start, .end, .sentinel },
-                ),
-                .ptr_type,
-                .ptr_type_sentinel,
-                .ptr_type_bit_range,
-                .ptr_type_aligned,
-                => blk: {
-                    const ptr_type = self.tree.fullPtrType(@enumFromInt(node)) orelse return false;
-                    break :blk self.scanAstValuesForName(
-                        @TypeOf(ptr_type),
-                        ptr_type,
-                        &.{ .align_node, .addrspace_node, .sentinel, .bit_range_start, .bit_range_end, .child_type },
-                    );
-                },
-                .array_type,
-                .array_type_sentinel,
-                => blk: {
-                    const array_type = self.tree.fullArrayType(@enumFromInt(node)) orelse return false;
-                    break :blk self.scanAstValuesForName(
-                        @TypeOf(array_type),
-                        array_type,
-                        &.{ .elem_count, .sentinel, .elem_type },
-                    );
-                },
                 .container_field,
                 .container_field_init,
                 .container_field_align,
@@ -676,58 +541,38 @@ pub const UnusedDeclRule = struct {
                 },
 
                 // zig fmt: off
-                .struct_init, .struct_init_comma, .struct_init_one, .struct_init_one_comma,
-                .struct_init_dot, .struct_init_dot_comma, .struct_init_dot_two, .struct_init_dot_two_comma => blk: {
-                    var buf: [2]std.zig.Ast.Node.Index = undefined;
-                    const struct_init = self.tree.fullStructInit(&buf, @enumFromInt(node)) orelse return false;
-                    break :blk self.scanAstParentOpForName(@TypeOf(struct_init), struct_init, .type_expr, .fields);
-                },
-                .array_init, .array_init_comma, .array_init_one, .array_init_one_comma,
-                .array_init_dot, .array_init_dot_comma, .array_init_dot_two, .array_init_dot_two_comma => blk: {
-                    var buf: [2]std.zig.Ast.Node.Index = undefined;
-                    const array_init = self.tree.fullArrayInit(&buf, @enumFromInt(node)) orelse return false;
-                    break :blk self.scanAstParentOpForName(@TypeOf(array_init), array_init, .type_expr, .elements);
-                },
-                .call, .call_comma, .call_one, .call_one_comma => blk: {
-                    var buf: [1]std.zig.Ast.Node.Index = undefined;
-                    const call_info = self.tree.fullCall(&buf, @enumFromInt(node)) orelse return false;
-                    break :blk self.scanAstParentOpForName(@TypeOf(call_info), call_info, .fn_expr, .params);
-                },
                 .switch_case_one, .switch_case_inline_one => self.scanSwitchCase(node),
                 .switch_case, .switch_case_inline =>        self.scanAstParentOpForName(@TypeOf(self.tree.switchCase(@enumFromInt(node))), self.tree.switchCase(@enumFromInt(node)), .target_expr, .values),
-                .tagged_union, .tagged_union_trailing =>    self.scanAstParentOpForName(@TypeOf(self.tree.taggedUnion(@enumFromInt(node))), self.tree.taggedUnion(@enumFromInt(node)), .arg, .members),
                 .@"asm" =>                                  self.scanAstParentOpForName(@TypeOf(self.tree.asmFull(@enumFromInt(node))), self.tree.asmFull(@enumFromInt(node)), .template, .items),
-                .container_decl_arg, .container_decl_arg_trailing => self.scanAstParentOpForName(@TypeOf(self.tree.containerDeclArg(@enumFromInt(node))), self.tree.containerDeclArg(@enumFromInt(node)), .arg, .members),
-                .tagged_union_enum_tag, .tagged_union_enum_tag_trailing => self.scanAstParentOpForName(@TypeOf(self.tree.taggedUnionEnumTag(@enumFromInt(node))), self.tree.taggedUnionEnumTag(@enumFromInt(node)), .arg, .members),
                 // zig fmt: on
 
-                .container_decl, .container_decl_trailing => {
-                    const container = self.tree.containerDecl(@enumFromInt(node));
-                    return self.scanContainerMembers(node, container.ast.members);
-                },
-                .@"switch", .switch_comma => self.scanSwitch(node),
-                .tagged_union_two, .tagged_union_two_trailing => {
-                    var buf: [2]std.zig.Ast.Node.Index = undefined;
-                    const container = self.tree.taggedUnionTwo(&buf, @enumFromInt(node));
-                    return self.scanContainerMembers(node, container.ast.members);
-                },
-                .builtin_call, .builtin_call_comma, .builtin_call_two, .builtin_call_two_comma => {
-                    var buf: [2]std.zig.Ast.Node.Index = undefined;
-                    const params = self.tree.builtinCallParams(&buf, @enumFromInt(node)) orelse return false;
-                    return self.scanNodes(params);
-                },
-
-                else => false,
+                else => self.scanChildren(node),
             };
         }
 
-        fn scanBinary(self: *UsageScanner, lhs: std.zig.Ast.Node.Index, rhs: std.zig.Ast.Node.Index) RuleError!bool {
-            if (try self.scanNode(@intFromEnum(lhs))) return true;
-            return self.scanNode(@intFromEnum(rhs));
-        }
+        fn scanChildren(self: *UsageScanner, node: u32) RuleError!bool {
+            const ChildScanner = struct {
+                scanner: *UsageScanner,
+                used: *bool,
+                stop: bool = false,
 
-        fn scanUnary(self: *UsageScanner, child: std.zig.Ast.Node.Index) RuleError!bool {
-            return self.scanNode(@intFromEnum(child));
+                fn visitChild(_: *const std.zig.Ast, child_node: u32, ctx: *@This()) RuleError!void {
+                    if (ctx.stop) return;
+                    if (try ctx.scanner.scanNode(child_node)) {
+                        ctx.used.* = true;
+                        ctx.stop = true;
+                    }
+                }
+            };
+
+            var used = false;
+            var ctx = ChildScanner{
+                .scanner = self,
+                .used = &used,
+            };
+
+            try ast_walk.walkChildren(ChildScanner, self.tree, node, &ctx, ChildScanner.visitChild);
+            return used;
         }
 
         fn scanNodes(self: *UsageScanner, nodes: []const std.zig.Ast.Node.Index) RuleError!bool {
