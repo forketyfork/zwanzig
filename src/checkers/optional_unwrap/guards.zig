@@ -1135,7 +1135,7 @@ pub fn isGuardedByShortCircuit(
 
             // If the unwrap is in the then branch, condition should check non-null
             if (isInSubtree(tree, @intFromEnum(full_if.ast.then_expr), unwrap_node)) {
-                if (checksNotNull(tree, cond, unwrapped_var)) {
+                if (conditionImpliesNotNull(tree, cond, unwrapped_var)) {
                     return true;
                 }
             }
@@ -1143,7 +1143,7 @@ pub fn isGuardedByShortCircuit(
             // If the unwrap is in the else branch, condition should check null
             if (full_if.ast.else_expr.unwrap()) |else_node| {
                 if (isInSubtree(tree, @intFromEnum(else_node), unwrap_node)) {
-                    if (checksNull(tree, cond, unwrapped_var)) {
+                    if (conditionImpliesNull(tree, cond, unwrapped_var)) {
                         return true;
                     }
                 }
@@ -1186,6 +1186,46 @@ fn checksNull(tree: *const std.zig.Ast, cond_node: u32, var_node: u32) bool {
 
 fn checksNotNull(tree: *const std.zig.Ast, cond_node: u32, var_node: u32) bool {
     return checkNullComparison(tree, cond_node, var_node, false);
+}
+
+fn conditionImpliesNotNull(tree: *const std.zig.Ast, cond_node: u32, var_node: u32) bool {
+    return conditionImpliesNullness(tree, cond_node, var_node, false);
+}
+
+fn conditionImpliesNull(tree: *const std.zig.Ast, cond_node: u32, var_node: u32) bool {
+    return conditionImpliesNullness(tree, cond_node, var_node, true);
+}
+
+fn conditionImpliesNullness(tree: *const std.zig.Ast, cond_node: u32, var_node: u32, want_null: bool) bool {
+    const tags = tree.nodes.items(.tag);
+    const datas = tree.nodes.items(.data);
+
+    if (cond_node >= tags.len) return false;
+
+    return switch (tags[cond_node]) {
+        .bool_and => blk: {
+            const lhs = @intFromEnum(datas[cond_node].node_and_node[0]);
+            const rhs = @intFromEnum(datas[cond_node].node_and_node[1]);
+            break :blk conditionImpliesNullness(tree, lhs, var_node, want_null) or
+                conditionImpliesNullness(tree, rhs, var_node, want_null);
+        },
+        .bool_or => blk: {
+            const lhs = @intFromEnum(datas[cond_node].node_and_node[0]);
+            const rhs = @intFromEnum(datas[cond_node].node_and_node[1]);
+            break :blk conditionImpliesNullness(tree, lhs, var_node, want_null) and
+                conditionImpliesNullness(tree, rhs, var_node, want_null);
+        },
+        .grouped_expression => blk: {
+            const inner = @intFromEnum(datas[cond_node].node_and_token[0]);
+            break :blk conditionImpliesNullness(tree, inner, var_node, want_null);
+        },
+        .bool_not => blk: {
+            const inner = @intFromEnum(datas[cond_node].node);
+            break :blk conditionImpliesNullness(tree, inner, var_node, !want_null);
+        },
+        .equal_equal, .bang_equal => checkNullComparison(tree, cond_node, var_node, want_null),
+        else => false,
+    };
 }
 
 fn checkNullComparison(tree: *const std.zig.Ast, cond_node: u32, var_node: u32, is_null_check: bool) bool {

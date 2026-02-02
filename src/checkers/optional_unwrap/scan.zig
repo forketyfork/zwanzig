@@ -198,6 +198,7 @@ fn collectUnwrapsInSubtree(
         .call, .call_comma, .call_one, .call_one_comma => {
             var call_buf: [1]std.zig.Ast.Node.Index = undefined;
             const full_call = tree.fullCall(&call_buf, @enumFromInt(root)) orelse return;
+            try collectUnwrapsInSubtree(tree, @intFromEnum(full_call.ast.fn_expr), allocator, out);
             for (full_call.ast.params) |param| {
                 try collectUnwrapsInSubtree(tree, @intFromEnum(param), allocator, out);
             }
