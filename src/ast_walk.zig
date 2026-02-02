@@ -1,6 +1,11 @@
 const std = @import("std");
 
 const Ast = std.zig.Ast;
+const log = std.log.scoped(.ast_walk);
+
+/// Maximum number of block statements to process. Blocks exceeding this limit
+/// will have guard detection truncated with a warning.
+pub const max_block_statements = 64;
 
 pub fn walk(
     comptime Visitor: type,
@@ -685,3 +690,65 @@ const NodeFinder = struct {
         }
     }
 };
+
+/// Extract statements from a block node into a buffer.
+/// Returns the number of statements, or null if the node is not a block.
+pub fn getBlockStatements(
+    tree: *const Ast,
+    block: u32,
+    stmts_buf: *[max_block_statements]u32,
+) ?usize {
+    const tags = tree.nodes.items(.tag);
+    const datas = tree.nodes.items(.data);
+
+    if (block >= tags.len) return null;
+
+    var stmt_count: usize = 0;
+
+    switch (tags[block]) {
+        .block, .block_semicolon => {
+            const extra = datas[block].extra_range;
+            const start: usize = @intFromEnum(extra.start);
+            const end: usize = @intFromEnum(extra.end);
+            const total_stmts = end - start;
+            if (total_stmts > max_block_statements) {
+                log.warn("block has {d} statements, exceeding limit of {d}; processing may be incomplete", .{ total_stmts, max_block_statements });
+            }
+            const len = @min(total_stmts, max_block_statements);
+            for (0..len) |i| {
+                stmts_buf[i] = tree.extra_data[start + i];
+                stmt_count += 1;
+            }
+        },
+        .block_two, .block_two_semicolon => {
+            const opt_nodes = datas[block].opt_node_and_opt_node;
+            if (opt_nodes[0].unwrap()) |n| {
+                stmts_buf[stmt_count] = @intFromEnum(n);
+                stmt_count += 1;
+            }
+            if (opt_nodes[1].unwrap()) |n| {
+                stmts_buf[stmt_count] = @intFromEnum(n);
+                stmt_count += 1;
+            }
+        },
+        else => return null,
+    }
+
+    return stmt_count;
+}
+
+/// Check if ancestor_node is an ancestor of descendant_node using a parent map.
+/// The parent map should be populated via `fillParentMap`.
+pub fn isAncestor(ancestor_node: u32, descendant_node: u32, parent_map: []const u32) bool {
+    if (ancestor_node == descendant_node) return true;
+
+    var node = descendant_node;
+    var depth: u32 = 0;
+    while (node < parent_map.len and depth < 64) : (depth += 1) {
+        const parent = parent_map[node];
+        if (parent == 0) break;
+        if (parent == ancestor_node) return true;
+        node = parent;
+    }
+    return false;
+}

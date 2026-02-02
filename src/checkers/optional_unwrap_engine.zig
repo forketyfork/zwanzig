@@ -13,12 +13,6 @@ const AnalysisEngine = engine_mod.AnalysisEngine;
 const cfg_mod = @import("../cfg.zig");
 const Cfg = cfg_mod.Cfg;
 
-const log = std.log.scoped(.optional_unwrap);
-
-/// Maximum number of statements to scan in a block for guard pattern detection.
-/// If a block exceeds this limit, a warning is logged and later statements are not analyzed.
-const max_block_statements = 64;
-
 /// Engine-based checker that detects forced optional unwraps (.?) that may panic at runtime.
 /// Uses CFG analysis to track when optionals have been checked for null.
 ///
@@ -351,52 +345,6 @@ pub const OptionalUnwrapEngineChecker = struct {
         return isInSubtree(tree, return_type, target_node) or return_type == target_node;
     }
 
-    /// Extract statements from a block node into a buffer.
-    /// Returns the number of statements, or null if the node is not a block.
-    /// Logs a warning if the block has more statements than the buffer can hold.
-    fn getBlockStatements(
-        tree: *const std.zig.Ast,
-        block: u32,
-        tags: []const std.zig.Ast.Node.Tag,
-        datas: []const std.zig.Ast.Node.Data,
-        stmts_buf: *[max_block_statements]u32,
-    ) ?usize {
-        if (block >= tags.len) return null;
-
-        var stmt_count: usize = 0;
-
-        switch (tags[block]) {
-            .block, .block_semicolon => {
-                const extra = datas[block].extra_range;
-                const start: usize = @intFromEnum(extra.start);
-                const end: usize = @intFromEnum(extra.end);
-                const total_stmts = end - start;
-                if (total_stmts > max_block_statements) {
-                    log.warn("block has {d} statements, exceeding limit of {d}; guard detection may be incomplete", .{ total_stmts, max_block_statements });
-                }
-                const len = @min(total_stmts, max_block_statements);
-                for (0..len) |i| {
-                    stmts_buf[i] = tree.extra_data[start + i];
-                    stmt_count += 1;
-                }
-            },
-            .block_two, .block_two_semicolon => {
-                const opt_nodes = datas[block].opt_node_and_opt_node;
-                if (opt_nodes[0].unwrap()) |n| {
-                    stmts_buf[stmt_count] = @intFromEnum(n);
-                    stmt_count += 1;
-                }
-                if (opt_nodes[1].unwrap()) |n| {
-                    stmts_buf[stmt_count] = @intFromEnum(n);
-                    stmt_count += 1;
-                }
-            },
-            else => return null,
-        }
-
-        return stmt_count;
-    }
-
     /// Check if an unwrap follows a lazy initialization pattern.
     /// Pattern: `if (x == null) { x = init(); } ... x.?`
     /// After the if block, x is guaranteed to be non-null.
@@ -453,8 +401,8 @@ pub const OptionalUnwrapEngineChecker = struct {
         const unwrap_pos = token_starts[main_tokens[unwrap_node]];
 
         // Get statements from the block
-        var stmts_buf: [max_block_statements]u32 = undefined;
-        const stmt_count = getBlockStatements(tree, block, tags, datas, &stmts_buf) orelse return false;
+        var stmts_buf: [ast_walk.max_block_statements]u32 = undefined;
+        const stmt_count = ast_walk.getBlockStatements(tree, block, &stmts_buf) orelse return false;
 
         // Look for an if statement before the unwrap that initializes the variable
         for (stmts_buf[0..stmt_count]) |stmt| {
@@ -586,8 +534,8 @@ pub const OptionalUnwrapEngineChecker = struct {
         const unwrap_pos = token_starts[main_tokens[unwrap_node]];
 
         // Get statements from the block
-        var stmts_buf: [max_block_statements]u32 = undefined;
-        const stmt_count = getBlockStatements(tree, block, tags, datas, &stmts_buf) orelse return false;
+        var stmts_buf: [ast_walk.max_block_statements]u32 = undefined;
+        const stmt_count = ast_walk.getBlockStatements(tree, block, &stmts_buf) orelse return false;
 
         // Look for an if statement before the unwrap that exits on null
         for (stmts_buf[0..stmt_count]) |stmt| {
@@ -730,8 +678,8 @@ pub const OptionalUnwrapEngineChecker = struct {
         const unwrap_pos = token_starts[main_tokens[unwrap_node]];
 
         // Get statements from the block
-        var stmts_buf: [max_block_statements]u32 = undefined;
-        const stmt_count = getBlockStatements(tree, block, tags, datas, &stmts_buf) orelse return false;
+        var stmts_buf: [ast_walk.max_block_statements]u32 = undefined;
+        const stmt_count = ast_walk.getBlockStatements(tree, block, &stmts_buf) orelse return false;
 
         // Look for an assignment statement before the unwrap
         // Start from the statement closest to the unwrap and work backwards
@@ -820,8 +768,8 @@ pub const OptionalUnwrapEngineChecker = struct {
         const ident_text = tree.tokenSlice(ident_token);
 
         // Scan the block for a prior declaration of this identifier with `try` or `orelse`
-        var stmts_buf: [max_block_statements]u32 = undefined;
-        const stmt_count = getBlockStatements(tree, block, tags, datas, &stmts_buf) orelse return false;
+        var stmts_buf: [ast_walk.max_block_statements]u32 = undefined;
+        const stmt_count = ast_walk.getBlockStatements(tree, block, &stmts_buf) orelse return false;
 
         for (0..stmt_count) |idx| {
             const stmt = stmts_buf[idx];
@@ -931,8 +879,8 @@ pub const OptionalUnwrapEngineChecker = struct {
         const unwrap_pos = token_starts[main_tokens[unwrap_node]];
 
         // Get statements from the block
-        var stmts_buf: [max_block_statements]u32 = undefined;
-        const stmt_count = getBlockStatements(tree, block, tags, datas, &stmts_buf) orelse return false;
+        var stmts_buf: [ast_walk.max_block_statements]u32 = undefined;
+        const stmt_count = ast_walk.getBlockStatements(tree, block, &stmts_buf) orelse return false;
 
         // Look for catch expressions before the unwrap
         for (stmts_buf[0..stmt_count]) |stmt| {
@@ -1151,21 +1099,6 @@ pub const OptionalUnwrapEngineChecker = struct {
         return std.mem.eql(u8, obj_name, "self");
     }
 
-    /// Check if ancestor_node is an ancestor of descendant_node using parent_map
-    fn isAncestor(ancestor_node: u32, descendant_node: u32, parent_map: []const u32) bool {
-        if (ancestor_node == descendant_node) return true;
-
-        var node = descendant_node;
-        var depth: u32 = 0;
-        while (node < parent_map.len and depth < 64) : (depth += 1) {
-            const parent = parent_map[node];
-            if (parent == 0) break;
-            if (parent == ancestor_node) return true;
-            node = parent;
-        }
-        return false;
-    }
-
     /// Check if an unwrap is guarded by a labeled block invariant.
     /// Pattern: `const flag = blk: { x orelse break :blk false; ... }; if (flag) { x.? }`
     /// If the block breaks with false when x is null, and we're in `if (flag)`,
@@ -1201,7 +1134,7 @@ pub const OptionalUnwrapEngineChecker = struct {
 
                 // Only check if unwrap is in the then branch
                 // Use parent_map to check if unwrap_node's ancestors include then_expr
-                if (!isAncestor(then_expr, unwrap_node, parent_map)) {
+                if (!ast_walk.isAncestor(then_expr, unwrap_node, parent_map)) {
                     node = parent;
                     continue;
                 }
@@ -1263,8 +1196,8 @@ pub const OptionalUnwrapEngineChecker = struct {
         const if_pos = token_starts[main_tokens[if_node]];
 
         // Scan block for variable declaration with labeled block initializer
-        var stmts_buf: [max_block_statements]u32 = undefined;
-        const stmt_count = getBlockStatements(tree, block, tags, datas, &stmts_buf) orelse return false;
+        var stmts_buf: [ast_walk.max_block_statements]u32 = undefined;
+        const stmt_count = ast_walk.getBlockStatements(tree, block, &stmts_buf) orelse return false;
 
         for (stmts_buf[0..stmt_count]) |stmt| {
             if (stmt >= tags.len or stmt >= main_tokens.len) continue;
@@ -1311,8 +1244,8 @@ pub const OptionalUnwrapEngineChecker = struct {
         if (block >= tags.len) return false;
 
         // Get statements from the block
-        var stmts_buf: [max_block_statements]u32 = undefined;
-        const stmt_count = getBlockStatements(tree, block, tags, datas, &stmts_buf) orelse return false;
+        var stmts_buf: [ast_walk.max_block_statements]u32 = undefined;
+        const stmt_count = ast_walk.getBlockStatements(tree, block, &stmts_buf) orelse return false;
 
         for (stmts_buf[0..stmt_count]) |stmt| {
             if (stmt >= tags.len) continue;
