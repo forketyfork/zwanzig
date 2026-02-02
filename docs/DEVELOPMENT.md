@@ -1,6 +1,6 @@
 # Development notes
 
-## Architecture overview
+## Architecture
 
 Main components:
 
@@ -68,4 +68,4 @@ pub const MyRule = struct {
 
 For CFG-based checkers, see `src/checkers/` for examples.
 
-For detailed implementation guidance, see docs/IMPLEMENTATION.md.
+For more detail, see docs/IMPLEMENTATION.md.

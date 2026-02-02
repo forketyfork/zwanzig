@@ -1,6 +1,6 @@
 # GitHub Actions integration
 
-Publish zwanzig results to GitHub's code scanning to see issues directly in pull requests.
+Publish zwanzig results to GitHub code scanning to see issues in pull requests.
 
 ## 1. Add the required permission to your workflow
 
@@ -40,7 +40,7 @@ The `|| true` ensures the workflow continues even if zwanzig finds issues, so re
     sarif_file: results.sarif
 ```
 
-After setup, you'll find results in:
+Results appear in:
 
 - Security tab > Code scanning alerts
 - Pull requests > Checks > Code scanning results

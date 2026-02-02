@@ -1,6 +1,6 @@
 # Configuration
 
-Create `.zwanzig.json` for persistent settings. It's loaded automatically from the current directory, or specify a path with `--config`.
+Create `.zwanzig.json` for persistent settings. It loads automatically from the current directory, or specify a path with `--config`.
 
 ## Example `.zwanzig.json`
 
@@ -47,7 +47,7 @@ zwanzig --max-steps 300000 --max-states-per-point 100 src/
 zwanzig --use-widening src/
 ```
 
-Widening is enabled by default. Use `--use-widening` to force it on from the CLI (overriding config), or set `use_widening: false` in the config file to disable it. Widening improves convergence of the analysis engine on loops by applying sound approximations at loop headers. The per-point state cap (`--max-states-per-point`) remains as a safety net.
+Widening is on by default. Use `--use-widening` to force it on from the CLI (overriding config), or set `use_widening: false` in config to disable it. Widening helps convergence on loops by applying sound approximations at loop headers. The per-point state cap (`--max-states-per-point`) remains as a safety net.
 
 ## Config file format
 
@@ -63,7 +63,7 @@ Sample config: [docs/zwanzig.sample.json](zwanzig.sample.json)
 
 ## Custom resource models
 
-The `resource_models` configuration allows defining custom resource acquisition/release patterns for the `store-violations-engine` checker. This is useful for project-specific APIs or third-party libraries.
+Define custom resource acquisition/release patterns for `store-violations-engine`. Useful for project-specific APIs or third-party libraries.
 
 ### Example `.zwanzig.json` with resource models
 

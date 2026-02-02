@@ -47,7 +47,7 @@ zwanzig --file src --file tests
 
 ### File discovery
 
-Without arguments, zwanzig scans the current directory for `.zig` files. These directories are skipped:
+Without arguments, zwanzig scans the current directory for `.zig` files. It skips:
 
 - `zig-cache/`
 - `zig-out/`
@@ -83,7 +83,7 @@ lint_step.dependOn(&run.step);
 
 ## Rule selection
 
-With no config file and no `--do`/`--skip` flags, zwanzig runs all rules and checkers except `sentinel-alloc`, which is blocklisted by default. Any config file or explicit `--do`/`--skip` flags replace that default. Rule and checker names share the same namespace.
+With no config file and no `--do`/`--skip` flags, zwanzig runs all rules and checkers except `sentinel-alloc` (blocklisted by default). Config files or `--do`/`--skip` flags replace that default. Rule and checker names share the same namespace.
 
 **Run only specific rules (allowlist):**
 
@@ -105,9 +105,9 @@ zwanzig --skip todo file.zig
 zwanzig --skip todo --skip unused-decl file.zig
 ```
 
-Note: `--do` and `--skip` are mutually exclusive and cannot be used together.
+`--do` and `--skip` are mutually exclusive.
 
-Tip: The default `sentinel-alloc` blocklist only applies when you do not pass a config file or `--do`/`--skip`. To enable it, provide a config file (even one without rule filters) or define your own allowlist/blocklist.
+The default `sentinel-alloc` blocklist only applies when you don't pass a config file or `--do`/`--skip`. To enable it, provide a config file (even one without rule filters) or define your own allowlist/blocklist.
 
 For persistent settings, see [docs/CONFIG.md](CONFIG.md).
 
@@ -133,7 +133,7 @@ Without `--target`, the native host configuration is used.
 
 ## Parallel analysis
 
-Zwanzig analyzes files in parallel by default, using one worker per CPU core. Control the worker count with `--threads`:
+Zwanzig analyzes files in parallel (one worker per CPU core by default). Control the worker count with `--threads`:
 
 ```bash
 zwanzig --threads 4 src/
@@ -147,18 +147,11 @@ Speed up repeated runs with `--cache`:
 zwanzig --cache src/
 ```
 
-Cache lives in `.zwanzig-cache/`. It's keyed by:
+Cache lives in `.zwanzig-cache/`, keyed by file content hash, target platform, zwanzig version, and enabled rules. The cache invalidates automatically when any of these change.
 
-- File content hash
-- Target platform (`--target`)
-- Zwanzig version
-- Enabled rules/checkers configuration
+The cache stores metadata (e.g., whether type info was loaded) but never skips analysis. CFG caching is planned.
 
-The cache invalidates automatically when any of these change.
-
-Important: The cache stores metadata (e.g., whether type info was loaded) but never skips analysis. CFG caching is planned but not yet implemented.
-
-Tip: Add `.zwanzig-cache/` to `.gitignore`.
+Add `.zwanzig-cache/` to `.gitignore`.
 
 ## Debug output
 

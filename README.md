@@ -32,17 +32,17 @@ permissions:
     sarif_file: results.sarif
 ```
 
-## Current features
+## Features
 
-- Simple rule/checker registration with shared `--do`/`--skip` filtering
-- Lazy parsing and cached AST/tokens per file
-- Type-aware analysis when ZIR information is available
-- CFG-based, path-sensitive checkers for deeper issues
+- Rule/checker registration with shared `--do`/`--skip` filtering
+- Lazy parsing with cached AST/tokens per file
+- Type-aware analysis via ZIR
+- CFG-based, path-sensitive checkers
 - Parallel analysis across files
 
-## Supported rules
+## Rules
 
-Rules (Rule interface):
+AST/token rules:
 
 - dupe-import: duplicate `@import` statements
 - todo: `// TODO` comments
@@ -56,7 +56,7 @@ Rules (Rule interface):
 - sentinel-alloc: sentinel-terminated allocations losing sentinel type
 - identifier-style: naming conventions for types/functions/values
 
-Checkers (Checker interface):
+Engine-backed checkers:
 
 - unreachable-code-engine: constant-condition unreachable code
 - optional-unwrap: forced optional unwraps with `.?`
@@ -64,22 +64,13 @@ Checkers (Checker interface):
 - swallowed-error: catch blocks that ignore errors without rethrowing or logging
 - store-violations-engine: allocator/resource misuse (double-free, leaks, use-after-free/close)
 
-## Limitations and in development
-
-Limitations:
+## Limitations
 
 - ZIR/type info requires valid, parseable Zig code
 - Full type resolution needs complete build context; standalone analysis has limited type inference
 - Nested-scope type info is still limited to module-level declarations
 - Interprocedural analysis is limited to simple direct calls in a single file; cross-file calls are treated as external
 - Incremental cache stores metadata only; CFG caching is planned but not yet wired in
-
-In development (planned improvements):
-
-- Richer abstract domains (symbolic values, arithmetic propagation, slice length tracking)
-- Cross-file analysis and module discovery
-- Constraint solver upgrades for more precise pruning
-- Expanded checker suite (more resource and bounds safety checks)
 
 ## Docs
 
