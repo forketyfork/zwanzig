@@ -749,9 +749,10 @@ pub const OptionalUnwrapEngineChecker = struct {
                     if (isOrelseWithEarlyExit(rhs, tags, datas)) {
                         return true;
                     }
-                    // Check if RHS is a non-null expression (literal, call result, etc.)
-                    // For simple cases, just having an assignment is enough if followed by unwrap
-                    // But we should be conservative - only handle orelse return for now
+                    // Check if RHS is an identifier that was assigned via `try` earlier
+                    if (isNonNullIdentifier(tree, rhs, block, stmt_pos, tags, datas, main_tokens, token_starts)) {
+                        return true;
+                    }
                 }
             }
         }
@@ -783,6 +784,66 @@ pub const OptionalUnwrapEngineChecker = struct {
             .error_value => true,
             else => false,
         };
+    }
+
+    /// Check if an identifier was assigned a non-null value via `try` or `orelse` earlier.
+    /// Pattern: `var x = try foo();` or `var x = foo() orelse return;` followed by using `x`
+    fn isNonNullIdentifier(
+        tree: *const std.zig.Ast,
+        node: u32,
+        block: u32,
+        use_pos: u32,
+        tags: []const std.zig.Ast.Node.Tag,
+        datas: []const std.zig.Ast.Node.Data,
+        main_tokens: []const u32,
+        token_starts: []const u32,
+    ) bool {
+        if (node >= tags.len) return false;
+
+        // The node must be an identifier
+        if (tags[node] != .identifier) return false;
+
+        // Get the identifier's token text
+        const ident_token = main_tokens[node];
+        const ident_text = tree.tokenSlice(ident_token);
+
+        // Scan the block for a prior declaration of this identifier with `try` or `orelse`
+        var stmts_buf: [max_block_statements]u32 = undefined;
+        const stmt_count = getBlockStatements(tree, block, tags, datas, &stmts_buf) orelse return false;
+
+        for (0..stmt_count) |idx| {
+            const stmt = stmts_buf[idx];
+            if (stmt >= tags.len or stmt >= main_tokens.len) continue;
+
+            const stmt_pos = token_starts[main_tokens[stmt]];
+            if (stmt_pos >= use_pos) break; // Only look at statements before the use
+
+            // Check for var decls: `var x = ...` or `const x = ...`
+            if (tags[stmt] == .simple_var_decl or tags[stmt] == .local_var_decl or
+                tags[stmt] == .aligned_var_decl)
+            {
+                // Use fullVarDecl to get the name token and init node
+                const full = tree.fullVarDecl(@enumFromInt(stmt)) orelse continue;
+                const name_token = full.ast.mut_token + 1;
+                const token_tags = tree.tokens.items(.tag);
+                if (name_token >= token_tags.len or token_tags[name_token] != .identifier) continue;
+                const decl_name = tree.tokenSlice(name_token);
+                if (std.mem.eql(u8, decl_name, ident_text)) {
+                    const init_node = @intFromEnum(full.ast.init_node);
+                    if (init_node != 0 and init_node < tags.len) {
+                        if (tags[init_node] == .@"try") {
+                            return true;
+                        }
+                        // Check for orelse with early exit
+                        if (isOrelseWithEarlyExit(init_node, tags, datas)) {
+                            return true;
+                        }
+                    }
+                }
+            }
+        }
+
+        return false;
     }
 
     /// Check if an unwrap is guarded by short-circuit evaluation or ternary if expression.
