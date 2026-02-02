@@ -1,12 +1,12 @@
-# Rules and Checkers
+# Rules and checkers
 
-Zwanzig ships with AST/token rules (legacy `Rule` interface) and checker-based passes (new `Checker` interface). Rules and checkers share the same namespace for `--do`/`--skip` filtering.
+Zwanzig has AST/token rules (legacy `Rule` interface) and checker-based passes (`Checker` interface). Both share the same namespace for `--do`/`--skip` filtering.
 
 ## Rules (Rule interface)
 
 ### dupe-import
 
-Flags duplicate `@import` statements. These often signal copy-paste mistakes or forgotten refactoring.
+Flags duplicate `@import` statements, usually from copy-paste mistakes or forgotten refactoring.
 
 **Bad:**
 ```zig
@@ -22,7 +22,7 @@ const mem = std.mem;  // Use the already imported std
 
 ### todo
 
-Finds `// TODO` comments so you can track unfinished work.
+Finds `// TODO` comments.
 
 **Example:**
 ```zig
@@ -32,7 +32,7 @@ fn processData(data: []const u8) void {
 }
 ```
 
-This produces a hint pointing to the TODO with its message.
+Produces a hint with the TODO's message.
 
 ### file-as-struct
 
@@ -85,9 +85,7 @@ pub fn helper() void {
 
 ### unused-decl
 
-Detects unused container-level `const`, `var`, and `fn` declarations that aren't exported.
-
-The check is conservative:
+Detects unused container-level `const`, `var`, and `fn` declarations that aren't exported. The check is conservative:
 - Exported (`pub`) declarations are ignored (they may be used externally)
 - Underscore-prefixed names (e.g., `_unused`) are ignored (explicit opt-out)
 - Special names like `main` and `panic` are ignored (entry points)
@@ -137,7 +135,7 @@ fn add(value: i32) i32 {
 
 ### unreachable-code
 
-Detects code that can never execute after an unconditional terminator (e.g., `return`) or after fully terminating branches (`if`, `switch`, `while`).
+Detects code after an unconditional terminator (`return`) or after fully terminating branches (`if`, `switch`, `while`).
 
 **Bad:**
 ```zig
@@ -173,7 +171,7 @@ fn bar(x: i32) void {
 
 ### empty-defer
 
-Flags empty `defer {}` blocks that serve no purpose.
+Flags empty `defer {}` blocks.
 
 **Bad:**
 ```zig
@@ -192,7 +190,7 @@ fn foo() !void {
 
 ### empty-errdefer
 
-Flags empty `errdefer {}` blocks that don't clean up anything.
+Flags empty `errdefer {}` blocks.
 
 **Bad:**
 ```zig
@@ -213,7 +211,7 @@ fn foo() !void {
 
 ### shadowed-variable
 
-Detects variable shadowing across scopes (including payloads) to avoid accidental name reuse.
+Detects variable shadowing across scopes, including payloads.
 
 **Bad:**
 ```zig
@@ -234,9 +232,9 @@ fn foo(x: i32) void {
 
 ### sentinel-alloc
 
-Detects sentinel-terminated allocations that can cause memory mismatch bugs when freed.
+Detects sentinel-terminated allocations that cause memory mismatch bugs when freed.
 
-Sentinel-terminated allocations (e.g., `[:0]u8`) allocate `len + 1` bytes but the slice length is `len`. If the slice is stored in a non-sentinel type (e.g., `[]u8`), the sentinel info is lost and freeing will cause an allocation size mismatch.
+Sentinel-terminated allocations (e.g., `[:0]u8`) allocate `len + 1` bytes but the slice length is `len`. If stored in a non-sentinel type (`[]u8`), the sentinel info is lost and freeing causes an allocation size mismatch.
 
 **Bad:**
 ```zig
@@ -305,7 +303,7 @@ fn doThing(good_param: ?i32) void {
 
 ### unreachable-code-engine
 
-Detects path-sensitive unreachable code where the condition is a compile-time constant. This checker complements `unreachable-code` by handling constant `true`/`false` conditions (including const boolean identifiers). It only reports when the condition is definitely constant.
+Detects path-sensitive unreachable code where the condition is a compile-time constant. Complements `unreachable-code` by handling constant `true`/`false` conditions (including const boolean identifiers). Only reports when the condition is definitely constant.
 
 **Bad:**
 ```zig
@@ -343,7 +341,7 @@ fn foo(condition: bool) i32 {
 
 ### optional-unwrap
 
-Engine-based checker that flags forced optional unwraps using `.?`, which panic at runtime if the value is `null`. Prefer handling the optional with `if (opt) |value|` or `orelse` to make the null case explicit.
+Flags forced optional unwraps using `.?`, which panic at runtime if the value is `null`. Prefer handling the optional with `if (opt) |value|` or `orelse`.
 
 **Bad:**
 ```zig
@@ -359,9 +357,9 @@ fn readConfig(opt: ?[]const u8) []const u8 {
 }
 ```
 
-#### Guarded patterns recognized
+#### Recognized safe patterns
 
-The checker uses flow analysis to recognize patterns where the optional is proven non-null before the unwrap. These safe patterns **do not produce warnings**:
+The checker uses flow analysis to recognize patterns where the optional is non-null before the unwrap. These **do not produce warnings**:
 
 **Null check guard:**
 ```zig
@@ -446,7 +444,7 @@ if (should_process) {
 
 ### empty-catch-engine
 
-Detects empty `catch {}` blocks that silently swallow errors.
+Detects empty `catch {}` blocks.
 
 **Bad:**
 ```zig
@@ -502,9 +500,9 @@ fn baz() i32 {
 
 ### store-violations-engine
 
-Detects allocator/resource misuse based on the store model, including double-free, free-without-alloc, close-without-open, use-after-free/close, and leak violations.
+Detects allocator/resource misuse: double-free, free-without-alloc, close-without-open, use-after-free/close, and leaks.
 
-**Error-Path Leak Policy:** Leak checks run only on normal (non-error) return paths. When a function returns an error (detected by literal error values like `return error.OutOfMemory` or by type-based analysis of error union returns), leak reports are suppressed on that path. This prevents false positives in code that follows the Zig idiom of cleaning up in `errdefer` blocks.
+**Error-path leak policy:** Leak checks run only on normal return paths. When a function returns an error (detected by literal error values or type-based analysis), leak reports are suppressed. This avoids false positives in code that cleans up via `errdefer`.
 
 Resources stored in aggregates are treated as escaping with the aggregate.
 

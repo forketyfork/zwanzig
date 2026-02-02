@@ -1,14 +1,14 @@
-# Zwanzig Implementation Details
+# Implementation details
 
-This document describes the internal architecture and implementation details of the Zwanzig static analyzer.
+Internal architecture and implementation of the Zwanzig static analyzer.
 
-## Architecture Overview
+## Architecture
 
-Zwanzig is designed as a modular static analysis framework for Zig code. The architecture consists of several key components that work together to analyze source files and detect issues.
+Zwanzig is a modular static analysis framework for Zig. The architecture has several components that work together to analyze source files and detect issues.
 
-### Module Layout
+### Module layout
 
-Zwanzig splits larger subsystems into focused submodules and exposes thin facades for convenience:
+Larger subsystems are split into focused submodules with thin facades:
 
 - `src/cli/` - CLI parsing (`args.zig`), config merge (`config_merge.zig`), default rule/checker registry (`registry.zig`), and the run loop (`run.zig`)
 - `src/formatters/` - Output formatters (console text and SARIF)
@@ -17,16 +17,16 @@ Zwanzig splits larger subsystems into focused submodules and exposes thin facade
 - `src/zir/` + `src/types/` - ZIR bridge implementation and shared type info (facade: `src/zir_bridge.zig`)
 - `src/lib.zig` - Public library exports for embedding
 
-### Core Components
+### Core components
 
-#### Source Parsing Cache
+#### Source parsing cache
 
-The `Source` abstraction (`src/source.zig`) provides lazy, cached access to parsed representations of Zig source code. This is a critical performance optimization that ensures parsing work is done only once per file, even when multiple rules need to access the AST or tokens.
+The `Source` abstraction (`src/source.zig`) provides lazy, cached access to parsed Zig source code. Parsing happens once per file, even when multiple rules access the AST or tokens.
 
-**Key Features:**
-- Lazy parsing: AST and tokens are only parsed when first requested
-- Caching: Once parsed, the AST and tokens are cached for subsequent accesses
-- Memory management: Proper cleanup via `deinit()` to avoid memory leaks
+**Behavior:**
+- Lazy parsing: AST and tokens are parsed when first requested
+- Caching: Once parsed, results are cached for subsequent accesses
+- Memory management: Cleanup via `deinit()`
 
 **API:**
 - `init(allocator, file_path, content)`: Creates a new Source instance
@@ -57,16 +57,16 @@ const tokens = try source.tokens();
 
 #### Analyzer
 
-The `Analyzer` (`src/analyzer.zig`) is the main engine that coordinates the analysis process:
+The `Analyzer` (`src/analyzer.zig`) coordinates the analysis process:
 
 1. Reads source files from disk
 2. Creates a `Source` instance with parsed content
 3. Runs all registered checkers and rules against the source (checkers first)
 4. Collects and reports diagnostics
 
-The analyzer ensures that each file is parsed once and the resulting `Source` object is shared across all rules and checkers. It applies the configured rule filter to both rule and checker names and builds a `CheckerContext` (build metadata, type info, analysis limits/stats, config, and dump directories) for checker execution.
+Each file is parsed once and the `Source` object is shared across all rules and checkers. The analyzer applies the configured rule filter and builds a `CheckerContext` (build metadata, type info, analysis limits/stats, config, dump directories) for checker execution.
 
-#### Rule Interface (Legacy)
+#### Rule interface (legacy)
 
 The `Rule` interface (`src/rule.zig`) defines the contract for legacy analysis rules:
 
@@ -88,9 +88,9 @@ Rules receive a `Source` pointer, allowing them to:
 - Examine tokens via `tokens()`
 - Avoid redundant parsing when multiple rules access the same representations
 
-#### Checker Interface
+#### Checker interface
 
-The `Checker` interface (`src/checker.zig`) is the new extensible API for implementing analysis passes. It provides a more flexible hook-based architecture that will support multiple analysis stages (AST, CFG, IR) as the analyzer evolves.
+The `Checker` interface (`src/checker.zig`) is the extensible API for analysis passes. It uses a hook-based architecture that supports multiple analysis stages (AST, CFG, IR).
 
 ```zig
 pub const Checker = struct {
@@ -108,15 +108,15 @@ pub const Checker = struct {
 };
 ```
 
-**Key Features:**
-- **Hook-based design**: Checkers implement specific hooks (currently `checkAstFn`) rather than a single check function
-- **Multiple analysis stages**: Future versions will add CFG and IR hooks for control-flow and dataflow analysis
-- **Backward compatibility**: The `CheckerManagerWithRules` supports both new checkers and legacy rules
-- **Context-aware analysis**: `CheckerContext` exposes build metadata, type information, analysis limits/stats, config, and visualization outputs
+**Behavior:**
+- Hook-based design: Checkers implement specific hooks (currently `checkAstFn`) rather than a single check function
+- Multiple analysis stages: Future versions will add CFG and IR hooks for control-flow and dataflow analysis
+- Backward compatibility: `CheckerManagerWithRules` supports both new checkers and legacy rules
+- Context-aware analysis: `CheckerContext` exposes build metadata, type information, analysis limits/stats, config, and visualization outputs
 
 #### CheckerManager
 
-The `CheckerManager` (`src/checker.zig`) owns checker registration and coordinates running checks:
+The `CheckerManager` (`src/checker.zig`) handles checker registration and coordinates running checks:
 
 ```zig
 pub const CheckerManager = struct {
@@ -129,7 +129,7 @@ pub const CheckerManager = struct {
 
 #### CheckerManagerWithRules
 
-For backward compatibility, `CheckerManagerWithRules` supports both new-style checkers and legacy rules. Checkers run first, then adapted rules.
+For backward compatibility, `CheckerManagerWithRules` supports both checkers and legacy rules. Checkers run first, then adapted rules.
 
 ```zig
 pub const CheckerManagerWithRules = struct {
@@ -157,12 +157,12 @@ try manager.runAstChecks(&source, &diagnostics, null, context);
 
 #### Diagnostics
 
-Diagnostics represent issues found by rules and checkers. Each diagnostic includes:
-- **File path**: The source file containing the issue
-- **Source range**: Start and end locations (line, column) for precise highlighting
-- **Rule ID**: The identifier of the rule that detected the issue
-- **Severity**: The importance level (`hint`, `warning`, or `err`)
-- **Message**: A descriptive message explaining the issue
+Diagnostics represent issues found by rules and checkers. Each includes:
+- File path
+- Source range (start and end locations)
+- Rule ID
+- Severity (`hint`, `warning`, or `err`)
+- Message
 
 The `Diagnostic` type (`src/diagnostic.zig`) provides:
 - `Severity` enum with `hint`, `warning`, and `err` levels
@@ -170,13 +170,13 @@ The `Diagnostic` type (`src/diagnostic.zig`) provides:
 - `SourceRange` struct for start/end location pairs
 - `LocationMapper` for converting byte offsets to line/column positions
 
-**Message Ownership:**
+**Message ownership:**
 
-Diagnostics always own their message strings. When creating a diagnostic via `Diagnostic.init()` or `Diagnostic.initAtLocation()`, an allocator must be provided and the message is duplicated. The `Analyzer.deinit()` method is the single point that frees all diagnostic messages, ensuring safe memory management. Rules and checkers should never manually free diagnostic messages.
+Diagnostics own their message strings. When creating via `Diagnostic.init()` or `Diagnostic.initAtLocation()`, the message is duplicated. `Analyzer.deinit()` frees all diagnostic messages. Rules and checkers should never manually free diagnostic messages.
 
-**Output Formats:**
+**Output formats:**
 
-The analyzer supports multiple output formats via the `Analyzer.OutputFormat` enum:
+The analyzer supports multiple output formats via `Analyzer.OutputFormat`:
 
 - **Text format**: Human-readable output with one diagnostic per line
   ```
@@ -204,34 +204,30 @@ The analyzer supports multiple output formats via the `Analyzer.OutputFormat` en
 
 - **SARIF format**: Code scanning format for GitHub and other tooling (SARIF 2.1.0)
 
-The output format is controlled by the `--format` CLI flag and defaults to text. The `Analyzer.printResults()` method takes an `OutputFormat` parameter and dispatches to the appropriate formatter.
-Formatter implementations live in `src/formatters/` (`console.zig`, `sarif.zig`).
+The `--format` CLI flag controls output format (defaults to text). Formatter implementations are in `src/formatters/` (`console.zig`, `sarif.zig`).
 
-## Parsing Strategy
+## Parsing strategy
 
-Zwanzig uses Zig's standard library parser (`std.zig.Ast.parse`) to build the AST. The parsing happens lazily:
+Zwanzig uses Zig's standard library parser (`std.zig.Ast.parse`). Parsing happens lazily:
 
-1. When `analyzeFile()` is called, the analyzer reads the file content
+1. `analyzeFile()` reads the file content
 2. A `Source` object is created but no parsing occurs yet
 3. When a checker or rule calls `source.ast()` or `source.tokens()`, parsing happens
 4. The parsed AST is cached in the `Source` object
-5. Subsequent calls to `ast()` or `tokens()` return the cached result
-6. After all checks complete, `source.deinit()` releases the cached AST
+5. Subsequent calls return the cached result
+6. `source.deinit()` releases the cached AST
 
-This design ensures:
-- No wasted parsing if no rule or checker needs the AST
-- No redundant parsing when multiple rules or checkers need the AST
-- Proper memory management via RAII pattern
+This avoids parsing if no rule needs the AST and avoids redundant parsing when multiple rules need it.
 
-## Parallel Analysis
+## Parallel analysis
 
-File-level analysis runs in parallel by default. The CLI `--threads` flag controls the size of the thread pool. Each worker uses a per-task arena allocator to reduce allocator contention, and diagnostics are merged and sorted for deterministic output ordering.
+File-level analysis runs in parallel by default. The `--threads` flag controls thread pool size. Each worker uses a per-task arena allocator to reduce contention, and diagnostics are merged and sorted for deterministic output.
 
-## Adding New Checkers
+## Adding checkers
 
-The preferred way to implement analysis passes is using the new `Checker` interface.
+Implement analysis passes using the `Checker` interface.
 
-### Creating a Checker
+### Creating a checker
 
 1. Create a file in `src/checkers/` (e.g., `my_checker.zig`)
 2. Define a checker constant of type `Checker`
@@ -283,9 +279,9 @@ pub const MyChecker = struct {
 try analyzer.registerChecker(&MyChecker.checker);
 ```
 
-### Legacy Rules (Backward Compatibility)
+### Legacy rules (backward compatibility)
 
-Existing rules using the `Rule` interface continue to work. They are run through the `CheckerManagerWithRules` adapter.
+Rules using the `Rule` interface continue to work via `CheckerManagerWithRules`.
 
 To add a legacy rule:
 
@@ -349,15 +345,15 @@ pub const MyRule = struct {
 };
 ```
 
-## AST-Based Rule Implementation
+## AST-based rule implementation
 
-Rules in Zwanzig use AST traversal to accurately analyze code structure. This approach provides several benefits over text-based scanning:
+Rules use AST traversal to analyze code structure. Benefits over text-based scanning:
 
 1. **Accuracy**: AST nodes precisely represent language constructs, avoiding false positives from string matching
-2. **Context Awareness**: The AST provides structural context (e.g., distinguishing a `catch` keyword in a comment vs actual code)
-3. **Token Information**: Access to token positions enables accurate source location reporting
+2. **Context awareness**: The AST provides structural context (e.g., distinguishing a `catch` keyword in a comment vs actual code)
+3. **Token information**: Access to token positions enables accurate source location reporting
 
-### Example: empty-catch Rule
+### Example: empty-catch rule
 
 The `empty-catch` rule demonstrates AST-based analysis:
 
@@ -387,9 +383,9 @@ The rule:
 2. For each catch node, examines the following tokens to determine if the block is empty
 3. Uses token positions to compute accurate source ranges for diagnostics
 
-### Example: dupe-import Rule
+### Example: dupe-import rule
 
-The `dupe-import` rule demonstrates token-based analysis for detecting duplicate imports:
+The `dupe-import` rule uses token-based analysis to detect duplicate imports:
 
 ```zig
 fn check(src: *Source, allocator: std.mem.Allocator, diagnostics: *std.ArrayList(Diagnostic)) RuleError!void {
@@ -424,9 +420,9 @@ The rule:
 3. Tracks seen import paths in a hash map
 4. Reports duplicates with reference to the first occurrence
 
-### Example: unused-decl Rule
+### Example: unused-decl rule
 
-The `unused-decl` rule demonstrates AST-based analysis for detecting unused declarations:
+The `unused-decl` rule uses AST-based analysis to detect unused declarations:
 
 ```zig
 fn check(src: *Source, allocator: std.mem.Allocator, diagnostics: *std.ArrayList(Diagnostic)) RuleError!void {
@@ -462,12 +458,9 @@ The rule:
 3. Scans all identifier tokens to count usages of each declaration name
 4. Reports declarations that appear only once (their definition)
 
-The conservative approach avoids false positives by:
-- Ignoring `pub` declarations (may be used externally)
-- Ignoring underscore-prefixed names (explicit opt-out convention)
-- Ignoring special names like `main` and `panic` (entry points)
+The conservative approach avoids false positives by ignoring `pub` declarations (may be used externally), underscore-prefixed names (explicit opt-out), and special names like `main` and `panic` (entry points).
 
-### Example: unreachable-code Rule (CFG-based)
+### Example: unreachable-code rule (CFG-based)
 
 The `unreachable-code` rule uses the analysis engine to detect unreachable code:
 
@@ -515,14 +508,11 @@ The rule:
 3. Checks if any exploded nodes reach each CFG node
 4. Reports CFG nodes that have no incoming feasible paths as unreachable
 
-This approach correctly handles:
-- Unconditional returns (code after `return` is unreachable)
-- Fully-terminating branches (code after `if/else` where both branches return)
-- Path-sensitive pruning (branches pruned due to contradictory constraints)
+Handles unconditional returns, fully-terminating branches, and path-sensitive pruning.
 
-### Example: empty-defer and empty-errdefer Rules
+### Example: empty-defer and empty-errdefer rules
 
-The `empty-defer` and `empty-errdefer` rules detect empty defer/errdefer blocks using AST analysis:
+These rules detect empty defer/errdefer blocks using AST analysis:
 
 ```zig
 fn check(src: *Source, allocator: std.mem.Allocator, diagnostics: *std.ArrayList(Diagnostic)) RuleError!void {
@@ -564,17 +554,13 @@ The rules:
 3. Check if the body is an empty block by examining the block structure
 4. Report empty blocks as diagnostics
 
-These rules help detect:
-- `defer {}` - empty defer blocks that do nothing
-- `errdefer {}` - empty errdefer blocks that don't clean up resources
-
 ## Intermediate Representation (IR)
 
-Zwanzig uses a minimal Intermediate Representation (IR) to bridge AST nodes and control-flow analysis. The IR is designed to be lightweight while capturing the essential structure needed for dataflow analysis.
+Zwanzig uses a minimal IR to bridge AST nodes and control-flow analysis, capturing the structure needed for dataflow analysis.
 
-### IR Node Types
+### IR node types
 
-The IR (`src/ir.zig`) defines the following node types:
+The IR (`src/ir.zig`) defines:
 
 | Tag | Description |
 |-----|-------------|
@@ -595,12 +581,12 @@ The IR (`src/ir.zig`) defines the following node types:
 | `try_expr` | Try expression - propagates errors to caller |
 | `catch_expr` | Catch expression - handles errors locally |
 
-### IR Node Structure
+### IR node structure
 
 Each `IrNode` contains:
-- **tag**: The kind of IR node (`IrTag`)
-- **ast_node**: Optional index of the corresponding AST node
-- **source_range**: Optional source location for diagnostics
+- `tag`: The kind of IR node (`IrTag`)
+- `ast_node`: Optional index of the corresponding AST node
+- `source_range`: Optional source location for diagnostics
 
 ```zig
 pub const IrNode = struct {
@@ -612,17 +598,17 @@ pub const IrNode = struct {
 
 ## Control Flow Graph (CFG)
 
-The CFG (`src/cfg.zig`) represents the control flow within a single function. It is built from the AST and maps IR nodes to their control flow relationships. The facade in `src/cfg.zig` re-exports the implementation from `src/cfg/` (`graph.zig`, `builder.zig`, `dot.zig`).
+The CFG (`src/cfg.zig`) represents control flow within a function. It maps IR nodes to their control flow relationships. The facade in `src/cfg.zig` re-exports from `src/cfg/` (`graph.zig`, `builder.zig`, `dot.zig`).
 
-### CFG Structure
+### CFG structure
 
-A CFG consists of:
-- **nodes**: A list of `CfgNode` entries, each containing an IR node
-- **edges**: A list of `CfgEdge` entries connecting nodes
-- **entry**: Index of the function entry node
-- **exit**: Index of the function exit node
+A CFG has:
+- `nodes`: List of `CfgNode` entries, each containing an IR node
+- `edges`: List of `CfgEdge` entries connecting nodes
+- `entry`: Index of the function entry node
+- `exit`: Index of the function exit node
 
-### Edge Types
+### Edge types
 
 | Kind | Description |
 |------|-------------|
@@ -639,9 +625,9 @@ A CFG consists of:
 | `catch_error` | Error path into catch handler |
 | `catch_success` | Success path from catch (value unwrapped) |
 
-### CFG Builder
+### CFG builder
 
-The `CfgBuilder` constructs CFGs from Zig AST function declarations. Currently supported constructs:
+The `CfgBuilder` constructs CFGs from Zig AST function declarations. Supported constructs:
 
 - Function entry/exit
 - Block statements
@@ -671,7 +657,7 @@ for (root_decls) |decl| {
 }
 ```
 
-### CFG Traversal
+### CFG traversal
 
 The CFG provides methods for traversing the graph:
 
@@ -685,7 +671,7 @@ var preds: std.ArrayList(u32) = .empty;
 try cfg.getPredecessors(allocator, node_index, &preds);
 ```
 
-### Source Location Mapping
+### Source location mapping
 
 CFG nodes maintain source range information for diagnostic reporting:
 
@@ -700,12 +686,12 @@ if (cfg.getNode(index)) |node| {
 
 ### Branching CFG
 
-The CFG builder supports `if` and `if-else` constructs, creating proper branching structures:
+The CFG builder supports `if` and `if-else` constructs:
 
-1. **Branch Nodes**: When an `if` statement is encountered, a `branch` IR node is created to represent the condition evaluation
-2. **True/False Edges**: Edges from the branch node to the then-block are marked with `branch_true`, and edges to the else-block (or merge point if no else) are marked with `branch_false`
-3. **Merge Points**: A `nop` node is inserted after the if/else to serve as a merge point where control flow reconverges
-4. **Terminating Branches**: If both branches terminate (e.g., with return statements), the merge point is not connected, correctly representing unreachable code after the if
+1. **Branch nodes**: An `if` creates a `branch` IR node for the condition evaluation
+2. **True/false edges**: Edges to the then-block are `branch_true`, edges to else-block (or merge point) are `branch_false`
+3. **Merge points**: A `nop` node after the if/else is where control flow reconverges
+4. **Terminating branches**: If both branches terminate, the merge point is not connected (unreachable code)
 
 **Example CFG for if-else:**
 ```
@@ -727,13 +713,13 @@ fn_entry
 
 ### Loop CFG
 
-The CFG builder supports `while` and `for` loops with proper back-edges for cyclic control flow:
+The CFG builder supports `while` and `for` loops with back-edges:
 
-1. **Loop Header**: A `loop_header` node is created to represent the loop condition evaluation point
-2. **Loop Body**: A `loop_body` node marks the entry into the loop body
-3. **Back-Edges**: After the loop body completes (without terminating), a `loop_back` edge connects back to the header
-4. **Exit Edge**: A `loop_exit` edge from the header leads to the code after the loop (when the condition is false)
-5. **Termination Handling**: If the loop body terminates (e.g., with return), no back-edge is created from that path
+1. **Loop header**: A `loop_header` node represents the condition evaluation
+2. **Loop body**: A `loop_body` node marks entry into the body
+3. **Back-edges**: After the body completes (without terminating), a `loop_back` edge connects back to the header
+4. **Exit edge**: A `loop_exit` edge from the header leads to code after the loop
+5. **Termination handling**: If the body terminates (e.g., with return), no back-edge is created
 
 **Example CFG for while loop:**
 ```
@@ -754,14 +740,14 @@ loop_body ───────┘
   fn_exit
 ```
 
-### Defer/Errdefer CFG
+### Defer/errdefer CFG
 
-The CFG builder models `defer` and `errdefer` statements to represent their execution order:
+The CFG builder models `defer` and `errdefer` statements:
 
-1. **Defer Nodes**: A `defer_stmt` node is created for each `defer` statement, connected via `defer_edge`
-2. **Errdefer Nodes**: An `errdefer_stmt` node is created for each `errdefer` statement, connected via `errdefer_edge`
-3. **Body Representation**: The defer body is represented as a `block` node following the defer/errdefer node
-4. **Execution Order**: Defers are recorded in program order; actual execution happens in reverse order at function exit (to be modeled in future analysis passes)
+1. **Defer nodes**: A `defer_stmt` node for each `defer`, connected via `defer_edge`
+2. **Errdefer nodes**: An `errdefer_stmt` node for each `errdefer`, connected via `errdefer_edge`
+3. **Body representation**: The defer body is a `block` node following the defer/errdefer node
+4. **Execution order**: Defers are recorded in program order; actual execution is reverse order at function exit
 
 **Example CFG with defers:**
 ```
@@ -777,17 +763,17 @@ errdefer_stmt ──► block (errdefer body)
   fn_exit
 ```
 
-### Try/Catch CFG (Error Flow)
+### Try/catch CFG (error flow)
 
-The CFG builder models Zig's error handling constructs (`try` and `catch`) to represent error flow:
+The CFG builder models Zig's error handling constructs (`try` and `catch`):
 
-#### Try Expressions
+#### Try expressions
 
-A `try` expression evaluates an error union and either unwraps the success value or propagates the error to the caller:
+A `try` expression evaluates an error union and either unwraps the success value or propagates the error:
 
-1. **Try Node**: A `try_expr` node is created to represent the error-checking point
-2. **Error Path**: A `try_error` edge connects the try node directly to `fn_exit`, representing error propagation
-3. **Success Path**: A `try_success` edge connects to the next statement, representing successful unwrapping
+1. **Try node**: A `try_expr` node represents the error-checking point
+2. **Error path**: A `try_error` edge connects to `fn_exit` (error propagation)
+3. **Success path**: A `try_success` edge connects to the next statement
 
 **Example CFG for try:**
 ```
@@ -804,13 +790,13 @@ var_decl    fn_exit
   fn_exit
 ```
 
-#### Catch Expressions
+#### Catch expressions
 
-A `catch` expression handles errors locally by providing a fallback value or handler block:
+A `catch` expression handles errors locally with a fallback value or handler block:
 
-1. **Catch Node**: A `catch_expr` node is created to represent the error-handling point
-2. **Success Path**: A `catch_success` edge connects to the merge point (value unwrapped without error)
-3. **Error Path**: A `catch_error` edge connects to the handler, then the handler continues to the merge point
+1. **Catch node**: A `catch_expr` node represents the error-handling point
+2. **Success path**: A `catch_success` edge connects to the merge point (value unwrapped)
+3. **Error path**: A `catch_error` edge connects to the handler, then to the merge point
 
 **Example CFG for catch with handler:**
 ```
@@ -830,9 +816,9 @@ catch_expr ─────────┐
   fn_exit
 ```
 
-#### Try in Variable Declarations
+#### Try in variable declarations
 
-When `try` appears in a variable declaration's initializer (e.g., `const x = try foo();`), the CFG correctly models both paths:
+When `try` appears in a variable declaration's initializer (e.g., `const x = try foo();`), the CFG models both paths:
 
 ```
 fn_entry
@@ -848,9 +834,9 @@ var_decl    fn_exit
   ...
 ```
 
-#### Catch in Variable Declarations
+#### Catch in variable declarations
 
-Similarly, `catch` in a variable declaration creates branching for error handling:
+`catch` in a variable declaration creates branching for error handling:
 
 ```
 fn_entry
@@ -869,23 +855,23 @@ var_decl ◄──────────┘
   ...
 ```
 
-## Typed IR Bridge (ZIR Integration)
+## Typed IR bridge (ZIR integration)
 
-The `ZirBridge` module (`src/zir_bridge.zig`) provides a bridge between Zwanzig's analysis pipeline and Zig's typed intermediate representation (ZIR). This enables access to type information that is not available in the raw AST. The implementation lives in `src/zir/bridge.zig`, with declaration models in `src/zir/decls.zig` and shared type definitions in `src/types/type_info.zig`.
+The `ZirBridge` module (`src/zir_bridge.zig`) bridges Zwanzig's analysis pipeline and Zig's typed intermediate representation (ZIR). Implementation is in `src/zir/bridge.zig`, with declaration models in `src/zir/decls.zig` and shared type definitions in `src/types/type_info.zig`.
 
 ### Overview
 
-ZIR (Zig Intermediate Representation) is the typed IR produced by the Zig compiler during semantic analysis. The ZirBridge uses `std.zig.AstGen` to generate ZIR from parsed source code, providing typed information for:
+ZIR (Zig Intermediate Representation) is the typed IR produced by the Zig compiler during semantic analysis. The ZirBridge uses `std.zig.AstGen` to generate ZIR from parsed source code, providing:
 
 - Declaration types (variables, constants, functions)
 - Function signatures and parameter types
 - Type inference results
 
-### Key Types
+### Types
 
 #### TypeInfo
 
-Represents type information for a declaration or expression (defined in `src/types/type_info.zig`):
+Type information for a declaration or expression (defined in `src/types/type_info.zig`):
 
 ```zig
 pub const TypeInfo = struct {
@@ -918,7 +904,7 @@ pub const DeclInfo = struct {
 };
 ```
 
-### ZirBridge Usage
+### ZirBridge usage
 
 ```zig
 const ZirBridge = @import("zir_bridge.zig").ZirBridge;
@@ -949,22 +935,20 @@ if (bridge.hasZir()) {
 }
 ```
 
-### How It Works
+### How it works
 
-1. **AST Parsing**: Source code is parsed into a `std.zig.Ast` via the existing `Source` abstraction
-2. **ZIR Generation**: `std.zig.AstGen.generate()` converts the AST to ZIR
-3. **Declaration Extraction**: Root declarations are extracted from both AST and ZIR
-4. **Type Mapping**: ZIR instruction types are mapped to the simplified `TypeInfo` representation
+1. **AST parsing**: Source code is parsed into `std.zig.Ast` via `Source`
+2. **ZIR generation**: `std.zig.AstGen.generate()` converts AST to ZIR
+3. **Declaration extraction**: Root declarations are extracted from both AST and ZIR
+4. **Type mapping**: ZIR instruction types are mapped to `TypeInfo`
 
-### AST to ZIR Mapping
+### AST to ZIR mapping
 
-The `findZirInstForNode` function provides a best-effort mapping from AST node indices to ZIR instruction indices. It iterates through ZIR instructions and checks their source node references:
+The `findZirInstForNode` function provides best-effort mapping from AST node indices to ZIR instruction indices by iterating ZIR instructions and checking their source node references:
 
-- **pl_node format**: Most expression and declaration operations store their source node in `data.pl_node.src_node`
-- **node format**: Parameters and declaration references store the node directly in `data.node`
-- **un_node format**: Unary operations store their source node in `data.un_node.src_node`
-
-This mapping enables correlating high-level AST constructs with their corresponding ZIR instructions, which is useful for type-aware analysis and debugging.
+- `pl_node` format: Most operations store their source node in `data.pl_node.src_node`
+- `node` format: Parameters and declaration references store the node directly in `data.node`
+- `un_node` format: Unary operations store their source node in `data.un_node.src_node`
 
 ### Limitations
 
@@ -973,13 +957,9 @@ This mapping enables correlating high-level AST constructs with their correspond
 - Currently supports module-level declarations; nested scopes require future work
 - AST-to-ZIR mapping is best-effort; some AST nodes may not have corresponding ZIR instructions or may map to multiple instructions
 
-### Integration with Analysis
+### Integration with analysis
 
-The ZirBridge provides typed information that is integrated throughout the analysis pipeline:
-
-- **Type-aware rules**: Rules that need to distinguish between integer types, pointers, error unions, etc.
-- **CFG-based analysis**: Control flow analysis can use type information to understand error propagation
-- **IR nodes**: `IrNode` instances can carry `TypeInfo` for type-aware dataflow analysis
+ZirBridge typed information is used throughout the analysis pipeline for type-aware rules, CFG-based analysis, and IR nodes carrying `TypeInfo`.
 
 ### TypeContext
 
@@ -1049,9 +1029,9 @@ Expression type queries handle:
 - **Error values**: Returns error union type
 - **Identifiers**: Looks up declared type (including local error variables)
 
-### Source Type API
+### Source type API
 
-The `Source` struct (`src/source.zig`) provides direct access to type information via lazy-loaded ZirBridge:
+The `Source` struct (`src/source.zig`) provides access to type information via lazy-loaded ZirBridge:
 
 ```zig
 var source = Source.init(allocator, "test.zig", code);
@@ -1071,7 +1051,7 @@ if (source.hasTypeInfo()) {
 }
 ```
 
-### CheckerContext Type Access
+### CheckerContext type access
 
 The `CheckerContext` (`src/checker.zig`) passed to checkers includes an optional `TypeContext`:
 
@@ -1095,9 +1075,9 @@ pub fn checkAst(
 }
 ```
 
-### Typed IR Nodes
+### Typed IR nodes
 
-`IrNode` (`src/ir.zig`) now carries optional type information:
+`IrNode` (`src/ir.zig`) carries optional type information:
 
 ```zig
 pub const IrNode = struct {
@@ -1118,7 +1098,7 @@ pub const IrNode = struct {
 };
 ```
 
-### CfgBuilder Type Annotation
+### CfgBuilder type annotation
 
 The `CfgBuilder` (`src/cfg/builder.zig`) can annotate IR nodes with types during CFG construction:
 
@@ -1138,20 +1118,17 @@ for (cfg.nodes.items) |node| {
 }
 ```
 
-Key annotations:
-- **var_decl nodes**: Annotated with the variable's declared type
-- **try_expr nodes**: Annotated with `error_union` type
-- **catch_expr nodes**: Annotated with `error_union` type
+Annotations: `var_decl` nodes get the variable's declared type; `try_expr` and `catch_expr` nodes get `error_union` type.
 
-## Analysis Engine
+## Analysis engine
 
-The analysis engine (`src/engine.zig`) implements a worklist-based traversal of the CFG to build an exploded graph. This is the foundation for path-sensitive static analysis. The facade in `src/engine.zig` re-exports modular internals from `src/engine/` (analysis, state, values, constraints, summaries, store, dot).
+The analysis engine (`src/engine.zig`) implements a worklist-based traversal of the CFG to build an exploded graph for path-sensitive static analysis. The facade in `src/engine.zig` re-exports from `src/engine/` (analysis, state, values, constraints, summaries, store, dot).
 
-### Key Concepts
+### Concepts
 
 #### ProgramPoint
 
-A `ProgramPoint` identifies a specific location in the analysis:
+A `ProgramPoint` identifies a location in the analysis:
 
 ```zig
 pub const ProgramPoint = struct {
@@ -1165,15 +1142,11 @@ pub const ProgramPoint = struct {
 };
 ```
 
-For each CFG node, there are two program points:
-- **Pre-state**: Before the node executes
-- **Post-state**: After the node has executed
-
-This separation allows the engine to model state changes at each CFG node.
+For each CFG node, there are two program points: pre-state (before execution) and post-state (after execution).
 
 #### ProgramState
 
-A `ProgramState` represents the abstract program state at a given point. It stores the environment mapping variables to abstract values:
+A `ProgramState` represents abstract program state at a given point, storing the environment mapping variables to abstract values:
 
 ```zig
 pub const ProgramState = struct {
@@ -1182,21 +1155,11 @@ pub const ProgramState = struct {
 };
 ```
 
-**Key Operations:**
-- `init(allocator)`: Creates an empty state
-- `clone(allocator)`: Creates a deep copy of the state
-- `getVar(var_id)`: Retrieves the abstract value of a variable
-- `setVar(var_id, value)`: Sets a variable's abstract value
-- `eql(other)`: Compares states for structural equality
-- `computeHash()`: Returns a hash for deduplication
+**Operations:** `init`, `clone`, `getVar`, `setVar`, `eql`, `computeHash`.
 
-Future steps will add:
-- **Store**: Heap/memory model
-- **Constraints**: Path conditions from branches
+#### Abstract values
 
-#### Abstract Values
-
-Abstract values represent possible runtime values of variables and expressions:
+Abstract values represent possible runtime values:
 
 ```zig
 pub const AbstractValue = union(enum) {
@@ -1208,28 +1171,7 @@ pub const AbstractValue = union(enum) {
 };
 ```
 
-**Value Categories:**
-| Value | Description | Use Case |
-|-------|-------------|----------|
-| `unknown` | No information | Default for uninitialized variables |
-| `null_val` | Definitely null | Null pointer analysis |
-| `non_null` | Definitely not null | Non-null assertions |
-| `int_range` | Integer in [min, max] | Range analysis |
-| `concrete_int` | Known integer | Constant propagation |
-
-**IntRange Operations:**
-- `init(min, max)`: Creates a range
-- `single(value)`: Creates a single-value range
-- `contains(value)`: Checks if value is in range
-- `overlaps(other)`: Checks if ranges overlap
-- `merge(other)`: Combines two ranges (union)
-
-**AbstractValue Operations:**
-- `eql(other)`: Checks structural equality
-- `hash()`: Computes hash for deduplication
-- `merge(other)`: Computes join of two values
-- `isUnknown()`, `isNull()`, `isNonNull()`, `isConcrete()`: Type predicates
-- `toConcreteInt()`: Extracts concrete value if available
+**Value categories:** `unknown` (default), `null_val`, `non_null`, `int_range`, `concrete_int`.
 
 #### Environment
 
@@ -1242,15 +1184,7 @@ pub const Environment = struct {
 };
 ```
 
-Variables are identified by their AST node index, providing a simple and unique identifier within a module.
-
-**Operations:**
-- `get(var_id)`: Returns the abstract value, or null if not bound
-- `set(var_id, value)`: Binds a variable to a value
-- `remove(var_id)`: Removes a binding
-- `clone()`: Creates a deep copy
-- `eql(other)`: Checks structural equality
-- `computeHash()`: Computes hash for deduplication
+Variables are identified by their AST node index.
 
 #### ExplodedNode
 
@@ -1266,8 +1200,6 @@ pub const ExplodedNode = struct {
 };
 ```
 
-Each exploded node represents a unique (point, state) pair encountered during analysis.
-
 #### ExplodedGraph
 
 The `ExplodedGraph` is the central data structure for path-sensitive analysis:
@@ -1280,21 +1212,18 @@ pub const ExplodedGraph = struct {
 };
 ```
 
-Key features:
-- **Deduplication**: Nodes with identical (point, state) pairs are merged
-- **Edge tracking**: Predecessor and successor relationships are maintained
-- **CFG mapping**: Each exploded node maps back to a CFG node
+Deduplicates nodes with identical (point, state) pairs, tracks edges, and maps back to CFG nodes.
 
-### Worklist Algorithm
+### Worklist algorithm
 
 The `AnalysisEngine` uses a worklist-based algorithm:
 
-1. **Initialize**: Create entry node at `(pre(entry), initial_state)`
-2. **Process**: While worklist is not empty:
-   - Pop a node from the worklist
+1. Create entry node at `(pre(entry), initial_state)`
+2. While worklist is not empty:
+   - Pop a node
    - If at pre-state: apply transfer function, create post-state node
    - If at post-state: create pre-state nodes for all CFG successors
-3. **Deduplicate**: Skip nodes that already exist in the graph
+3. Skip nodes that already exist in the graph
 
 ```zig
 var engine = AnalysisEngine.init(allocator, &cfg);
@@ -1308,23 +1237,11 @@ const graph = engine.getGraph();
 
 ### Deduplication
 
-Deduplication is critical for termination when analyzing loops. The engine computes a hash key from (point, state) and checks if a node with that key already exists:
+Deduplication ensures analysis terminates: loops don't cause infinite exploration, and paths converging to the same state are merged.
 
-```zig
-const key = ExplodedNode.computeKey(point, state);
-if (self.node_map.get(key)) |existing_index| {
-    return .{ .index = existing_index, .is_new = false };
-}
-```
+### Transfer function
 
-This ensures that:
-- Loops don't cause infinite exploration
-- Paths that converge to the same state are merged
-- Analysis terminates in finite time
-
-### Transfer Function
-
-The transfer function models how state changes when a CFG node executes. It evaluates the semantics of each IR node and updates the environment accordingly:
+The transfer function models how state changes when a CFG node executes:
 
 ```zig
 fn transferFunction(self: *AnalysisEngine, point: ProgramPoint, state: *const ProgramState) !ProgramState {
@@ -1351,13 +1268,11 @@ fn transferFunction(self: *AnalysisEngine, point: ProgramPoint, state: *const Pr
 }
 ```
 
-The transfer function currently handles:
-- **Variable declarations**: Initializes variables with `unknown` value
-- **Assignments**: Updates variable values in the environment
+Handles variable declarations (initializes with `unknown`) and assignments (updates in environment).
 
-### Branch Constraints and Path Pruning
+### Branch constraints and path pruning
 
-The analysis engine supports path-sensitive analysis by tracking constraints from branch conditions. When the engine encounters a branch node with `branch_true` or `branch_false` edges, it extracts constraints and applies them to the successor states.
+The engine tracks constraints from branch conditions. When it encounters a branch node with `branch_true` or `branch_false` edges, it extracts constraints and applies them to successor states.
 
 #### Constraints
 
@@ -1385,36 +1300,15 @@ pub const Constraint = union(enum) {
 };
 ```
 
-**Comparison Operators:**
-| Op | Description |
-|----|-------------|
-| `eq` | Equal (==) |
-| `ne` | Not equal (!=) |
-| `lt` | Less than (<) |
-| `le` | Less or equal (<=) |
-| `gt` | Greater than (>) |
-| `ge` | Greater or equal (>=) |
+**Comparison operators:** `eq`, `ne`, `lt`, `le`, `gt`, `ge`.
 
 #### ConstraintManager
 
-The `ConstraintManager` tracks active constraints on a path:
+The `ConstraintManager` tracks active constraints on a path. Operations: `addConstraint`, `isSatisfiable`, `refineValue`, `clone`.
 
-```zig
-pub const ConstraintManager = struct {
-    constraints: std.ArrayList(Constraint),
-    allocator: std.mem.Allocator,
-};
-```
+#### ProgramState with constraints
 
-**Key Operations:**
-- `addConstraint(constraint)`: Adds a constraint (ignores duplicates)
-- `isSatisfiable(env)`: Checks if constraints are satisfiable given the environment
-- `refineValue(value, constraint)`: Refines an abstract value based on a constraint
-- `clone()`: Creates a deep copy
-
-#### ProgramState with Constraints
-
-The `ProgramState` now includes a `ConstraintManager`:
+The `ProgramState` includes a `ConstraintManager`:
 
 ```zig
 pub const ProgramState = struct {
@@ -1424,20 +1318,9 @@ pub const ProgramState = struct {
 };
 ```
 
-**Constraint Integration:**
-- `addConstraint(constraint)`: Adds a constraint and refines variable values
-- `isSatisfiable()`: Checks if the state's constraints are satisfiable
-- `constraintCount()`: Returns the number of active constraints
+#### Path pruning
 
-#### Path Pruning
-
-When processing branch edges, the engine:
-
-1. Extracts the constraint from the branch condition (if available)
-2. For `branch_true` edges: applies the constraint as-is
-3. For `branch_false` edges: applies the negated constraint
-4. Checks if the resulting state is satisfiable
-5. If unsatisfiable, prunes the path (skips exploration)
+When processing branch edges, the engine extracts constraints from the branch condition, applies the constraint (or its negation), checks satisfiability, and prunes unsatisfiable paths.
 
 **Example:**
 ```
@@ -1453,37 +1336,15 @@ if (x == 5) {
 // - else-branch is explored (x != 5 is satisfiable)
 ```
 
-#### Value Refinement
+#### Value refinement
 
-When a constraint is added, the engine refines the affected variable's abstract value:
+When a constraint is added, the engine refines the variable's abstract value (e.g., `unknown` + `x == 5` → `concrete_int(5)`). When refinement returns `null`, the path is unsatisfiable and pruned.
 
-| Value Type | Constraint | Result |
-|------------|------------|--------|
-| `unknown` | `x == 5` | `concrete_int(5)` |
-| `unknown` | `x < 10` | `int_range(MIN, 9)` |
-| `unknown` | `x is null` | `null_val` |
-| `unknown` | `x is non-null` | `non_null` |
-| `int_range(0,10)` | `x < 5` | `int_range(0,4)` |
-| `concrete_int(5)` | `x == 5` | `concrete_int(5)` |
-| `concrete_int(5)` | `x == 10` | `null` (contradiction) |
-| `null_val` | `x is non-null` | `null` (contradiction) |
+#### Satisfiability checking
 
-When a refinement returns `null`, the path is unsatisfiable and is pruned.
+The `ConstraintManager.isSatisfiable` method checks environment compatibility and constraint consistency (e.g., `x == 5` AND `x == 6` is contradictory).
 
-#### Satisfiability Checking
-
-The `ConstraintManager.isSatisfiable` method performs two checks:
-
-1. **Environment compatibility**: Each constraint is checked against known variable values
-2. **Constraint consistency**: Pairs of constraints are checked for contradictions
-
-**Contradictory constraint pairs:**
-- `x == 5` AND `x == 6` (different equality values)
-- `x == 5` AND `x != 5` (equality vs inequality)
-- `x == null` AND `x != null` (null check contradiction)
-- `x < 5` AND `x > 10` (non-overlapping ranges)
-
-### Usage Example
+### Usage example
 
 ```zig
 const cfg_mod = @import("cfg.zig");
@@ -1505,9 +1366,9 @@ const graph = engine.getGraph();
 std.debug.print("Exploded graph has {d} nodes\n", .{graph.nodeCount()});
 ```
 
-## Error-Handling Checkers
+## Error-handling checkers
 
-The analysis engine supports error-handling checkers that use CFG and error state tracking to detect issues with error handling in Zig code.
+The engine supports error-handling checkers using CFG and error state tracking.
 
 ### EmptyCatchEngineChecker
 
@@ -1541,32 +1402,15 @@ fn checkAst(src: *Source, allocator: std.mem.Allocator, diagnostics: *std.ArrayL
 }
 ```
 
-The checker identifies empty handlers by checking if the `catch_error` edge goes directly to a merge node (nop) without any intervening handler nodes.
+The checker identifies empty handlers by checking if the `catch_error` edge goes directly to a merge node (nop).
 
 ### SwallowedErrorChecker
 
-The `SwallowedErrorChecker` (`src/checkers/swallowed_error.zig`) detects catch blocks that swallow errors without proper handling:
+The `SwallowedErrorChecker` (`src/checkers/swallowed_error.zig`) detects catch blocks that swallow errors.
 
-**Detection Strategy:**
+**Detection:** Build CFG, run engine to track error states, and for each `catch_expr` node check if the handler returns (good), contains a function call (good - might log), or just falls through to merge (swallowed).
 
-1. Build CFG for each function
-2. Run the analysis engine to track error states
-3. For each `catch_expr` node:
-   - Find the `catch_error` edge leading to the handler
-   - Trace through the handler body
-   - Check if it:
-     - Returns (good - might rethrow)
-     - Contains a function call (good - might log)
-     - Just falls through to merge (swallowed error)
-
-**Error State Integration:**
-
-The checker uses the analysis engine's `ErrorState` tracking:
-- `error_active`: Error produced but not yet handled
-- `error_handled`: Error caught and being handled in catch block
-- `normal`: No error or error has been fully processed
-
-When the error handler exits normally without logging or rethrowing, the error is considered swallowed.
+The engine tracks `ErrorState`: `error_active`, `error_handled`, or `normal`. When the handler exits normally without logging or rethrowing, the error is swallowed.
 
 ```zig
 fn isErrorSwallowed(cfg: *const Cfg, catch_node_idx: u32, engine: *const AnalysisEngine, allocator: std.mem.Allocator) CheckerError!bool {
@@ -1585,30 +1429,26 @@ fn isErrorSwallowed(cfg: *const Cfg, catch_node_idx: u32, engine: *const Analysi
 
 ### StoreViolationsEngineChecker
 
-The `StoreViolationsEngineChecker` (`src/checkers/store_violations_engine.zig`) reports allocator/resource misuse detected by the store model, including double-free, free-without-alloc, close-without-open, use-after-free/close, and leak violations. It runs the analysis engine per function and scans the resulting `ProgramState` store violations to emit diagnostics.
+The `StoreViolationsEngineChecker` (`src/checkers/store_violations_engine.zig`) reports allocator/resource misuse: double-free, free-without-alloc, close-without-open, use-after-free/close, and leaks. It runs the engine per function and scans `ProgramState` store violations.
 
-#### Ownership Escape Heuristics
+#### Ownership escape heuristics
 
-The store model tracks when allocated resources "escape" (i.e., ownership is transferred elsewhere), so they are not falsely reported as leaks. Two key heuristics are used:
+The store model tracks when resources "escape" (ownership transferred) to avoid false leak reports.
 
-**1. Field Assignment Escape**
+**1. Field assignment escape**
 
-When a resource is assigned to a field of a long-lived owner, it is marked as escaped:
+Resources assigned to fields of long-lived owners are marked escaped:
 
 ```zig
 // Resource escapes via field assignment
 cache.entries = entries;  // entries is marked escaped
 ```
 
-The `recordOwnershipFromFieldAssign` function detects this pattern when:
-- The LHS is a field access expression (e.g., `obj.field`)
-- The base is `self` (method receiver)
-- The base is a pointer type (e.g., `*Cache`)
-- The base is not a locally-tracked allocation
+The `recordOwnershipFromFieldAssign` function detects this when the LHS is a field access, the base is `self` (method receiver), the base is a pointer type, or the base is not a locally-tracked allocation.
 
-**2. Container Method Escape**
+**2. Container method escape**
 
-Resources passed to container insertion methods are marked as escaped:
+Resources passed to container insertion methods are marked escaped:
 
 ```zig
 // Resource escapes via container insertion
@@ -1617,14 +1457,11 @@ list.insert(allocator, 0, item); // item is marked escaped
 map.put(key, value);             // key and value are marked escaped
 ```
 
-The `trackEscapesFromCall` function recognizes these container methods:
-- `append`, `appendAssumeCapacity`, `appendSlice`, `appendSliceAssumeCapacity`
-- `insert`, `insertAssumeCapacity`
-- `put`, `putNoClobber`, `putAssumeCapacity`, `putNoClobberAssumeCapacity`
+The `trackEscapesFromCall` function recognizes container methods: `append`, `appendAssumeCapacity`, `appendSlice`, `insert`, `put`, `putNoClobber`, etc.
 
-**3. Init-like Function Escape**
+**3. Init-like function escape**
 
-Resources passed to functions with names starting with common initialization prefixes are marked as escaped:
+Resources passed to functions with initialization-like prefixes are marked escaped:
 
 ```zig
 // Resource escapes via init function
@@ -1634,35 +1471,25 @@ setupComponent(ptr, data);       // all params are marked escaped
 
 Recognized prefixes: `init`, `setup`, `set`, `store`, `register`, `add`, `push`.
 
-**Important:** Escape tracking is performed **before** function inlining to ensure resources are properly marked even when the callee is inlined into the caller.
+Escape tracking is performed **before** function inlining.
 
-#### Error-Path Leak Policy
+#### Error-path leak policy
 
-Leak violations are only reported on normal (non-error) return paths. When an error is returned, leak reports are suppressed because the caller is expected to handle cleanup via `errdefer` or similar mechanisms.
+Leak violations are only reported on normal return paths. Error returns suppress leak reports (caller handles cleanup via `errdefer`).
 
-The engine detects error returns in two ways:
+The engine detects error returns via literal error values (`return error.SomeError`) and type-based detection (`TypeContext`).
 
-1. **Literal error values**: Direct `return error.SomeError` expressions are immediately recognized
-2. **Type-based detection**: Expressions that return error union types are detected via `TypeContext`
+#### Type-based resource detection
 
-Type-based detection handles cases like:
-- `return mayFail()` where `mayFail()` returns `!T`
-- `return err` where `err` is an error variable
-- Chained error propagation through helper functions
+The store model identifies resource operations using a priority-based system:
 
-#### Type-Based Resource Detection
+1. Config-defined models (highest priority)
+2. Built-in name patterns (`alloc`/`free`, `create`/`destroy`, `open`/`close`)
+3. Type-based detection (methods returning `File`, `Dir`, `Socket`, etc.)
 
-The store model identifies resource operations (alloc/free, open/close) using a priority-based detection system:
+#### Configuration integration
 
-1. **Config-defined models** (highest priority): Custom patterns from `.zwanzig.json` `resource_models`
-2. **Built-in name patterns**: Standard patterns like `alloc`/`free`, `create`/`destroy`, `open`/`close`
-3. **Type-based detection**: Methods returning known resource types (e.g., `File`, `Dir`, `Socket`)
-
-Type-based detection uses `TypeContext.getExpressionType()` to extract the return type from call expressions. For known file methods (e.g., `openFile`, `createFile`), the `type_str` field contains the resource type name, enabling detection of resource-returning functions.
-
-#### Configuration Integration
-
-The checker accepts an optional `Config` pointer via `AnalysisEngine.setConfig()`. When set, the engine checks config-defined resource models before falling back to built-in heuristics.
+The checker accepts a `Config` pointer via `AnalysisEngine.setConfig()`. Config-defined resource models are checked before built-in heuristics.
 
 ```zig
 // In checker code
@@ -1685,23 +1512,23 @@ try analyzer.registerChecker(&UnreachableCodeChecker.checker);
 try analyzer.registerChecker(&StoreViolationsEngineChecker.checker);
 ```
 
-## Interprocedural Analysis
+## Interprocedural analysis
 
-The analysis engine supports limited interprocedural analysis through function inlining. This allows tracking data and control flow across function boundaries.
+The engine supports limited interprocedural analysis through function inlining.
 
-### Function Inlining
+### Function inlining
 
 When the engine encounters a function call, it attempts to inline the callee's CFG if:
 
-1. **Source is available**: The engine was initialized with `initWithSource()` providing access to the source file
-2. **Call is resolvable**: The callee can be identified (simple identifier calls to local functions)
-3. **Depth limit not exceeded**: The current inline depth is below `max_inline_depth` (default: 3)
+1. Source is available (initialized with `initWithSource()`)
+2. Call is resolvable (simple identifier calls to local functions)
+3. Depth limit not exceeded (default: 3)
 
-If any condition fails, the call is treated as having **unknown effects**.
+If any condition fails, the call has **unknown effects**.
 
-### Call Stack Tracking
+### Call stack tracking
 
-The `ProgramState` maintains a call stack to track the interprocedural context:
+The `ProgramState` maintains a call stack:
 
 ```zig
 pub const CallSite = struct {
@@ -1711,19 +1538,9 @@ pub const CallSite = struct {
 };
 ```
 
-When a function is inlined:
-1. The inline depth is incremented
-2. The call site is pushed onto the call stack
-3. Analysis continues at the callee's entry point
-
-When the callee's exit is reached:
-1. The call site is popped from the stack
-2. The inline depth is decremented
-3. Analysis continues at the caller's return point
+When inlining: increment depth, push call site, analyze callee. On callee exit: pop call site, decrement depth, continue at caller.
 
 ### Configuration
-
-The inline depth can be configured via `setMaxInlineDepth()`:
 
 ```zig
 var engine = AnalysisEngine.initWithSource(allocator, &cfg, &source);
@@ -1735,18 +1552,9 @@ try engine.run();
 std.debug.print("Inlined {d} calls\n", .{engine.getInlinedCallCount()});
 ```
 
-### External Calls
+### External calls
 
-Calls that cannot be inlined are treated as **external calls** with unknown effects:
-
-- **Unresolvable calls**: Method calls, indirect calls, calls to functions not in the current source
-- **Depth-limited calls**: Calls that would exceed the inline depth limit
-- **Built-in calls**: Calls to `@import`, `@compileError`, etc.
-
-For external calls, the engine conservatively assumes:
-- The call may modify any mutable state
-- The return value is `unknown`
-- Error behavior is unknown (for error-returning functions)
+Calls that cannot be inlined are treated as **external calls** with unknown effects (method calls, indirect calls, depth-limited calls, built-ins). The engine conservatively assumes they may modify any mutable state, return `unknown`, and have unknown error behavior.
 
 ### Example
 
@@ -1772,17 +1580,15 @@ try engine.run();
 
 ### Limitations
 
-Current inlining limitations:
+- Simple calls only: direct function calls with identifier callees
+- No recursion handling: limited by inline depth
+- Single-file only: cross-file calls are external
 
-- **Simple calls only**: Only direct function calls with identifier callees are supported
-- **No recursion handling**: Recursive calls are limited by inline depth
-- **Single-file only**: Cross-file calls are treated as external
+## Function summaries
 
-## Function Summaries
+The engine supports function summaries to avoid re-analyzing the same function body at each call site.
 
-The analysis engine supports function summaries to avoid re-analyzing the same function body at each call site. Summaries capture the essential effects of a function call, enabling efficient interprocedural analysis.
-
-### Summary Contents
+### Summary contents
 
 A `FunctionSummary` stores:
 
@@ -1806,9 +1612,9 @@ pub const FunctionSummary = struct {
 };
 ```
 
-### Summary Cache
+### Summary cache
 
-The `SummaryCache` stores computed summaries keyed by function AST node index:
+The `SummaryCache` stores summaries keyed by function AST node index:
 
 ```zig
 var cache = SummaryCache.init(allocator);
@@ -1827,15 +1633,9 @@ std.debug.print("Hits: {d}, Misses: {d}, Count: {d}\n",
     .{stats.hits, stats.misses, stats.count});
 ```
 
-### Summary Application
+### Summary application
 
-When processing a function call, the engine:
-
-1. **Checks the cache** for an existing summary
-2. **Computes a summary** if not cached (analyzes the function's CFG)
-3. **Checks applicability** against the current state's preconditions
-4. **Applies the summary** by updating the state with postconditions
-5. **Falls back to inlining** if no applicable summary is found
+When processing a function call, the engine: checks the cache, computes a summary if not cached, checks applicability, applies the summary, or falls back to inlining.
 
 ```zig
 // The engine automatically uses summaries when available
@@ -1853,19 +1653,9 @@ std.debug.print("Cache hits: {d}, misses: {d}\n",
     .{cache_stats.hits, cache_stats.misses});
 ```
 
-### Summary Generation
+### Summary generation
 
-Summaries are automatically generated by analyzing the function's CFG. The current implementation:
-
-1. **Scans CFG nodes** to detect error-returning constructs (`try_expr`)
-2. **Checks CFG edges** for error paths (`try_error` edges)
-3. **Identifies pure functions** (no calls, only computation)
-4. **Sets conservative defaults** for unknown behavior
-
-Future enhancements will add:
-- Parameter-dependent postconditions
-- More precise return value tracking
-- Interprocedural side-effect analysis
+Summaries are generated by analyzing the function's CFG: scanning nodes for error-returning constructs, checking edges for error paths, identifying pure functions, and setting conservative defaults.
 
 ### Configuration
 
@@ -1879,13 +1669,13 @@ engine.setUseSummaries(false);
 engine.setMaxInlineDepth(5);
 ```
 
-## Build Metadata Integration
+## Build metadata integration
 
-The analyzer integrates build metadata and target configuration into the analysis pipeline, allowing rules and checkers to access platform-specific information.
+The analyzer integrates build metadata and target configuration, allowing rules and checkers to access platform-specific information.
 
-### Build Metadata Types
+### Build metadata types
 
-The `build_metadata.zig` module provides types for representing build configuration:
+The `build_metadata.zig` module provides types for build configuration:
 
 ```zig
 pub const TargetArch = enum {
@@ -1919,33 +1709,20 @@ pub const BuildMetadata = struct {
 };
 ```
 
-### CLI Integration
+### CLI integration
 
-The `--target` flag allows specifying a target triple:
+The `--target` flag specifies a target triple:
 
 ```bash
 zwanzig --target x86_64-linux-gnu src/
 zwanzig --target aarch64-macos src/
 ```
 
-The target triple is parsed and converted to a `BuildMetadata` struct that is propagated through the analyzer.
+The target triple is parsed into `BuildMetadata` and propagated through the analyzer. Other CLI flags (`--do`/`--skip`, `--config`, `--format`, `--max-steps`, etc.) configure the analyzer and engine.
 
-Other CLI flags feed into analyzer configuration and execution:
+### Analysis engine integration
 
-- `--do` / `--skip`: Build a `RuleFilter` for rule and checker names
-- `--config`: Load `.zwanzig.json` (or a custom path) and merge with CLI overrides
-- `--format`: Select `Analyzer.OutputFormat` (`text`, `json`, `sarif`)
-- `--max-steps`, `--max-states-per-point`, `--use-widening`: Configure `AnalysisLimits`
-- `--threads`: Control the file-level thread pool for parallel analysis
-- `--cache`: Enable incremental caching
-
-`use_widening` defaults to true when neither CLI nor config overrides it; set it to `false` in the config file to disable widening.
-
-When no config file is present and no `--do`/`--skip` flags are used, the analyzer applies a default blocklist for `sentinel-alloc`.
-
-### Analysis Engine Integration
-
-Build metadata is stored in both the `Analyzer` and `AnalysisEngine`, and is propagated to `ProgramState`:
+Build metadata is stored in `Analyzer`, `AnalysisEngine`, and propagated to `ProgramState`:
 
 ```zig
 // In Analyzer
@@ -1970,9 +1747,9 @@ pub const ProgramState = struct {
 };
 ```
 
-### Accessing Build Metadata
+### Accessing build metadata
 
-Rules and checkers can access build metadata from the `ProgramState`:
+Rules and checkers access build metadata from `ProgramState`:
 
 ```zig
 pub fn check(state: *const ProgramState) void {
@@ -1987,18 +1764,13 @@ pub fn check(state: *const ProgramState) void {
 }
 ```
 
-### Use Cases
+### Use cases
 
-Build metadata enables target-specific analysis:
+Build metadata enables target-specific analysis: platform-specific APIs, size optimization, freestanding checks, ABI compatibility.
 
-1. **Platform-specific APIs**: Detect use of platform-specific APIs on incompatible targets
-2. **Size optimization**: Different rules for `.release_small` builds
-3. **Freestanding checks**: Enforce restrictions for embedded/kernel code
-4. **ABI compatibility**: Detect ABI-incompatible patterns
+### Native target detection
 
-### Native Target Detection
-
-When no `--target` is specified, the analyzer uses native target information from `@import("builtin").target`:
+When no `--target` is specified, the analyzer uses native target from `@import("builtin").target`:
 
 ```zig
 pub fn fromNative() BuildMetadata {
@@ -2012,20 +1784,20 @@ pub fn fromNative() BuildMetadata {
 }
 ```
 
-## Incremental Cache
+## Incremental cache
 
-The analyzer supports incremental caching to track analysis metadata across runs. The current implementation stores minimal metadata (e.g., whether type info was loaded). CFG caching is planned but not yet wired into the analyzer, so CFGs are still recomputed on each run.
+The analyzer supports incremental caching to track analysis metadata across runs. The current implementation stores minimal metadata (e.g., whether type info was loaded). CFG caching is planned but not yet wired in.
 
-### Cache Architecture
+### Cache architecture
 
-The cache system consists of two main components:
+The cache system has two components:
 
-1. **Cache** (`src/cache.zig`): Low-level persistent storage
-2. **CachedArtifacts** (`src/cached_artifacts.zig`): Serialization of intermediate artifacts
+1. `Cache` (`src/cache.zig`): Low-level persistent storage
+2. `CachedArtifacts` (`src/cached_artifacts.zig`): Serialization of intermediate artifacts
 
-### Cache Key Components
+### Cache key components
 
-Cache keys (`CacheKey`) are computed from multiple sources to ensure proper invalidation:
+Cache keys (`CacheKey`) are computed from multiple sources:
 
 ```zig
 pub const CacheKey = struct {
@@ -2036,24 +1808,11 @@ pub const CacheKey = struct {
 };
 ```
 
-**Invalidation triggers:**
-- File content changes → `file_hash` changes
-- Target platform changes (`--target` flag) → `target_hash` changes
-- Zwanzig version update → `version_hash` changes
-- Rule configuration changes (`--do`/`--skip` flags) → `config_hash` changes
+**Invalidation triggers:** file content changes, target platform changes, version updates, rule configuration changes.
 
-### Cache Behavior
+### Cache behavior
 
-**Key principle:** The cache never skips analysis. It currently stores minimal metadata and is structured to hold CFGs in the future.
-
-When analyzing a file:
-1. Compute cache key from file content, target, version, and enabled rules
-2. Check if cached artifacts exist for this key
-3. If cache hit: load cached artifacts (currently metadata only)
-4. **Always run analysis** - diagnostics are produced on every run
-5. Store artifacts back to cache (currently metadata only)
-
-This ensures diagnostics are always reported regardless of cache state.
+**Key principle:** The cache never skips analysis. Diagnostics are always produced on every run. Cache currently stores minimal metadata.
 
 ```zig
 // Cache hit still produces diagnostics
@@ -2071,14 +1830,9 @@ const second_diag_count = analyzer.diagnostics.items.len;
 // first_diag_count == second_diag_count
 ```
 
-### Cached Artifacts
+### Cached artifacts
 
-The `CachedArtifacts` struct stores:
-
-- **CFGs per function**: Control-flow graphs keyed by function AST node index
-- **Type info availability**: Whether ZIR/type info was available during caching
-
-At the moment, the analyzer only populates the `had_type_info` field; CFG serialization is in place but not yet emitted by the analysis pipeline.
+The `CachedArtifacts` struct stores CFGs per function and type info availability. Currently only `had_type_info` is populated; CFG serialization is in place but not yet emitted.
 
 ```zig
 pub const CachedArtifacts = struct {
@@ -2088,16 +1842,11 @@ pub const CachedArtifacts = struct {
 };
 ```
 
-### Serialization Format
+### Serialization format
 
-Cached artifacts use a binary format with:
-- Magic bytes: `ZWCA` (Zwanzig Cached Artifacts)
-- Format version: Incremented when serialization format changes
-- Payload: Serialized CFGs with nodes, edges, and metadata
+Binary format with magic bytes (`ZWCA`), format version, and payload. Version changes invalidate old cache entries.
 
-The format version ensures old cache entries are automatically invalidated when the format changes.
-
-### CLI Usage
+### CLI usage
 
 Enable caching with `--cache`:
 
@@ -2107,26 +1856,13 @@ zwanzig --cache src/
 
 Cache files are stored in `.zwanzig-cache/` in the current directory.
 
-### Cache Directory Structure
+### Cache directory structure
 
-```
-.zwanzig-cache/
-├── <hash1>.cache    # Cached artifacts for file 1
-├── <hash2>.cache    # Cached artifacts for file 2
-└── ...
-```
+Cache files are stored in `.zwanzig-cache/` with hash-based filenames. Each file contains a header (version, key hashes, timestamp, data length) and body (serialized `CachedArtifacts`).
 
-Each cache file contains:
-- Header: version, key hashes, timestamp, data length
-- Body: serialized `CachedArtifacts`
+## Variable identification (VarId)
 
-## Variable Identification (VarId)
-
-The analysis engine uses a `VarId` type for identifying variables throughout the analysis. This is an opaque identifier that maps to AST node indices.
-
-### VarId Mapping
-
-Variables are identified by their AST node index, providing a simple and unique identifier within a module:
+The analysis engine uses a `VarId` type for identifying variables. Variables are identified by their AST node index:
 
 ```zig
 // In src/ids.zig
@@ -2141,13 +1877,9 @@ pub fn varIndex(id: VarId) u32 {
 }
 ```
 
-**Benefits of AST-based identification:**
-- Unique within a compilation unit
-- Direct mapping back to source locations for diagnostics
-- No separate symbol table required
-- Works with nested scopes (inner declarations get different AST nodes)
+Benefits: unique within a compilation unit, direct mapping to source locations, no separate symbol table, works with nested scopes.
 
-### Environment Bindings
+### Environment bindings
 
 The `Environment` maps `VarId` to `AbstractValue`:
 
@@ -2159,21 +1891,4 @@ pub const Environment = struct {
 };
 ```
 
-When a variable declaration is processed:
-1. Extract the AST node index for the declaration
-2. Create a `VarId` from the AST node
-3. Bind the variable to an initial abstract value (typically `unknown`)
-
-When a variable is used:
-1. Look up the AST node of the identifier
-2. Query the environment for the abstract value
-3. Use the value in transfer functions or constraint checks
-
-## Future Directions
-
-The current implementation provides a solid foundation. Potential future enhancements include:
-
-- **Richer Abstract Domains** - Symbolic values, arithmetic propagation, slice length tracking
-- **Cross-File Analysis** - Module discovery and interprocedural analysis across compilation units
-- **Constraint Solver Upgrade** - Modular solver backend for more precise path pruning
-- **Expanded Checker Suite** - Resource leaks, double-free detection, out-of-bounds access
+When processing a declaration: extract AST node index, create `VarId`, bind to initial abstract value (`unknown`). When using a variable: look up AST node, query environment, use in transfer functions or constraint checks.

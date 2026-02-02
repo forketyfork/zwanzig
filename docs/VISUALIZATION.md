@@ -1,8 +1,8 @@
-# Visualization Guide
+# Visualization
 
-Zwanzig provides several visualization tools for debugging the static analysis engine. All visualizations output DOT files compatible with [Graphviz](https://graphviz.org/).
+Zwanzig provides visualization tools for debugging the static analysis engine. All visualizations output DOT files compatible with [Graphviz](https://graphviz.org/).
 
-## Viewing DOT Files
+## Viewing DOT files
 
 ```bash
 # Convert DOT to PNG with Graphviz
@@ -13,22 +13,22 @@ dot -Tpng ./output/myfile_functionName.dot -o output.png
 # - https://viz-js.com
 ```
 
-## CFG Visualization
+## CFG visualization
 
 **Flag:** `--dump-cfg <dir>`
 
-Dumps Control Flow Graphs showing the structure of each function.
+Dumps control flow graphs showing the structure of each function.
 
 ```bash
 zwanzig --dump-cfg ./cfg_output src/myfile.zig
 ```
 
-### Node Styling
-- **Entry nodes** (`fn_entry`): Green background
-- **Exit nodes** (`fn_exit`): Red background
-- **Branch/loop headers**: Diamond shape
+### Node styling
+- Entry nodes (`fn_entry`): Green background
+- Exit nodes (`fn_exit`): Red background
+- Branch/loop headers: Diamond shape
 
-### Edge Colors
+### Edge colors
 | Color | Edge Types |
 |-------|-----------|
 | Green | `branch_true`, `try_success`, `catch_success` |
@@ -37,41 +37,30 @@ zwanzig --dump-cfg ./cfg_output src/myfile.zig
 | Orange | `loop_exit` |
 | Purple dashed | `defer_edge` |
 
-### Programmatic Access
-The `Cfg` struct provides `dumpDot(allocator)` for quick stderr output during development.
+### Programmatic access
+The `Cfg` struct provides `dumpDot(allocator)` for quick stderr output.
 
-## Lattice Flow Visualization
+## Lattice flow visualization
 
-Engine-based checkers build exploded graphs showing all reachable (CFG node, state) pairs during abstract interpretation. Three visualization options are available.
+Engine-based checkers build exploded graphs showing all reachable (CFG node, state) pairs. Three visualization options are available.
 
-> **Note:** These visualizations only show data from engine-based checkers (`store-violations-engine`, `empty-catch-engine`, `swallowed-error`, `optional-unwrap`). Findings from AST-based rules or checkers (like `unused-decl` or `unreachable-code-engine`) won't appear in path traces.
+> These visualizations only show data from engine-based checkers (`store-violations-engine`, `empty-catch-engine`, `swallowed-error`, `optional-unwrap`). AST-based rules won't appear in path traces.
 
-### Exploded Graph
+### Exploded graph
 
 **Flag:** `--dump-exploded-graph <dir>`
 
-Shows the full state space explored during analysis. Each node represents a unique (CFG location, abstract state) pair.
+Shows the full state space explored. Each node represents a unique (CFG location, abstract state) pair.
 
 ```bash
 zwanzig --dump-exploded-graph ./eg_output src/myfile.zig
 ```
 
-**Node information:**
-- CFG index and IR tag
-- Pre/post state indicator
-- State hash (for identifying unique states)
-- Environment size (number of tracked variables)
-- Constraint count
+**Node information:** CFG index and IR tag, pre/post state indicator, state hash, environment size, constraint count.
 
-**Node colors:**
-- Green: Entry states
-- Red: Exit states
-- Yellow: States with violations
+**Node colors:** Green (entry states), Red (exit states), Yellow (states with violations).
 
-**Use cases:**
-- Understanding state explosion
-- Debugging convergence issues
-- Visualizing path sensitivity
+**Use cases:** Understanding state explosion, debugging convergence issues, visualizing path sensitivity.
 
 #### Example
 
@@ -95,25 +84,17 @@ Generated exploded graph:
 
 **Flag:** `--dump-annotated-cfg <dir>`
 
-Overlays state information onto the CFG structure. Shows how many unique states reached each CFG node.
+Overlays state information onto the CFG structure, showing how many unique states reached each CFG node.
 
 ```bash
 zwanzig --dump-annotated-cfg ./acfg_output src/myfile.zig
 ```
 
-**Node information:**
-- CFG index and IR tag
-- Count of unique states that reached this node
+**Node information:** CFG index and IR tag, count of unique states that reached this node.
 
-**Node colors:**
-- Green: Entry node
-- Red: Exit node
-- Yellow: Nodes where a violation was detected
+**Node colors:** Green (entry), Red (exit), Yellow (violation detected).
 
-**Use cases:**
-- Identifying hot spots with many states
-- Quick overview without full state explosion detail
-- Locating violation points in the CFG
+**Use cases:** Identifying hot spots with many states, quick overview without full state explosion detail, locating violation points.
 
 #### Example
 
@@ -133,36 +114,23 @@ Generated annotated CFG:
 
 ![Annotated CFG Example](images/annotated_cfg_example.png)
 
-### Path Traces
+### Path traces
 
 **Flag:** `--dump-path-trace <dir>`
 
-Shows execution paths from function entry to each detected violation. Useful for understanding how a bug is reached.
+Shows execution paths from function entry to each detected violation.
 
 ```bash
 zwanzig --dump-path-trace ./traces src/myfile.zig
 ```
 
-**Output structure:**
-- One subgraph per detected violation
-- Each subgraph labeled with violation type (e.g., `use_after_free`, `double_free`)
+**Output structure:** One subgraph per violation, labeled with violation type.
 
-**Node information:**
-- Step number in the path
-- CFG index and IR tag
-- Pre/post state indicator
-- Environment size
-- Error state (`normal`, `error_active`, `error_handled`)
+**Node information:** Step number, CFG index and IR tag, pre/post state, environment size, error state.
 
-**Node colors:**
-- Green: Entry point (step 0)
-- Red: Violation location
-- White: Intermediate steps
+**Node colors:** Green (entry point), Red (violation location), White (intermediate steps).
 
-**Use cases:**
-- Understanding root cause of violations
-- Debugging false positives
-- Tracing error propagation paths
+**Use cases:** Understanding root cause of violations, debugging false positives, tracing error propagation paths.
 
 #### Example
 
@@ -181,7 +149,7 @@ Generated path trace showing the path to the `use_after_free` violation:
 
 ![Path Traces Example](images/path_traces_example.png)
 
-## Output File Naming
+## Output file naming
 
 All visualization files follow the naming convention:
 
@@ -195,9 +163,9 @@ Where `<suffix>` is:
 - Annotated CFG: `annotated` (e.g., `myfile_foo_annotated.dot`)
 - Path traces: `traces` (e.g., `myfile_foo_traces.dot`)
 
-## Combining Visualizations
+## Combining visualizations
 
-You can dump multiple visualizations in a single run:
+Dump multiple visualizations in a single run:
 
 ```bash
 zwanzig \
