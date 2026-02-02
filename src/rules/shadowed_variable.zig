@@ -3,6 +3,7 @@ const Rule = @import("../rule.zig").Rule;
 const Source = @import("../source.zig").Source;
 const Diagnostic = @import("../diagnostic.zig").Diagnostic;
 const RuleError = @import("../rule.zig").RuleError;
+const ast_walk = @import("../ast_walk.zig");
 
 /// Rule that detects variable shadowing.
 ///
@@ -184,151 +185,13 @@ pub const ShadowedVariableRule = struct {
         }
 
         fn scanChildren(self: *ShadowScanner, node: u32) RuleError!void {
-            const tags = self.tree.nodes.items(.tag);
-            const data = self.tree.nodes.items(.data);
-            const tag = tags[node];
+            const child = struct {
+                fn visit(_: *const std.zig.Ast, child_node: u32, scanner: *ShadowScanner) RuleError!void {
+                    try scanner.scanNode(child_node);
+                }
+            };
 
-            switch (tag) {
-                // Binary operations with two node children
-                .equal_equal,
-                .bang_equal,
-                .less_than,
-                .greater_than,
-                .less_or_equal,
-                .greater_or_equal,
-                .assign,
-                .assign_mul,
-                .assign_div,
-                .assign_mod,
-                .assign_add,
-                .assign_sub,
-                .assign_shl,
-                .assign_shl_sat,
-                .assign_shr,
-                .assign_bit_and,
-                .assign_bit_xor,
-                .assign_bit_or,
-                .assign_mul_wrap,
-                .assign_add_wrap,
-                .assign_sub_wrap,
-                .assign_mul_sat,
-                .assign_add_sat,
-                .assign_sub_sat,
-                .merge_error_sets,
-                .mul,
-                .div,
-                .mod,
-                .array_mult,
-                .mul_wrap,
-                .mul_sat,
-                .add,
-                .sub,
-                .array_cat,
-                .add_wrap,
-                .sub_wrap,
-                .add_sat,
-                .sub_sat,
-                .shl,
-                .shl_sat,
-                .shr,
-                .bit_and,
-                .bit_xor,
-                .bit_or,
-                .@"orelse",
-                .bool_and,
-                .bool_or,
-                .error_union,
-                .array_access,
-                .switch_range,
-                => {
-                    const pair = data[node].node_and_node;
-                    try self.scanNode(@intFromEnum(pair[0]));
-                    try self.scanNode(@intFromEnum(pair[1]));
-                },
-
-                // Unary operations
-                .bool_not,
-                .negation,
-                .bit_not,
-                .negation_wrap,
-                .address_of,
-                .@"try",
-                .optional_type,
-                .@"suspend",
-                .@"resume",
-                .@"nosuspend",
-                .@"comptime",
-                .deref,
-                .@"defer",
-                => try self.scanNode(@intFromEnum(data[node].node)),
-
-                .unwrap_optional,
-                .grouped_expression,
-                => try self.scanNode(@intFromEnum(data[node].node_and_token[0])),
-
-                .@"return" => {
-                    if (data[node].opt_node.unwrap()) |ret_node| {
-                        try self.scanNode(@intFromEnum(ret_node));
-                    }
-                },
-
-                .field_access => {
-                    try self.scanNode(@intFromEnum(data[node].node_and_token[0]));
-                },
-
-                .call, .call_comma, .call_one, .call_one_comma => {
-                    var buf: [1]std.zig.Ast.Node.Index = undefined;
-                    const call_info = self.tree.fullCall(&buf, @enumFromInt(node)) orelse return;
-                    try self.scanNode(@intFromEnum(call_info.ast.fn_expr));
-                    for (call_info.ast.params) |param| {
-                        try self.scanNode(@intFromEnum(param));
-                    }
-                },
-
-                .builtin_call, .builtin_call_comma, .builtin_call_two, .builtin_call_two_comma => {
-                    var buf: [2]std.zig.Ast.Node.Index = undefined;
-                    const params = self.tree.builtinCallParams(&buf, @enumFromInt(node)) orelse return;
-                    for (params) |param| {
-                        try self.scanNode(@intFromEnum(param));
-                    }
-                },
-
-                .struct_init, .struct_init_comma, .struct_init_one, .struct_init_one_comma, .struct_init_dot, .struct_init_dot_comma, .struct_init_dot_two, .struct_init_dot_two_comma => {
-                    var buf: [2]std.zig.Ast.Node.Index = undefined;
-                    const struct_init = self.tree.fullStructInit(&buf, @enumFromInt(node)) orelse return;
-                    if (struct_init.ast.type_expr.unwrap()) |type_node| {
-                        try self.scanNode(@intFromEnum(type_node));
-                    }
-                    for (struct_init.ast.fields) |field| {
-                        try self.scanNode(@intFromEnum(field));
-                    }
-                },
-
-                .array_init, .array_init_comma, .array_init_one, .array_init_one_comma, .array_init_dot, .array_init_dot_comma, .array_init_dot_two, .array_init_dot_two_comma => {
-                    var buf: [2]std.zig.Ast.Node.Index = undefined;
-                    const array_init = self.tree.fullArrayInit(&buf, @enumFromInt(node)) orelse return;
-                    if (array_init.ast.type_expr.unwrap()) |type_node| {
-                        try self.scanNode(@intFromEnum(type_node));
-                    }
-                    for (array_init.ast.elements) |elem| {
-                        try self.scanNode(@intFromEnum(elem));
-                    }
-                },
-
-                .slice, .slice_open, .slice_sentinel => {
-                    const slice = self.tree.fullSlice(@enumFromInt(node)) orelse return;
-                    try self.scanNode(@intFromEnum(slice.ast.sliced));
-                    try self.scanNode(@intFromEnum(slice.ast.start));
-                    if (slice.ast.end.unwrap()) |end_node| {
-                        try self.scanNode(@intFromEnum(end_node));
-                    }
-                    if (slice.ast.sentinel.unwrap()) |sentinel_node| {
-                        try self.scanNode(@intFromEnum(sentinel_node));
-                    }
-                },
-
-                else => {},
-            }
+            try ast_walk.walkChildren(ShadowScanner, self.tree, node, self, child.visit);
         }
 
         fn scanFnDecl(self: *ShadowScanner, node: u32) RuleError!void {

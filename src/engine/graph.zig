@@ -286,19 +286,20 @@ pub const ExplodedGraph = struct {
                 } else {
                     // Subsequent visits: widen incoming state with stored state
                     if (self.widening_states.getPtr(widening_key)) |stored_state| {
-                        widened_state = stored_state.widen(state) catch |err| switch (err) {
+                        const ws = stored_state.widen(state) catch |err| switch (err) {
                             error.OutOfMemory => return EngineError.OutOfMemory,
                         };
+                        widened_state = ws;
                         widening_applied = true;
 
                         // Check for convergence: if widened state equals stored state, we've converged
-                        if (widened_state.?.eql(stored_state)) {
+                        if (ws.eql(stored_state)) {
                             converged = true;
                             self.widening_converged += 1;
                         } else {
                             // Update stored state with widened result for next iteration
                             // Clone first, then replace to avoid leaving invalid state on OOM
-                            var new_clone = widened_state.?.clone(self.allocator) catch |err| switch (err) {
+                            var new_clone = ws.clone(self.allocator) catch |err| switch (err) {
                                 error.OutOfMemory => return EngineError.OutOfMemory,
                             };
                             errdefer new_clone.deinit();

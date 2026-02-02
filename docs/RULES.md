@@ -153,6 +153,66 @@ fn readConfig(opt: ?[]const u8) []const u8 {
 }
 ```
 
+#### Guarded patterns recognized
+
+The checker uses flow analysis to recognize patterns where the optional is proven non-null before the unwrap. These safe patterns **do not produce warnings**:
+
+**Null check guard:**
+```zig
+if (opt != null) {
+    const value = opt.?;  // Safe: guarded by null check
+}
+```
+
+**Early return guard:**
+```zig
+if (opt == null) {
+    return null;
+}
+const value = opt.?;  // Safe: null case already returned
+```
+
+**Compound null check:**
+```zig
+if (a == null or b == null) {
+    return null;
+}
+const sum = a.? + b.?;  // Safe: both guarded
+```
+
+**Short-circuit evaluation:**
+```zig
+// Safe: .? only evaluated when opt is non-null
+return opt != null and opt.? == expected;
+return opt == null or opt.? != expected;
+```
+
+**Ternary if expression:**
+```zig
+const value = if (opt != null) opt.? else 0;  // Safe: then branch guarded
+```
+
+**Lazy initialization:**
+```zig
+if (self.cached == null) {
+    self.cached = computeValue();
+}
+return &self.cached.?;  // Safe: initialized above if null
+```
+
+**Payload capture:**
+```zig
+if (opt) |value| {
+    _ = value;  // Safe: payload binding
+}
+```
+
+**Comptime type expressions:**
+```zig
+// Safe: evaluated at compile time, fails as compile error not runtime panic
+const ReturnType = @typeInfo(@TypeOf(func)).@"fn".return_type.?;
+```
+
 ### unreachable-code
 
 Detects code that can never execute after an unconditional terminator (e.g., `return`) or after fully terminating branches (`if`, `switch`, `while`).

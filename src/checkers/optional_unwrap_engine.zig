@@ -158,8 +158,21 @@ pub const OptionalUnwrapEngineChecker = struct {
             // These are intentional - the test will panic if the value is null
             if (isInsideTestAssertion(tree, ast_node, parent_map, &assertion_scope)) continue;
 
+            // Skip unwraps inside comptime type expressions (@typeInfo, @TypeOf, etc.)
+            // These are evaluated at compile time and will produce a compile error, not a runtime panic
+            if (isInsideComptimeTypeExpr(tree, ast_node, parent_map)) continue;
+
             // Get the variable being unwrapped
             const unwrapped_node = @intFromEnum(datas[ast_node].node_and_token[0]);
+
+            // Check if the unwrap is guarded by short-circuit evaluation (and/or operators)
+            // or by a ternary if expression. These are AST-level guards that the CFG
+            // doesn't track because short-circuit evaluation is implicit.
+            if (isGuardedByShortCircuit(tree, ast_node, unwrapped_node, parent_map)) continue;
+
+            // Check if this is a lazy initialization pattern where we initialize
+            // the optional before unwrapping it
+            if (isGuardedByLazyInit(tree, ast_node, unwrapped_node, parent_map)) continue;
 
             // Find the CFG node containing this AST node
             const cfg_node_idx = findCfgNodeForAst(cfg, ast_node, tree);
@@ -217,6 +230,468 @@ pub const OptionalUnwrapEngineChecker = struct {
         const full = tree.fullCall(&buf, @enumFromInt(call_node)) orelse return false;
 
         return assertions.resolveAssertionName(tree, full.ast.fn_expr, scope) != null;
+    }
+
+    /// Check if an unwrap is inside a comptime type expression.
+    /// Type expressions like `@typeInfo(@TypeOf(x)).@"fn".return_type.?` are evaluated
+    /// at compile time, so a failed unwrap produces a compile error, not a runtime panic.
+    fn isInsideComptimeTypeExpr(
+        tree: *const std.zig.Ast,
+        unwrap_node: u32,
+        parent_map: []const u32,
+    ) bool {
+        const tags = tree.nodes.items(.tag);
+        const main_tokens = tree.nodes.items(.main_token);
+        const datas = tree.nodes.items(.data);
+
+        // First check: walk up the structural parent chain for direct containment
+        var node = unwrap_node;
+        var depth: u32 = 0;
+        while (node < parent_map.len and depth < 64) : (depth += 1) {
+            const parent = parent_map[node];
+            if (parent == 0 or parent >= tags.len) break;
+
+            switch (tags[parent]) {
+                .builtin_call, .builtin_call_comma, .builtin_call_two, .builtin_call_two_comma => {
+                    if (isComptimeTypeBuiltin(tree, parent, main_tokens)) {
+                        return true;
+                    }
+                },
+                .fn_decl => {
+                    // Check if the unwrap is in the return type position
+                    const fn_proto_node = @intFromEnum(datas[parent].node_and_node[0]);
+                    if (fn_proto_node < tags.len and isInFnReturnType(tree, fn_proto_node, node)) {
+                        return true;
+                    }
+                },
+                else => {},
+            }
+            node = parent;
+        }
+
+        // Second check: for expressions like `@typeInfo(...).field.?`, walk down the operand
+        // chain from the unwrap to find if the root expression is a comptime type builtin
+        if (unwrap_node >= tags.len) return false;
+        if (tags[unwrap_node] != .unwrap_optional) return false;
+
+        // The operand of unwrap_optional is in data[0]
+        const operand = @intFromEnum(datas[unwrap_node].node_and_token[0]);
+        return exprRootIsComptimeTypeBuiltin(tree, operand, tags, main_tokens, datas);
+    }
+
+    /// Walk down through field accesses to find the root expression and check if it's a comptime type builtin
+    fn exprRootIsComptimeTypeBuiltin(
+        tree: *const std.zig.Ast,
+        node: u32,
+        tags: []const std.zig.Ast.Node.Tag,
+        main_tokens: []const u32,
+        datas: []const std.zig.Ast.Node.Data,
+    ) bool {
+        if (node >= tags.len) return false;
+
+        return switch (tags[node]) {
+            .field_access => {
+                // Field access: walk down to the object being accessed
+                const obj = @intFromEnum(datas[node].node_and_token[0]);
+                return exprRootIsComptimeTypeBuiltin(tree, obj, tags, main_tokens, datas);
+            },
+            .builtin_call, .builtin_call_comma, .builtin_call_two, .builtin_call_two_comma => {
+                return isComptimeTypeBuiltin(tree, node, main_tokens);
+            },
+            else => false,
+        };
+    }
+
+    /// Check if a builtin call is a comptime type-related builtin
+    fn isComptimeTypeBuiltin(tree: *const std.zig.Ast, node: u32, main_tokens: []const u32) bool {
+        if (node >= main_tokens.len) return false;
+        const token = main_tokens[node];
+        const builtin_name = tree.tokenSlice(token);
+        return std.mem.eql(u8, builtin_name, "@typeInfo") or
+            std.mem.eql(u8, builtin_name, "@TypeOf") or
+            std.mem.eql(u8, builtin_name, "@Type") or
+            std.mem.eql(u8, builtin_name, "@field") or
+            std.mem.eql(u8, builtin_name, "@compileError");
+    }
+
+    /// Check if a node is in the return type position of a function prototype
+    fn isInFnReturnType(tree: *const std.zig.Ast, fn_proto_node: u32, target_node: u32) bool {
+        const tags = tree.nodes.items(.tag);
+        if (fn_proto_node >= tags.len) return false;
+
+        // Get the full function prototype
+        var buf: [1]std.zig.Ast.Node.Index = undefined;
+        const fn_proto = tree.fullFnProto(&buf, @enumFromInt(fn_proto_node)) orelse return false;
+
+        // Check if target_node is in the return type expression
+        const return_type = @intFromEnum(fn_proto.ast.return_type);
+        if (return_type == 0) return false;
+
+        return isInSubtree(tree, return_type, target_node) or return_type == target_node;
+    }
+
+    /// Check if an unwrap follows a lazy initialization pattern.
+    /// Pattern: `if (x == null) { x = init(); } ... x.?`
+    /// After the if block, x is guaranteed to be non-null.
+    fn isGuardedByLazyInit(
+        tree: *const std.zig.Ast,
+        unwrap_node: u32,
+        unwrapped_var: u32,
+        parent_map: []const u32,
+    ) bool {
+        const tags = tree.nodes.items(.tag);
+        const datas = tree.nodes.items(.data);
+        const main_tokens = tree.nodes.items(.main_token);
+        const token_starts = tree.tokens.items(.start);
+
+        // Find the containing block
+        var node = unwrap_node;
+        var block_node: ?u32 = null;
+        var depth: u32 = 0;
+
+        while (node < parent_map.len and depth < 64) : (depth += 1) {
+            const parent = parent_map[node];
+            if (parent == 0 or parent >= tags.len) break;
+
+            if (tags[parent] == .block or tags[parent] == .block_two or
+                tags[parent] == .block_two_semicolon)
+            {
+                block_node = parent;
+                break;
+            }
+            node = parent;
+        }
+
+        const block = block_node orelse return false;
+
+        // Scan the block for lazy init pattern
+        return scanBlockForLazyInit(tree, block, unwrap_node, unwrapped_var, tags, datas, main_tokens, token_starts);
+    }
+
+    /// Scan a block for lazy initialization pattern
+    fn scanBlockForLazyInit(
+        tree: *const std.zig.Ast,
+        block: u32,
+        unwrap_node: u32,
+        unwrapped_var: u32,
+        tags: []const std.zig.Ast.Node.Tag,
+        datas: []const std.zig.Ast.Node.Data,
+        main_tokens: []const u32,
+        token_starts: []const u32,
+    ) bool {
+        if (block >= tags.len) return false;
+
+        // Get position of the unwrap node
+        if (unwrap_node >= main_tokens.len) return false;
+        const unwrap_pos = token_starts[main_tokens[unwrap_node]];
+
+        // Get statements based on block type
+        var stmts_buf: [16]u32 = undefined;
+        var stmt_count: usize = 0;
+
+        switch (tags[block]) {
+            .block, .block_semicolon => {
+                const extra = datas[block].extra_range;
+                const start: usize = @intFromEnum(extra.start);
+                const end: usize = @intFromEnum(extra.end);
+                const len = @min(end - start, stmts_buf.len);
+                for (0..len) |i| {
+                    stmts_buf[i] = tree.extra_data[start + i];
+                    stmt_count += 1;
+                }
+            },
+            .block_two, .block_two_semicolon => {
+                const opt_nodes = datas[block].opt_node_and_opt_node;
+                if (opt_nodes[0].unwrap()) |n| {
+                    stmts_buf[stmt_count] = @intFromEnum(n);
+                    stmt_count += 1;
+                }
+                if (opt_nodes[1].unwrap()) |n| {
+                    stmts_buf[stmt_count] = @intFromEnum(n);
+                    stmt_count += 1;
+                }
+            },
+            else => return false,
+        }
+
+        // Look for an if statement before the unwrap that initializes the variable
+        for (stmts_buf[0..stmt_count]) |stmt| {
+            if (stmt >= tags.len) continue;
+            if (stmt >= main_tokens.len) continue;
+
+            const stmt_pos = token_starts[main_tokens[stmt]];
+
+            // Only look at statements before the unwrap
+            if (stmt_pos >= unwrap_pos) continue;
+
+            // Check if this is an if statement
+            if (tags[stmt] != .@"if" and tags[stmt] != .if_simple) continue;
+
+            // Check if the condition is `var == null`
+            const full = tree.fullIf(@enumFromInt(stmt)) orelse continue;
+            const cond = @intFromEnum(full.ast.cond_expr);
+
+            if (!checksNull(tree, cond, unwrapped_var)) continue;
+
+            // Check if the then branch assigns to the variable
+            const then_expr = @intFromEnum(full.ast.then_expr);
+            if (assignsToVariable(tree, then_expr, unwrapped_var, tags, datas)) {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    /// Check if an expression or block assigns to a specific variable
+    fn assignsToVariable(
+        tree: *const std.zig.Ast,
+        node: u32,
+        var_node: u32,
+        tags: []const std.zig.Ast.Node.Tag,
+        datas: []const std.zig.Ast.Node.Data,
+    ) bool {
+        if (node >= tags.len) return false;
+
+        switch (tags[node]) {
+            .assign => {
+                const lhs = @intFromEnum(datas[node].node_and_node[0]);
+                return sameVariable(tree, lhs, var_node);
+            },
+            .block, .block_semicolon => {
+                const extra = datas[node].extra_range;
+                const start: usize = @intFromEnum(extra.start);
+                const end: usize = @intFromEnum(extra.end);
+                for (start..end) |i| {
+                    const stmt = tree.extra_data[i];
+                    if (assignsToVariable(tree, stmt, var_node, tags, datas)) {
+                        return true;
+                    }
+                }
+                return false;
+            },
+            .block_two, .block_two_semicolon => {
+                const opt_nodes = datas[node].opt_node_and_opt_node;
+                if (opt_nodes[0].unwrap()) |n| {
+                    if (assignsToVariable(tree, @intFromEnum(n), var_node, tags, datas)) {
+                        return true;
+                    }
+                }
+                if (opt_nodes[1].unwrap()) |n| {
+                    if (assignsToVariable(tree, @intFromEnum(n), var_node, tags, datas)) {
+                        return true;
+                    }
+                }
+                return false;
+            },
+            else => return false,
+        }
+    }
+
+    /// Check if an unwrap is guarded by short-circuit evaluation or ternary if expression.
+    ///
+    /// Short-circuit patterns:
+    /// - `a != null and a.?` - the RHS is only evaluated when a is non-null
+    /// - `a == null or a.?` - the RHS is only evaluated when a is non-null
+    ///
+    /// Ternary if patterns:
+    /// - `if (a != null) a.? else ...` - then branch is only taken when a is non-null
+    /// - `if (a == null) ... else a.?` - else branch is only taken when a is non-null
+    fn isGuardedByShortCircuit(
+        tree: *const std.zig.Ast,
+        unwrap_node: u32,
+        unwrapped_var: u32,
+        parent_map: []const u32,
+    ) bool {
+        const tags = tree.nodes.items(.tag);
+        const datas = tree.nodes.items(.data);
+        var node = unwrap_node;
+        var depth: u32 = 0;
+
+        while (node < parent_map.len and depth < 64) : (depth += 1) {
+            const parent = parent_map[node];
+            if (parent == 0 or parent >= tags.len) break;
+
+            switch (tags[parent]) {
+                .bool_and => {
+                    // Pattern: `guard and expr_with_unwrap`
+                    // If unwrap is in the RHS, check if LHS guards it
+                    const lhs = @intFromEnum(datas[parent].node_and_node[0]);
+                    const rhs = @intFromEnum(datas[parent].node_and_node[1]);
+                    if (isInSubtree(tree, rhs, node) and checksNotNull(tree, lhs, unwrapped_var)) {
+                        return true;
+                    }
+                    // For chained `and`: `a != null and b != null and a.? + b.?`
+                    // Continue walking up to find more guards
+                },
+                .bool_or => {
+                    // Pattern: `guard or expr_with_unwrap`
+                    // If unwrap is in the RHS, check if LHS guards it
+                    // For `a == null or a.?`, if LHS is true we short-circuit, so RHS only runs when a != null
+                    const lhs = @intFromEnum(datas[parent].node_and_node[0]);
+                    const rhs = @intFromEnum(datas[parent].node_and_node[1]);
+                    if (isInSubtree(tree, rhs, node) and checksNull(tree, lhs, unwrapped_var)) {
+                        return true;
+                    }
+                },
+                .@"if" => {
+                    // Ternary if expression: `if (cond) then else otherwise`
+                    // Check if the unwrap is in a guarded branch
+                    const full = tree.fullIf(@enumFromInt(parent)) orelse continue;
+                    const cond = @intFromEnum(full.ast.cond_expr);
+                    const then_expr = @intFromEnum(full.ast.then_expr);
+
+                    // If unwrap is in then branch and condition is `var != null`
+                    if (isInSubtree(tree, then_expr, node) and checksNotNull(tree, cond, unwrapped_var)) {
+                        return true;
+                    }
+                    // If unwrap is in else branch and condition is `var == null`
+                    if (full.ast.else_expr.unwrap()) |else_idx| {
+                        const else_node = @intFromEnum(else_idx);
+                        if (isInSubtree(tree, else_node, node) and checksNull(tree, cond, unwrapped_var)) {
+                            return true;
+                        }
+                    }
+                },
+                else => {},
+            }
+            node = parent;
+        }
+
+        return false;
+    }
+
+    /// Check if target_node is within the subtree rooted at root_node
+    fn isInSubtree(tree: *const std.zig.Ast, root_node: u32, target_node: u32) bool {
+        if (root_node == target_node) return true;
+
+        const tags = tree.nodes.items(.tag);
+        const datas = tree.nodes.items(.data);
+        if (root_node >= tags.len) return false;
+
+        // Simple recursive check - for binary operators and common nodes
+        const tag = tags[root_node];
+        switch (tag) {
+            .bool_and, .bool_or, .bang_equal, .equal_equal, .add, .sub, .mul, .div => {
+                const lhs = @intFromEnum(datas[root_node].node_and_node[0]);
+                const rhs = @intFromEnum(datas[root_node].node_and_node[1]);
+                return isInSubtree(tree, lhs, target_node) or isInSubtree(tree, rhs, target_node);
+            },
+            .unwrap_optional => {
+                const inner = @intFromEnum(datas[root_node].node_and_token[0]);
+                return isInSubtree(tree, inner, target_node);
+            },
+            .field_access => {
+                const obj = @intFromEnum(datas[root_node].node_and_token[0]);
+                return isInSubtree(tree, obj, target_node);
+            },
+            .grouped_expression => {
+                const inner = @intFromEnum(datas[root_node].node_and_node[0]);
+                return isInSubtree(tree, inner, target_node);
+            },
+            else => return false,
+        }
+    }
+
+    /// Check if cond_node is a null check (== null) for the given variable
+    fn checksNull(tree: *const std.zig.Ast, cond_node: u32, var_node: u32) bool {
+        return checkNullComparison(tree, cond_node, var_node, true);
+    }
+
+    /// Check if cond_node is a non-null check (!= null) for the given variable
+    fn checksNotNull(tree: *const std.zig.Ast, cond_node: u32, var_node: u32) bool {
+        return checkNullComparison(tree, cond_node, var_node, false);
+    }
+
+    /// Check if cond_node compares var_node to null
+    /// is_null_check: true for `== null`, false for `!= null`
+    fn checkNullComparison(tree: *const std.zig.Ast, cond_node: u32, var_node: u32, is_null_check: bool) bool {
+        const tags = tree.nodes.items(.tag);
+        const datas = tree.nodes.items(.data);
+
+        if (cond_node >= tags.len) return false;
+
+        const tag = tags[cond_node];
+
+        // Handle chained conditions: `a != null and b != null`
+        // For checking if var_node is guarded, we need to find it in any part of the chain
+        if (tag == .bool_and and !is_null_check) {
+            // For `!= null` checks, both sides of `and` contribute guards
+            const lhs = @intFromEnum(datas[cond_node].node_and_node[0]);
+            const rhs = @intFromEnum(datas[cond_node].node_and_node[1]);
+            return checkNullComparison(tree, lhs, var_node, false) or
+                checkNullComparison(tree, rhs, var_node, false);
+        }
+
+        if (tag == .bool_or and is_null_check) {
+            // For `== null` checks, both sides of `or` contribute guards
+            const lhs = @intFromEnum(datas[cond_node].node_and_node[0]);
+            const rhs = @intFromEnum(datas[cond_node].node_and_node[1]);
+            return checkNullComparison(tree, lhs, var_node, true) or
+                checkNullComparison(tree, rhs, var_node, true);
+        }
+
+        // Direct comparison check
+        if ((tag == .equal_equal and is_null_check) or (tag == .bang_equal and !is_null_check)) {
+            const lhs = @intFromEnum(datas[cond_node].node_and_node[0]);
+            const rhs = @intFromEnum(datas[cond_node].node_and_node[1]);
+
+            const lhs_is_null = isNullIdentifier(tree, lhs);
+            const rhs_is_null = isNullIdentifier(tree, rhs);
+
+            // Check if one side is null and the other matches our variable
+            if (lhs_is_null and sameVariable(tree, rhs, var_node)) return true;
+            if (rhs_is_null and sameVariable(tree, lhs, var_node)) return true;
+        }
+
+        return false;
+    }
+
+    /// Check if a node is the `null` identifier
+    fn isNullIdentifier(tree: *const std.zig.Ast, node: u32) bool {
+        const tags = tree.nodes.items(.tag);
+        const main_tokens = tree.nodes.items(.main_token);
+
+        if (node >= tags.len) return false;
+        if (tags[node] != .identifier) return false;
+
+        const token = main_tokens[node];
+        const token_slice = tree.tokenSlice(token);
+        return std.mem.eql(u8, token_slice, "null");
+    }
+
+    /// Check if two nodes refer to the same variable
+    fn sameVariable(tree: *const std.zig.Ast, node1: u32, node2: u32) bool {
+        const tags = tree.nodes.items(.tag);
+        const main_tokens = tree.nodes.items(.main_token);
+        const datas = tree.nodes.items(.data);
+
+        if (node1 >= tags.len or node2 >= tags.len) return false;
+
+        // Both should be identifiers or field accesses
+        const tag1 = tags[node1];
+        const tag2 = tags[node2];
+
+        if (tag1 == .identifier and tag2 == .identifier) {
+            const token1 = main_tokens[node1];
+            const token2 = main_tokens[node2];
+            const slice1 = tree.tokenSlice(token1);
+            const slice2 = tree.tokenSlice(token2);
+            return std.mem.eql(u8, slice1, slice2);
+        }
+
+        // Handle field access: a.b == a.b
+        if (tag1 == .field_access and tag2 == .field_access) {
+            const obj1 = @intFromEnum(datas[node1].node_and_token[0]);
+            const obj2 = @intFromEnum(datas[node2].node_and_token[0]);
+            const token1 = datas[node1].node_and_token[1];
+            const token2 = datas[node2].node_and_token[1];
+            const slice1 = tree.tokenSlice(token1);
+            const slice2 = tree.tokenSlice(token2);
+            return std.mem.eql(u8, slice1, slice2) and sameVariable(tree, obj1, obj2);
+        }
+
+        return false;
     }
 
     fn collectUnwrapsInSubtree(

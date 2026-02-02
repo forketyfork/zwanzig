@@ -257,10 +257,9 @@ const MergedConfig = struct {
     resource_models: []const config.ResourceModel = &.{},
 };
 fn defaultRuleFilter(allocator: std.mem.Allocator) !RuleFilter {
-    var rule_names = try allocator.alloc([]const u8, 2);
+    var rule_names = try allocator.alloc([]const u8, 1);
     errdefer allocator.free(rule_names);
     rule_names[0] = try allocator.dupe(u8, "sentinel-alloc");
-    rule_names[1] = try allocator.dupe(u8, "optional-unwrap");
     return .{ .blocklist = rule_names };
 }
 
@@ -1098,9 +1097,8 @@ test "mergeConfig: no config file and no CLI filter" {
 
     switch (result.rule_filter) {
         .blocklist => |list| {
-            try std.testing.expectEqual(@as(usize, 2), list.len);
+            try std.testing.expectEqual(@as(usize, 1), list.len);
             try std.testing.expectEqualStrings("sentinel-alloc", list[0]);
-            try std.testing.expectEqualStrings("optional-unwrap", list[1]);
         },
         else => return error.UnexpectedFilterType,
     }

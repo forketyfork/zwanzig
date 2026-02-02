@@ -7,7 +7,9 @@ pub fn walk(
     tree: *const Ast,
     node: u32,
     visitor: *Visitor,
-) !void {
+) @typeInfo(@TypeOf(Visitor.visit)).@"fn".return_type.? {
+    const WalkError = @typeInfo(@TypeOf(Visitor.visit)).@"fn".return_type.?;
+
     if (visitor.stop) return;
     if (node == 0) return;
 
@@ -26,6 +28,36 @@ pub fn walk(
         return;
     }
 
+    const child = struct {
+        fn visitChild(inner_tree: *const Ast, child_node: u32, inner_visitor: *Visitor) WalkError {
+            return walk(Visitor, inner_tree, child_node, inner_visitor);
+        }
+    };
+
+    try walkChildren(Visitor, tree, node, visitor, child.visitChild);
+}
+
+pub fn walkChildren(
+    comptime Visitor: type,
+    tree: *const Ast,
+    node: u32,
+    visitor: *Visitor,
+    comptime child_fn: anytype,
+) @typeInfo(@TypeOf(child_fn)).@"fn".return_type.? {
+    if (node == 0) return;
+
+    const tags = tree.nodes.items(.tag);
+    if (node >= tags.len) return;
+
+    if (tree.fullSwitchCase(@enumFromInt(node))) |full_case| {
+        for (full_case.ast.values) |value| {
+            try child_fn(tree, @intFromEnum(value), visitor);
+            if (shouldStop(Visitor, visitor)) return;
+        }
+        try child_fn(tree, @intFromEnum(full_case.ast.target_expr), visitor);
+        return;
+    }
+
     const datas = tree.nodes.items(.data);
 
     switch (tags[node]) {
@@ -35,91 +67,90 @@ pub fn walk(
             const end = @intFromEnum(extra_range.end);
             const statements = tree.extra_data[start..end];
             for (statements) |stmt| {
-                try walk(Visitor, tree, stmt, visitor);
-                if (visitor.stop) return;
+                try child_fn(tree, stmt, visitor);
+                if (shouldStop(Visitor, visitor)) return;
             }
             return;
         },
         .block_two, .block_two_semicolon => {
             const pair = datas[node].opt_node_and_opt_node;
             if (pair[0].unwrap()) |n| {
-                try walk(Visitor, tree, @intFromEnum(n), visitor);
-                if (visitor.stop) return;
+                try child_fn(tree, @intFromEnum(n), visitor);
+                if (shouldStop(Visitor, visitor)) return;
             }
             if (pair[1].unwrap()) |n| {
-                try walk(Visitor, tree, @intFromEnum(n), visitor);
-                if (visitor.stop) return;
+                try child_fn(tree, @intFromEnum(n), visitor);
             }
             return;
         },
         .fn_decl => {
             const body = @intFromEnum(datas[node].node_and_node[1]);
             if (body != 0) {
-                try walk(Visitor, tree, body, visitor);
+                try child_fn(tree, body, visitor);
             }
             return;
         },
         .test_decl => {
             const body = @intFromEnum(datas[node].opt_token_and_node[1]);
             if (body != 0) {
-                try walk(Visitor, tree, body, visitor);
+                try child_fn(tree, body, visitor);
             }
             return;
         },
         .simple_var_decl, .local_var_decl, .global_var_decl, .aligned_var_decl => {
             const full = tree.fullVarDecl(@enumFromInt(node)) orelse return;
             if (full.ast.init_node.unwrap()) |init| {
-                try walk(Visitor, tree, @intFromEnum(init), visitor);
+                try child_fn(tree, @intFromEnum(init), visitor);
             }
             return;
         },
         .@"if", .if_simple => {
             const full = tree.fullIf(@enumFromInt(node)) orelse return;
-            try walk(Visitor, tree, @intFromEnum(full.ast.cond_expr), visitor);
-            if (visitor.stop) return;
-            try walk(Visitor, tree, @intFromEnum(full.ast.then_expr), visitor);
-            if (visitor.stop) return;
+            try child_fn(tree, @intFromEnum(full.ast.cond_expr), visitor);
+            if (shouldStop(Visitor, visitor)) return;
+            try child_fn(tree, @intFromEnum(full.ast.then_expr), visitor);
+            if (shouldStop(Visitor, visitor)) return;
             if (full.ast.else_expr.unwrap()) |else_node| {
-                try walk(Visitor, tree, @intFromEnum(else_node), visitor);
+                try child_fn(tree, @intFromEnum(else_node), visitor);
             }
             return;
         },
         .@"while", .while_simple, .while_cont => {
             const full = tree.fullWhile(@enumFromInt(node)) orelse return;
-            try walk(Visitor, tree, @intFromEnum(full.ast.cond_expr), visitor);
-            if (visitor.stop) return;
-            try walk(Visitor, tree, @intFromEnum(full.ast.then_expr), visitor);
-            if (visitor.stop) return;
+            try child_fn(tree, @intFromEnum(full.ast.cond_expr), visitor);
+            if (shouldStop(Visitor, visitor)) return;
+            try child_fn(tree, @intFromEnum(full.ast.then_expr), visitor);
+            if (shouldStop(Visitor, visitor)) return;
             if (full.ast.else_expr.unwrap()) |else_node| {
-                try walk(Visitor, tree, @intFromEnum(else_node), visitor);
-                if (visitor.stop) return;
+                try child_fn(tree, @intFromEnum(else_node), visitor);
+                if (shouldStop(Visitor, visitor)) return;
             }
             if (full.ast.cont_expr.unwrap()) |cont| {
-                try walk(Visitor, tree, @intFromEnum(cont), visitor);
+                try child_fn(tree, @intFromEnum(cont), visitor);
             }
             return;
         },
         .@"for", .for_simple => {
             const full = tree.fullFor(@enumFromInt(node)) orelse return;
             for (full.ast.inputs) |input| {
-                try walk(Visitor, tree, @intFromEnum(input), visitor);
-                if (visitor.stop) return;
+                try child_fn(tree, @intFromEnum(input), visitor);
+                if (shouldStop(Visitor, visitor)) return;
             }
-            try walk(Visitor, tree, @intFromEnum(full.ast.then_expr), visitor);
-            if (visitor.stop) return;
+            try child_fn(tree, @intFromEnum(full.ast.then_expr), visitor);
+            if (shouldStop(Visitor, visitor)) return;
             if (full.ast.else_expr.unwrap()) |else_node| {
-                try walk(Visitor, tree, @intFromEnum(else_node), visitor);
+                try child_fn(tree, @intFromEnum(else_node), visitor);
             }
             return;
         },
         .call, .call_comma, .call_one, .call_one_comma => {
             var buf: [1]Ast.Node.Index = undefined;
             const full = tree.fullCall(&buf, @enumFromInt(node)) orelse return;
-            try walk(Visitor, tree, @intFromEnum(full.ast.fn_expr), visitor);
-            if (visitor.stop) return;
+            try child_fn(tree, @intFromEnum(full.ast.fn_expr), visitor);
+            if (shouldStop(Visitor, visitor)) return;
             for (full.ast.params) |param| {
-                try walk(Visitor, tree, @intFromEnum(param), visitor);
-                if (visitor.stop) return;
+                try child_fn(tree, @intFromEnum(param), visitor);
+                if (shouldStop(Visitor, visitor)) return;
             }
             return;
         },
@@ -127,37 +158,98 @@ pub fn walk(
             var buf: [2]Ast.Node.Index = undefined;
             const params = tree.builtinCallParams(&buf, @enumFromInt(node)) orelse return;
             for (params) |param| {
-                try walk(Visitor, tree, @intFromEnum(param), visitor);
-                if (visitor.stop) return;
+                try child_fn(tree, @intFromEnum(param), visitor);
+                if (shouldStop(Visitor, visitor)) return;
+            }
+            return;
+        },
+        .struct_init,
+        .struct_init_comma,
+        .struct_init_one,
+        .struct_init_one_comma,
+        .struct_init_dot,
+        .struct_init_dot_comma,
+        .struct_init_dot_two,
+        .struct_init_dot_two_comma,
+        => {
+            var buf: [2]Ast.Node.Index = undefined;
+            const struct_init = tree.fullStructInit(&buf, @enumFromInt(node)) orelse return;
+            if (struct_init.ast.type_expr.unwrap()) |type_node| {
+                try child_fn(tree, @intFromEnum(type_node), visitor);
+                if (shouldStop(Visitor, visitor)) return;
+            }
+            for (struct_init.ast.fields) |field| {
+                try child_fn(tree, @intFromEnum(field), visitor);
+                if (shouldStop(Visitor, visitor)) return;
+            }
+            return;
+        },
+        .array_init,
+        .array_init_comma,
+        .array_init_one,
+        .array_init_one_comma,
+        .array_init_dot,
+        .array_init_dot_comma,
+        .array_init_dot_two,
+        .array_init_dot_two_comma,
+        => {
+            var buf: [2]Ast.Node.Index = undefined;
+            const array_init = tree.fullArrayInit(&buf, @enumFromInt(node)) orelse return;
+            if (array_init.ast.type_expr.unwrap()) |type_node| {
+                try child_fn(tree, @intFromEnum(type_node), visitor);
+                if (shouldStop(Visitor, visitor)) return;
+            }
+            for (array_init.ast.elements) |elem| {
+                try child_fn(tree, @intFromEnum(elem), visitor);
+                if (shouldStop(Visitor, visitor)) return;
             }
             return;
         },
         .@"switch", .switch_comma => {
             const full = tree.switchFull(@enumFromInt(node));
-            try walk(Visitor, tree, @intFromEnum(full.ast.condition), visitor);
-            if (visitor.stop) return;
+            try child_fn(tree, @intFromEnum(full.ast.condition), visitor);
+            if (shouldStop(Visitor, visitor)) return;
             for (full.ast.cases) |case_node| {
-                try walk(Visitor, tree, @intFromEnum(case_node), visitor);
-                if (visitor.stop) return;
+                try child_fn(tree, @intFromEnum(case_node), visitor);
+                if (shouldStop(Visitor, visitor)) return;
             }
             return;
         },
         .@"return" => {
             if (datas[node].opt_node.unwrap()) |ret_node| {
-                try walk(Visitor, tree, @intFromEnum(ret_node), visitor);
+                try child_fn(tree, @intFromEnum(ret_node), visitor);
+            }
+            return;
+        },
+        .@"break" => {
+            if (datas[node].opt_token_and_opt_node[1].unwrap()) |break_node| {
+                try child_fn(tree, @intFromEnum(break_node), visitor);
             }
             return;
         },
         .@"errdefer" => {
             const body = @intFromEnum(datas[node].opt_token_and_node[1]);
             if (body != 0) {
-                try walk(Visitor, tree, body, visitor);
+                try child_fn(tree, body, visitor);
             }
+            return;
+        },
+        .for_range => {
+            const pair = datas[node].node_and_opt_node;
+            try child_fn(tree, @intFromEnum(pair[0]), visitor);
+            if (shouldStop(Visitor, visitor)) return;
+            if (pair[1].unwrap()) |end_node| {
+                try child_fn(tree, @intFromEnum(end_node), visitor);
+            }
+            return;
+        },
+        .anyframe_type => {
+            try child_fn(tree, @intFromEnum(datas[node].token_and_node[1]), visitor);
             return;
         },
         .ptr_type, .ptr_type_aligned, .ptr_type_sentinel, .ptr_type_bit_range => {
             const ptr_info = tree.fullPtrType(@enumFromInt(node)) orelse return;
-            try walk(Visitor, tree, @intFromEnum(ptr_info.ast.child_type), visitor);
+            try child_fn(tree, @intFromEnum(ptr_info.ast.child_type), visitor);
             return;
         },
         .array_type, .array_type_sentinel => {
@@ -165,11 +257,11 @@ pub fn walk(
             const lhs = @intFromEnum(pair[0]);
             const rhs = @intFromEnum(pair[1]);
             if (lhs != 0) {
-                try walk(Visitor, tree, lhs, visitor);
-                if (visitor.stop) return;
+                try child_fn(tree, lhs, visitor);
+                if (shouldStop(Visitor, visitor)) return;
             }
             if (rhs != 0) {
-                try walk(Visitor, tree, rhs, visitor);
+                try child_fn(tree, rhs, visitor);
             }
             return;
         },
@@ -177,66 +269,123 @@ pub fn walk(
             const slice = tree.fullSlice(@enumFromInt(node)) orelse return;
             const sliced = @intFromEnum(slice.ast.sliced);
             if (sliced != 0) {
-                try walk(Visitor, tree, sliced, visitor);
-                if (visitor.stop) return;
+                try child_fn(tree, sliced, visitor);
+                if (shouldStop(Visitor, visitor)) return;
             }
             const start = @intFromEnum(slice.ast.start);
             if (start != 0) {
-                try walk(Visitor, tree, start, visitor);
-                if (visitor.stop) return;
+                try child_fn(tree, start, visitor);
+                if (shouldStop(Visitor, visitor)) return;
             }
             if (slice.ast.end.unwrap()) |end_node| {
-                try walk(Visitor, tree, @intFromEnum(end_node), visitor);
-                if (visitor.stop) return;
+                try child_fn(tree, @intFromEnum(end_node), visitor);
+                if (shouldStop(Visitor, visitor)) return;
             }
             if (slice.ast.sentinel.unwrap()) |sentinel_node| {
-                try walk(Visitor, tree, @intFromEnum(sentinel_node), visitor);
+                try child_fn(tree, @intFromEnum(sentinel_node), visitor);
             }
             return;
         },
-        .optional_type => {
+        .optional_type,
+        .bool_not,
+        .negation,
+        .bit_not,
+        .negation_wrap,
+        .address_of,
+        .@"try",
+        .deref,
+        .@"defer",
+        .@"comptime",
+        .@"nosuspend",
+        .@"suspend",
+        .@"resume",
+        => {
             const child = @intFromEnum(datas[node].node);
             if (child != 0) {
-                try walk(Visitor, tree, child, visitor);
+                try child_fn(tree, child, visitor);
             }
             return;
         },
-        .error_union => {
-            const pair = datas[node].node_and_node;
-            try walk(Visitor, tree, @intFromEnum(pair[0]), visitor);
-            if (visitor.stop) return;
-            try walk(Visitor, tree, @intFromEnum(pair[1]), visitor);
-            return;
-        },
-        .bool_not, .negation, .address_of, .@"try", .deref, .@"defer", .@"comptime", .@"nosuspend" => {
-            const child = @intFromEnum(datas[node].node);
-            if (child != 0) {
-                try walk(Visitor, tree, child, visitor);
-            }
-            return;
-        },
-        .unwrap_optional, .grouped_expression, .field_access => {
+        .unwrap_optional, .grouped_expression, .field_access, .asm_input, .asm_simple => {
             const child = @intFromEnum(datas[node].node_and_token[0]);
             if (child != 0) {
-                try walk(Visitor, tree, child, visitor);
+                try child_fn(tree, child, visitor);
             }
             return;
         },
-        .bool_and, .bool_or, .assign, .bang_equal, .equal_equal, .less_than, .greater_than, .less_or_equal, .greater_or_equal, .add, .sub, .mul, .div, .mod, .@"orelse", .@"catch", .array_access => {
+        .bool_and,
+        .bool_or,
+        .assign,
+        .assign_mul,
+        .assign_div,
+        .assign_mod,
+        .assign_add,
+        .assign_sub,
+        .assign_shl,
+        .assign_shl_sat,
+        .assign_shr,
+        .assign_bit_and,
+        .assign_bit_xor,
+        .assign_bit_or,
+        .assign_mul_wrap,
+        .assign_add_wrap,
+        .assign_sub_wrap,
+        .assign_mul_sat,
+        .assign_add_sat,
+        .assign_sub_sat,
+        .bang_equal,
+        .equal_equal,
+        .less_than,
+        .greater_than,
+        .less_or_equal,
+        .greater_or_equal,
+        .merge_error_sets,
+        .mul,
+        .div,
+        .mod,
+        .array_mult,
+        .mul_wrap,
+        .mul_sat,
+        .add,
+        .sub,
+        .array_cat,
+        .add_wrap,
+        .sub_wrap,
+        .add_sat,
+        .sub_sat,
+        .shl,
+        .shl_sat,
+        .shr,
+        .bit_and,
+        .bit_xor,
+        .bit_or,
+        .@"orelse",
+        .@"catch",
+        .error_union,
+        .array_access,
+        .switch_range,
+        => {
             const pair = datas[node].node_and_node;
             const lhs = @intFromEnum(pair[0]);
             const rhs = @intFromEnum(pair[1]);
             if (lhs != 0) {
-                try walk(Visitor, tree, lhs, visitor);
-                if (visitor.stop) return;
+                try child_fn(tree, lhs, visitor);
+                if (shouldStop(Visitor, visitor)) return;
             }
             if (rhs != 0) {
-                try walk(Visitor, tree, rhs, visitor);
+                try child_fn(tree, rhs, visitor);
             }
             return;
         },
         else => {},
     }
+}
+
+fn shouldStop(comptime Visitor: type, visitor: *Visitor) bool {
+    if (@hasField(Visitor, "stop")) {
+        return visitor.stop;
+    }
+    return false;
 }
 
 pub fn fillParentMap(tree: *const Ast, root: u32, parent_map: []u32) void {
