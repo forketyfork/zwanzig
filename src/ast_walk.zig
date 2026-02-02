@@ -253,15 +253,19 @@ pub fn walkChildren(
             return;
         },
         .array_type, .array_type_sentinel => {
-            const pair = datas[node].node_and_node;
-            const lhs = @intFromEnum(pair[0]);
-            const rhs = @intFromEnum(pair[1]);
-            if (lhs != 0) {
-                try child_fn(tree, lhs, visitor);
+            const arr_type = tree.fullArrayType(@enumFromInt(node)) orelse return;
+            const elem_count = @intFromEnum(arr_type.ast.elem_count);
+            if (elem_count != 0) {
+                try child_fn(tree, elem_count, visitor);
                 if (shouldStop(Visitor, visitor)) return;
             }
-            if (rhs != 0) {
-                try child_fn(tree, rhs, visitor);
+            if (arr_type.ast.sentinel.unwrap()) |sentinel| {
+                try child_fn(tree, @intFromEnum(sentinel), visitor);
+                if (shouldStop(Visitor, visitor)) return;
+            }
+            const elem_type = @intFromEnum(arr_type.ast.elem_type);
+            if (elem_type != 0) {
+                try child_fn(tree, elem_type, visitor);
             }
             return;
         },
