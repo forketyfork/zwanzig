@@ -50,8 +50,11 @@ pub const CachedArtifacts = struct {
     }
 
     /// Add a CFG for a function to the artifacts.
-    /// Takes ownership of the CFG.
+    /// Takes ownership of the CFG and normalizes owned fields.
     pub fn addCfg(self: *CachedArtifacts, fn_ast_node: u32, cfg: *Cfg) !void {
+        if (cfg.fn_name) |name| {
+            cfg.fn_name = try self.allocator.dupe(u8, name);
+        }
         try self.cfgs.put(fn_ast_node, cfg);
     }
 

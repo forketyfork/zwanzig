@@ -8,6 +8,8 @@ pub const SourceRange = diagnostic_mod.SourceRange;
 const Rule = @import("rule.zig").Rule;
 const RuleError = @import("rule.zig").RuleError;
 const BuildMetadata = @import("build_metadata.zig").BuildMetadata;
+const cached_artifacts_mod = @import("cached_artifacts.zig");
+const ids = @import("ids.zig");
 const type_context_mod = @import("type_context.zig");
 pub const TypeContext = type_context_mod.TypeContext;
 pub const TypeInfo = type_context_mod.TypeInfo;
@@ -16,6 +18,8 @@ pub const Config = config_mod.Config;
 const cfg_mod = @import("cfg.zig");
 pub const Cfg = cfg_mod.Cfg;
 pub const CfgBuilder = cfg_mod.CfgBuilder;
+pub const CfgError = cfg_mod.CfgError;
+pub const CachedArtifacts = cached_artifacts_mod.CachedArtifacts;
 
 pub const AnalysisStats = struct {
     total_runs: u64 = 0,
@@ -90,6 +94,8 @@ pub const CheckerContext = struct {
     analysis_limits: AnalysisLimits = .{},
     /// Config for resource models and other analyzer settings.
     config: ?*const Config = null,
+    /// Cached CFG artifacts for this source (optional, not owned).
+    cached_artifacts: ?*CachedArtifacts = null,
     /// Directory to dump CFG DOT files for visualization.
     /// When set, checkers write CFG DOT files to this directory.
     dump_cfg_dir: ?[]const u8 = null,
@@ -147,6 +153,53 @@ pub const CheckerContext = struct {
         builder.setDumpCfgDir(self.dump_cfg_dir);
         builder.setTypeContext(self.type_context);
         return builder;
+    }
+
+    pub fn getOrBuildCfg(
+        self: *const CheckerContext,
+        allocator: std.mem.Allocator,
+        source: *Source,
+        fn_node: ids.AstNodeId,
+    ) CfgError!?CfgHandle {
+        if (self.cached_artifacts) |artifacts| {
+            const fn_index = ids.astIndex(fn_node);
+            if (artifacts.getCfg(fn_index)) |cfg_ptr| {
+                return .{ .cfg = cfg_ptr, .owned = false, .allocator = allocator };
+            }
+        }
+
+        var builder = self.createCfgBuilder(allocator);
+        const cfg_opt = try builder.buildFromFn(source, fn_node);
+        if (cfg_opt) |cfg_value| {
+            const cfg_ptr = try allocator.create(Cfg);
+            cfg_ptr.* = cfg_value;
+
+            if (self.cached_artifacts) |artifacts| {
+                const fn_index = ids.astIndex(fn_node);
+                artifacts.addCfg(fn_index, cfg_ptr) catch |err| {
+                    cfg_ptr.deinit();
+                    allocator.destroy(cfg_ptr);
+                    return err;
+                };
+                return .{ .cfg = cfg_ptr, .owned = false, .allocator = allocator };
+            }
+
+            return .{ .cfg = cfg_ptr, .owned = true, .allocator = allocator };
+        }
+        return null;
+    }
+};
+
+pub const CfgHandle = struct {
+    cfg: *const Cfg,
+    owned: bool,
+    allocator: std.mem.Allocator,
+
+    pub fn deinit(self: *CfgHandle) void {
+        if (!self.owned) return;
+        const cfg_ptr: *Cfg = @constCast(self.cfg);
+        cfg_ptr.deinit();
+        self.allocator.destroy(cfg_ptr);
     }
 };
 
@@ -546,6 +599,45 @@ test "CheckerManager runAstChecks with filter" {
 
     try std.testing.expectEqual(@as(usize, 1), check1_count);
     try std.testing.expectEqual(@as(usize, 0), check2_count);
+}
+
+test "CheckerContext reuses cached CFGs across callers" {
+    const testing = std.testing;
+    const allocator = testing.allocator;
+
+    const code: [:0]const u8 =
+        \\fn foo() void {}
+    ;
+    var source = Source.init(allocator, "test.zig", code);
+    defer source.deinit();
+
+    const tree = try source.ast();
+    const root_decls = tree.rootDecls();
+    try testing.expect(root_decls.len > 0);
+    const fn_node = ids.astId(@intFromEnum(root_decls[0]));
+
+    var artifacts = CachedArtifacts.init(allocator);
+    defer artifacts.deinit();
+
+    const context1 = CheckerContext{
+        .build_metadata = null,
+        .cached_artifacts = &artifacts,
+    };
+    const context2 = CheckerContext{
+        .build_metadata = null,
+        .cached_artifacts = &artifacts,
+    };
+
+    var handle1 = (context1.getOrBuildCfg(allocator, &source, fn_node) catch return) orelse return error.TestExpectedEqual;
+    defer handle1.deinit();
+    try testing.expect(!handle1.owned);
+
+    var handle2 = (context2.getOrBuildCfg(allocator, &source, fn_node) catch return) orelse return error.TestExpectedEqual;
+    defer handle2.deinit();
+    try testing.expect(!handle2.owned);
+    try testing.expect(handle1.cfg == handle2.cfg);
+
+    try testing.expect(artifacts.getCfg(ids.astIndex(fn_node)) != null);
 }
 
 test "CheckerManagerWithRules mixed registration" {

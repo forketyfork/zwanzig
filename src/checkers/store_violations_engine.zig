@@ -46,64 +46,64 @@ pub const StoreViolationsEngineChecker = struct {
         diagnostics: *std.ArrayList(Diagnostic),
         context: checker_mod.CheckerContext,
     ) CheckerError!void {
-        var builder = context.createCfgBuilder(allocator);
-        var cfg_opt = builder.buildFromFn(src, fn_node) catch return;
-        if (cfg_opt) |*cfg| {
-            defer cfg.deinit();
+        var cfg_handle = (context.getOrBuildCfg(allocator, src, fn_node) catch return) orelse return;
+        defer cfg_handle.deinit();
 
-            var engine = AnalysisEngine.initWithSource(allocator, cfg, src);
-            defer engine.deinit();
-            engine.setCheckerName("store-violations-engine");
-            if (context.type_context) |type_ctx| {
-                engine.setTypeContext(type_ctx);
-            }
-            if (context.build_metadata) |metadata| {
-                engine.setBuildMetadata(metadata);
-            }
-            if (context.config) |config| {
-                engine.setConfig(config);
-            }
-            if (context.analysis_limits.max_worklist_steps) |steps| {
-                engine.setMaxWorklistSteps(steps);
-            }
-            if (context.analysis_limits.max_states_per_point) |max| {
-                engine.setMaxStatesPerPoint(max);
-            }
-            if (context.analysis_limits.use_widening) |use_w| {
-                engine.setUseWidening(use_w);
-            }
-            var run_ok = true;
-            engine.run() catch |err| switch (err) {
-                error.OutOfMemory => return error.OutOfMemory,
-                error.AnalysisLimitExceeded => run_ok = false,
-            };
-            if (context.analysis_stats) |stats| {
-                stats.recordRun(engine.getGraph().getDroppedStateCount());
-                stats.recordWidening(engine.getGraph().getWidenedNodeCount(), engine.getGraph().getWideningConvergedCount());
-            }
+        var engine = AnalysisEngine.initWithSource(allocator, cfg_handle.cfg, src);
+        defer engine.deinit();
+        engine.setCheckerName("store-violations-engine");
+        if (context.type_context) |type_ctx| {
+            engine.setTypeContext(type_ctx);
+        }
+        if (context.cached_artifacts) |artifacts| {
+            engine.setCachedArtifacts(artifacts);
+        }
+        if (context.build_metadata) |metadata| {
+            engine.setBuildMetadata(metadata);
+        }
+        if (context.config) |config| {
+            engine.setConfig(config);
+        }
+        if (context.analysis_limits.max_worklist_steps) |steps| {
+            engine.setMaxWorklistSteps(steps);
+        }
+        if (context.analysis_limits.max_states_per_point) |max| {
+            engine.setMaxStatesPerPoint(max);
+        }
+        if (context.analysis_limits.use_widening) |use_w| {
+            engine.setUseWidening(use_w);
+        }
+        var run_ok = true;
+        engine.run() catch |err| switch (err) {
+            error.OutOfMemory => return error.OutOfMemory,
+            error.AnalysisLimitExceeded => run_ok = false,
+        };
+        if (context.analysis_stats) |stats| {
+            stats.recordRun(engine.getGraph().getDroppedStateCount());
+            stats.recordWidening(engine.getGraph().getWidenedNodeCount(), engine.getGraph().getWideningConvergedCount());
+        }
 
-            // Dump visualizations if requested
-            if (context.dump_exploded_graph_dir) |dir| {
-                engine_mod.dot.writeExplodedGraphToFile(engine.getGraph(), dir, src.getFilePath(), cfg.fn_name, allocator);
-            }
-            if (context.dump_annotated_cfg_dir) |dir| {
-                engine_mod.dot.writeAnnotatedCfgToFile(engine.getGraph(), dir, src.getFilePath(), cfg.fn_name, allocator);
-            }
-            if (context.dump_path_trace_dir) |dir| {
-                engine_mod.dot.writePathTracesToFile(engine.getGraph(), dir, src.getFilePath(), cfg.fn_name, allocator);
-            }
+        // Dump visualizations if requested
+        if (context.dump_exploded_graph_dir) |dir| {
+            engine_mod.dot.writeExplodedGraphToFile(engine.getGraph(), dir, src.getFilePath(), cfg_handle.cfg.fn_name, allocator);
+        }
+        if (context.dump_annotated_cfg_dir) |dir| {
+            engine_mod.dot.writeAnnotatedCfgToFile(engine.getGraph(), dir, src.getFilePath(), cfg_handle.cfg.fn_name, allocator);
+        }
+        if (context.dump_path_trace_dir) |dir| {
+            engine_mod.dot.writePathTracesToFile(engine.getGraph(), dir, src.getFilePath(), cfg_handle.cfg.fn_name, allocator);
+        }
 
-            if (!run_ok) return;
+        if (!run_ok) return;
 
-            var reported: std.ArrayList(StoreViolation) = .empty;
-            defer reported.deinit(allocator);
+        var reported: std.ArrayList(StoreViolation) = .empty;
+        defer reported.deinit(allocator);
 
-            for (engine.getGraph().nodes.items) |node| {
-                for (node.state.getStoreViolations()) |violation| {
-                    if (isReported(reported.items, violation)) continue;
-                    try reported.append(allocator, violation);
-                    try emitViolationDiagnostic(src, allocator, diagnostics, violation);
-                }
+        for (engine.getGraph().nodes.items) |node| {
+            for (node.state.getStoreViolations()) |violation| {
+                if (isReported(reported.items, violation)) continue;
+                try reported.append(allocator, violation);
+                try emitViolationDiagnostic(src, allocator, diagnostics, violation);
             }
         }
     }

@@ -1786,7 +1786,7 @@ pub fn fromNative() BuildMetadata {
 
 ## Incremental cache
 
-The analyzer supports incremental caching to track analysis metadata across runs. The current implementation stores minimal metadata (e.g., whether type info was loaded). CFG caching is planned but not yet wired in.
+The analyzer supports incremental caching to track analysis metadata across runs. The cache stores metadata (e.g., whether type info was loaded) and cached CFGs to speed up repeated runs, but it never skips analysis.
 
 ### Cache architecture
 
@@ -1804,15 +1804,15 @@ pub const CacheKey = struct {
     file_hash: [32]u8,      // SHA-256 of file content
     target_hash: [32]u8,    // Hash of target architecture/OS/ABI
     version_hash: [32]u8,   // Hash of Zwanzig tool version
-    config_hash: [32]u8,    // Hash of enabled rules/checkers
+    config_hash: [32]u8,    // Hash of enabled rules/checkers and type-info availability
 };
 ```
 
-**Invalidation triggers:** file content changes, target platform changes, version updates, rule configuration changes.
+**Invalidation triggers:** file content changes, target platform changes, version updates, rule configuration changes, or type-info availability changes.
 
 ### Cache behavior
 
-**Key principle:** The cache never skips analysis. Diagnostics are always produced on every run. Cache currently stores minimal metadata.
+**Key principle:** The cache never skips analysis. Diagnostics are always produced on every run. Cache stores metadata and cached CFGs.
 
 ```zig
 // Cache hit still produces diagnostics
