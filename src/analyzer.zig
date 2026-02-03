@@ -460,21 +460,27 @@ pub const Analyzer = struct {
     }
 
     fn printJsonResults(self: *Analyzer, writer: anytype) !void {
-        try writer.writeAll("{\n");
-        try writer.print("  \"diagnostics\": [\n", .{});
+        var alloc_writer: std.io.Writer.Allocating = .init(self.allocator);
+        defer alloc_writer.deinit();
 
-        for (self.diagnostics.items, 0..) |diag, i| {
-            try diag.writeJson(writer);
-            if (i < self.diagnostics.items.len - 1) {
-                try writer.writeAll(",\n");
-            } else {
-                try writer.writeAll("\n");
-            }
+        var jw: std.json.Stringify = .{
+            .writer = &alloc_writer.writer,
+            .options = .{ .whitespace = .indent_2 },
+        };
+
+        try jw.beginObject();
+        try jw.objectField("diagnostics");
+        try jw.beginArray();
+        for (self.diagnostics.items) |diag| {
+            try diag.writeJsonValue(&jw);
         }
+        try jw.endArray();
+        try jw.objectField("total");
+        try jw.write(self.diagnostics.items.len);
+        try jw.endObject();
 
-        try writer.writeAll("  ],\n");
-        try writer.print("  \"total\": {d}\n", .{self.diagnostics.items.len});
-        try writer.writeAll("}\n");
+        try writer.writeAll(alloc_writer.written());
+        try writer.writeByte('\n');
     }
 
     pub fn hasDiagnostics(self: *Analyzer) bool {
