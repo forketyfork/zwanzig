@@ -85,7 +85,7 @@ pub const ReturnLocalPointerRule = struct {
         var return_nodes: std.ArrayList(u32) = .empty;
         defer return_nodes.deinit(allocator);
 
-        try ast_walk.collectNodesByTag(allocator, tree, body_node, .@"return", &return_nodes);
+        try collectNodesByTagSkippingNestedFns(allocator, tree, body_node, .@"return", &return_nodes);
 
         // For each return statement, check if it returns something derived from a local array
         for (return_nodes.items) |ret_node| {
@@ -122,6 +122,61 @@ pub const ReturnLocalPointerRule = struct {
         node: u32,
         name: []const u8,
     };
+
+    fn walkNoNestedFns(
+        comptime Visitor: type,
+        tree: *const Ast,
+        node: u32,
+        visitor: *Visitor,
+    ) RuleError!void {
+        if (node == 0) return;
+        const tags = tree.nodes.items(.tag);
+        if (node >= tags.len) return;
+        if (@hasField(Visitor, "stop") and visitor.stop) return;
+
+        const tag = tags[node];
+        if (tag == .fn_decl or tag == .test_decl) return;
+
+        try visitor.visit(tree, node, tag);
+        if (@hasField(Visitor, "stop") and visitor.stop) return;
+
+        const child = struct {
+            fn visitChild(inner_tree: *const Ast, child_node: u32, inner_visitor: *Visitor) RuleError!void {
+                return walkNoNestedFns(Visitor, inner_tree, child_node, inner_visitor);
+            }
+        };
+
+        try ast_walk.walkChildren(Visitor, tree, node, visitor, child.visitChild);
+    }
+
+    fn collectNodesByTagSkippingNestedFns(
+        allocator: std.mem.Allocator,
+        tree: *const Ast,
+        root: u32,
+        target_tag: Ast.Node.Tag,
+        out: *std.ArrayList(u32),
+    ) RuleError!void {
+        const Collector = struct {
+            allocator: std.mem.Allocator,
+            target_tag: Ast.Node.Tag,
+            out: *std.ArrayList(u32),
+            stop: bool = false,
+
+            pub fn visit(self: *@This(), _: *const Ast, node: u32, tag: Ast.Node.Tag) RuleError!void {
+                if (tag == self.target_tag) {
+                    try self.out.append(self.allocator, node);
+                }
+            }
+        };
+
+        var collector = Collector{
+            .allocator = allocator,
+            .target_tag = target_tag,
+            .out = out,
+        };
+
+        try walkNoNestedFns(Collector, tree, root, &collector);
+    }
 
     fn returnTypeIsPointerLike(
         tree: *const Ast,
@@ -169,8 +224,8 @@ pub const ReturnLocalPointerRule = struct {
         var var_decls: std.ArrayList(u32) = .empty;
         defer var_decls.deinit(allocator);
 
-        try ast_walk.collectNodesByTag(allocator, tree, body_node, .local_var_decl, &var_decls);
-        try ast_walk.collectNodesByTag(allocator, tree, body_node, .simple_var_decl, &var_decls);
+        try collectNodesByTagSkippingNestedFns(allocator, tree, body_node, .local_var_decl, &var_decls);
+        try collectNodesByTagSkippingNestedFns(allocator, tree, body_node, .simple_var_decl, &var_decls);
 
         for (var_decls.items) |var_node| {
             const full = tree.fullVarDecl(@enumFromInt(var_node)) orelse continue;
