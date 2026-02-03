@@ -10,6 +10,7 @@ const ShadowedVariableRule = @import("../rules/shadowed_variable.zig").ShadowedV
 const IdentifierStyleRule = @import("../rules/identifier_style.zig").IdentifierStyleRule;
 const SentinelAllocRule = @import("../rules/sentinel_alloc.zig").SentinelAllocRule;
 const UnusedParameterRule = @import("../rules/unused_parameter.zig").UnusedParameterRule;
+const ReturnLocalPointerRule = @import("../rules/return_local_pointer.zig").ReturnLocalPointerRule;
 const EmptyCatchEngineChecker = @import("../checkers/empty_catch_engine.zig").EmptyCatchEngineChecker;
 const OptionalUnwrapEngineChecker = @import("../checkers/optional_unwrap_engine.zig").OptionalUnwrapEngineChecker;
 const SwallowedErrorChecker = @import("../checkers/swallowed_error.zig").SwallowedErrorChecker;
@@ -31,6 +32,7 @@ pub fn registerDefaults(analyzer: *Analyzer) !void {
     try analyzer.registerRule(&IdentifierStyleRule.rule);
     try analyzer.registerRule(&SentinelAllocRule.rule);
     try analyzer.registerRule(&UnusedParameterRule.rule);
+    try analyzer.registerRule(&ReturnLocalPointerRule.rule);
 
     // Engine-based checkers
     try analyzer.registerChecker(&EmptyCatchEngineChecker.checker);

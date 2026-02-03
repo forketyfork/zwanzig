@@ -540,7 +540,8 @@ pub const SentinelAllocRule = struct {
             if (name_token >= token_tags.len or token_tags[name_token] != .identifier) continue;
             const struct_name = tree.tokenSlice(name_token);
 
-            const members = getContainerMembers(tree, tags, init_idx) orelse continue;
+            var member_buf: [2]Ast.Node.Index = undefined;
+            const members = getContainerMembers(tree, tags, init_idx, &member_buf) orelse continue;
             for (members) |member| {
                 const member_idx: u32 = @intFromEnum(member);
                 if (!isContainerField(tags[member_idx])) continue;
@@ -572,15 +573,14 @@ pub const SentinelAllocRule = struct {
         return typeInfoFromTypeNode(tree, tags, datas, ret_type_node);
     }
 
-    fn getContainerMembers(tree: *const Ast, tags: []const Ast.Node.Tag, node_idx: u32) ?[]const Ast.Node.Index {
-        var buf: [2]Ast.Node.Index = undefined;
+    fn getContainerMembers(tree: *const Ast, tags: []const Ast.Node.Tag, node_idx: u32, buf: *[2]Ast.Node.Index) ?[]const Ast.Node.Index {
         return switch (tags[node_idx]) {
             .container_decl, .container_decl_trailing => tree.containerDecl(@enumFromInt(node_idx)).ast.members,
-            .container_decl_two, .container_decl_two_trailing => tree.containerDeclTwo(&buf, @enumFromInt(node_idx)).ast.members,
+            .container_decl_two, .container_decl_two_trailing => tree.containerDeclTwo(buf, @enumFromInt(node_idx)).ast.members,
             .container_decl_arg, .container_decl_arg_trailing => tree.containerDeclArg(@enumFromInt(node_idx)).ast.members,
             .tagged_union, .tagged_union_trailing => tree.taggedUnion(@enumFromInt(node_idx)).ast.members,
             .tagged_union_enum_tag, .tagged_union_enum_tag_trailing => tree.taggedUnionEnumTag(@enumFromInt(node_idx)).ast.members,
-            .tagged_union_two, .tagged_union_two_trailing => tree.taggedUnionTwo(&buf, @enumFromInt(node_idx)).ast.members,
+            .tagged_union_two, .tagged_union_two_trailing => tree.taggedUnionTwo(buf, @enumFromInt(node_idx)).ast.members,
             else => null,
         };
     }
