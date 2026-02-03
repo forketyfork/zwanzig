@@ -892,13 +892,14 @@ pub const ZirBridge = struct {
         const ret_main_tok = main_tokens[ret_node_idx];
         if (ret_main_tok > 0 and token_tags[ret_main_tok - 1] == .bang) {
             // This is an error union return type
-            // Extract the success type to include in type_str
+            var info = TypeInfo.initErrorUnion();
             if (extractTypeFromAstNode(tree, zir, ret_node_idx, source_content)) |inner_type| {
+                info.sentinel = inner_type.sentinel;
                 if (inner_type.type_str) |inner_str| {
-                    return .{ .kind = .error_union, .type_str = inner_str };
+                    info.type_str = inner_str;
                 }
             }
-            return TypeInfo.initErrorUnion();
+            return info;
         }
 
         return extractTypeFromAstNode(tree, zir, ret_node_idx, source_content);
@@ -1012,22 +1013,26 @@ pub const ZirBridge = struct {
             },
             .error_union => {
                 // Error union type: T!E or anyerror!T
-                return TypeInfo.initErrorUnion();
+                const pair = data[type_node].node_and_node;
+                const inner = extractTypeFromAstNode(tree, zir, @intFromEnum(pair[1]), source);
+                var info = TypeInfo.initErrorUnion();
+                if (inner) |ti| {
+                    info.sentinel = ti.sentinel;
+                }
+                return info;
             },
             .optional_type => {
                 // Optional type: ?T
-                return TypeInfo.initOptional();
-            },
-            .ptr_type_aligned, .ptr_type_bit_range, .ptr_type => {
-                // Pointer type: *T, [*]T, etc.
-                const ptr_type = tree.fullPtrType(@enumFromInt(type_node));
-                if (ptr_type) |pt| {
-                    return .{ .kind = if (pt.size == .slice) .slice else .pointer };
+                const child = data[type_node].node;
+                const inner = extractTypeFromAstNode(tree, zir, @intFromEnum(child), source);
+                var info = TypeInfo.initOptional();
+                if (inner) |ti| {
+                    info.sentinel = ti.sentinel;
                 }
-                return TypeInfo.initPointer();
+                return info;
             },
-            .ptr_type_sentinel => {
-                // Sentinel-terminated pointer or slice type: [*:0]T or [:0]T
+            .ptr_type_aligned, .ptr_type_bit_range, .ptr_type, .ptr_type_sentinel => {
+                // Pointer type: *T, [*]T, [:0]T, etc.
                 const ptr_type = tree.fullPtrType(@enumFromInt(type_node));
                 if (ptr_type) |pt| {
                     const sentinel_value = extractSentinelValueFromPtrType(tree, data, main_tokens, token_starts, pt, source);
@@ -1336,5 +1341,48 @@ test "TypeInfo hasSentinel returns false for non-sentinel slice" {
     if (decl) |d| {
         try std.testing.expectEqual(TypeInfo.TypeKind.slice, d.type_info.kind);
         try std.testing.expect(!d.type_info.hasSentinel());
+    }
+}
+
+test "TypeInfo hasSentinel returns true for optional sentinel slice" {
+    const allocator = std.testing.allocator;
+
+    const code: [:0]const u8 = "const x: ?[:0]u8 = null;";
+    var source = Source.init(allocator, "test.zig", code);
+    defer source.deinit();
+
+    var bridge = ZirBridge.init(allocator);
+    defer bridge.deinit();
+
+    try bridge.loadFromSource(&source);
+
+    const decl = bridge.findDeclByName("x");
+    try std.testing.expect(decl != null);
+    if (decl) |d| {
+        try std.testing.expectEqual(TypeInfo.TypeKind.optional, d.type_info.kind);
+        try std.testing.expect(d.type_info.hasSentinel());
+    }
+}
+
+test "TypeInfo hasSentinel returns true for error union sentinel slice" {
+    const allocator = std.testing.allocator;
+
+    const code: [:0]const u8 =
+        \\const Err = error{Oops};
+        \\const x: Err![:0]u8 = error.Oops;
+    ;
+    var source = Source.init(allocator, "test.zig", code);
+    defer source.deinit();
+
+    var bridge = ZirBridge.init(allocator);
+    defer bridge.deinit();
+
+    try bridge.loadFromSource(&source);
+
+    const decl = bridge.findDeclByName("x");
+    try std.testing.expect(decl != null);
+    if (decl) |d| {
+        try std.testing.expectEqual(TypeInfo.TypeKind.error_union, d.type_info.kind);
+        try std.testing.expect(d.type_info.hasSentinel());
     }
 }

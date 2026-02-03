@@ -1,4 +1,5 @@
 const std = @import("std");
+const ast_walk = @import("../ast_walk.zig");
 const ids = @import("../ids.zig");
 
 const VarId = ids.VarId;
@@ -25,7 +26,20 @@ pub const StoreViolationKind = enum {
 const DeferredAction = enum {
     free,
     close,
+    free_owned,
 };
+
+const ErrdeferAction = struct {
+    action: DeferredAction,
+    call_token: ?u32,
+    scope_node: ?u32,
+};
+
+fn errdeferActionEql(lhs: ErrdeferAction, rhs: ErrdeferAction) bool {
+    return lhs.action == rhs.action and
+        lhs.call_token == rhs.call_token and
+        lhs.scope_node == rhs.scope_node;
+}
 
 pub const StoreViolation = struct {
     region: VarId,
@@ -55,7 +69,7 @@ pub const Store = struct {
     violations: std.ArrayList(StoreViolation),
     aliases: std.AutoHashMap(VarId, VarId),
     deferred: std.AutoHashMap(VarId, DeferredAction),
-    errdeferred: std.AutoHashMap(VarId, DeferredAction),
+    errdeferred: std.AutoHashMap(VarId, ErrdeferAction),
     owners: std.AutoHashMap(VarId, VarId),
     allocator: std.mem.Allocator,
 
@@ -65,7 +79,7 @@ pub const Store = struct {
             .violations = .empty,
             .aliases = std.AutoHashMap(VarId, VarId).init(allocator),
             .deferred = std.AutoHashMap(VarId, DeferredAction).init(allocator),
-            .errdeferred = std.AutoHashMap(VarId, DeferredAction).init(allocator),
+            .errdeferred = std.AutoHashMap(VarId, ErrdeferAction).init(allocator),
             .owners = std.AutoHashMap(VarId, VarId).init(allocator),
             .allocator = allocator,
         };
@@ -163,7 +177,7 @@ pub const Store = struct {
         var errdeferred_iter = self.errdeferred.iterator();
         while (errdeferred_iter.next()) |entry| {
             if (other.errdeferred.get(entry.key_ptr.*)) |other_action| {
-                if (entry.value_ptr.* != other_action) return false;
+                if (!errdeferActionEql(entry.value_ptr.*, other_action)) return false;
             } else {
                 return false;
             }
@@ -225,8 +239,21 @@ pub const Store = struct {
         while (errdeferred_iter.next()) |entry| {
             var hasher = std.hash.Wyhash.init(0);
             const key = ids.varIndex(entry.key_ptr.*);
+            const action = entry.value_ptr.*.action;
+            const call_token = entry.value_ptr.*.call_token;
+            const scope_node = entry.value_ptr.*.scope_node;
+            const has_call_token: u8 = if (call_token) |_| 1 else 0;
+            const has_scope_node: u8 = if (scope_node) |_| 1 else 0;
             hasher.update(std.mem.asBytes(&key));
-            hasher.update(std.mem.asBytes(&entry.value_ptr.*));
+            hasher.update(std.mem.asBytes(&action));
+            hasher.update(std.mem.asBytes(&has_call_token));
+            if (call_token) |token| {
+                hasher.update(std.mem.asBytes(&token));
+            }
+            hasher.update(std.mem.asBytes(&has_scope_node));
+            if (scope_node) |scope| {
+                hasher.update(std.mem.asBytes(&scope));
+            }
             errdeferred_hash ^= hasher.final();
         }
 
@@ -448,7 +475,6 @@ pub const Store = struct {
             try self.resources.put(root, .freed);
         }
         _ = self.deferred.remove(root);
-        _ = self.errdeferred.remove(root);
         self.removeOwnershipFor(root);
     }
 
@@ -471,7 +497,6 @@ pub const Store = struct {
             try self.resources.put(root, .closed);
         }
         _ = self.deferred.remove(root);
-        _ = self.errdeferred.remove(root);
         self.removeOwnershipFor(root);
     }
 
@@ -483,6 +508,23 @@ pub const Store = struct {
                 .closed => try self.recordViolation(root, .use_after_close, call_token),
                 else => {},
             }
+        }
+    }
+
+    pub fn markFreeOwned(self: *Store, container: VarId, call_token: ?u32) !void {
+        const container_root = self.canonical(container);
+        var owned: std.ArrayList(VarId) = .empty;
+        defer owned.deinit(self.allocator);
+
+        var iter = self.owners.iterator();
+        while (iter.next()) |entry| {
+            if (entry.value_ptr.* == container_root) {
+                try owned.append(self.allocator, entry.key_ptr.*);
+            }
+        }
+
+        for (owned.items) |resource| {
+            try self.markFreed(resource, call_token);
         }
     }
 
@@ -501,6 +543,16 @@ pub const Store = struct {
         try self.deferred.put(root, .free);
     }
 
+    pub fn markDeferredFreeOwned(self: *Store, region: VarId, call_token: ?u32) !void {
+        const root = self.canonical(region);
+        if (self.deferred.get(root)) |action| {
+            if (action == .free_owned) {
+                try self.recordViolation(root, .double_free, call_token);
+            }
+        }
+        try self.deferred.put(root, .free_owned);
+    }
+
     pub fn markDeferredClose(self: *Store, region: VarId, call_token: ?u32) !void {
         const root = self.canonical(region);
         if (self.deferred.get(root)) |action| {
@@ -516,14 +568,64 @@ pub const Store = struct {
         try self.deferred.put(root, .close);
     }
 
-    pub fn markErrdeferredFree(self: *Store, region: VarId) !void {
+    pub fn markErrdeferredFree(self: *Store, region: VarId, call_token: ?u32, scope_node: ?u32) !void {
         const root = self.canonical(region);
-        try self.errdeferred.put(root, .free);
+        if (self.errdeferred.get(root)) |action| {
+            if (action.action == .free) {
+                try self.recordViolation(root, .double_free, call_token);
+            }
+        }
+        try self.errdeferred.put(root, .{ .action = .free, .call_token = call_token, .scope_node = scope_node });
     }
 
-    pub fn markErrdeferredClose(self: *Store, region: VarId) !void {
+    pub fn markErrdeferredFreeOwned(self: *Store, region: VarId, call_token: ?u32, scope_node: ?u32) !void {
         const root = self.canonical(region);
-        try self.errdeferred.put(root, .close);
+        if (self.errdeferred.get(root)) |action| {
+            if (action.action == .free_owned) {
+                try self.recordViolation(root, .double_free, call_token);
+            }
+        }
+        try self.errdeferred.put(root, .{ .action = .free_owned, .call_token = call_token, .scope_node = scope_node });
+    }
+
+    pub fn markErrdeferredClose(self: *Store, region: VarId, call_token: ?u32, scope_node: ?u32) !void {
+        const root = self.canonical(region);
+        if (self.errdeferred.get(root)) |action| {
+            if (action.action == .close) {
+                try self.recordViolation(root, .double_close, call_token);
+            }
+        }
+        try self.errdeferred.put(root, .{ .action = .close, .call_token = call_token, .scope_node = scope_node });
+    }
+
+    pub fn applyErrdeferredReleases(self: *Store, return_node: u32, parent_map: []const u32) !void {
+        var pending: std.ArrayList(struct {
+            region: VarId,
+            action: ErrdeferAction,
+        }) = .empty;
+        defer pending.deinit(self.allocator);
+
+        var iter = self.errdeferred.iterator();
+        while (iter.next()) |entry| {
+            if (entry.value_ptr.*.scope_node) |scope_node| {
+                if (!ast_walk.isAncestor(scope_node, return_node, parent_map)) {
+                    continue;
+                }
+            }
+            try pending.append(self.allocator, .{
+                .region = entry.key_ptr.*,
+                .action = entry.value_ptr.*,
+            });
+        }
+
+        for (pending.items) |entry| {
+            switch (entry.action.action) {
+                .free => try self.markFreed(entry.region, entry.action.call_token),
+                .free_owned => try self.markFreeOwned(entry.region, entry.action.call_token),
+                .close => try self.markClosed(entry.region, entry.action.call_token),
+            }
+            _ = self.errdeferred.remove(entry.region);
+        }
     }
 
     pub fn recordLeaks(self: *Store, error_path: bool) !void {
@@ -534,9 +636,12 @@ pub const Store = struct {
                     if (self.deferred.get(entry.key_ptr.*)) |action| {
                         if (action == .free) continue;
                     }
+                    if (self.ownerHasDeferredFreeOwned(entry.key_ptr.*, error_path)) {
+                        continue;
+                    }
                     if (error_path) {
                         if (self.errdeferred.get(entry.key_ptr.*)) |action| {
-                            if (action == .free) continue;
+                            if (action.action == .free) continue;
                         }
                     }
                     try self.recordViolation(entry.key_ptr.*, .resource_leak, ids.varIndex(entry.key_ptr.*));
@@ -545,9 +650,12 @@ pub const Store = struct {
                     if (self.deferred.get(entry.key_ptr.*)) |action| {
                         if (action == .close) continue;
                     }
+                    if (self.ownerHasDeferredFreeOwned(entry.key_ptr.*, error_path)) {
+                        continue;
+                    }
                     if (error_path) {
                         if (self.errdeferred.get(entry.key_ptr.*)) |action| {
-                            if (action == .close) continue;
+                            if (action.action == .close) continue;
                         }
                     }
                     try self.recordViolation(entry.key_ptr.*, .resource_leak, ids.varIndex(entry.key_ptr.*));
@@ -555,6 +663,20 @@ pub const Store = struct {
                 else => {},
             }
         }
+    }
+
+    fn ownerHasDeferredFreeOwned(self: *const Store, region: VarId, error_path: bool) bool {
+        const root = self.canonical(region);
+        const owner = self.owners.get(root) orelse return false;
+        if (self.deferred.get(owner)) |action| {
+            if (action == .free_owned) return true;
+        }
+        if (error_path) {
+            if (self.errdeferred.get(owner)) |action| {
+                if (action.action == .free_owned) return true;
+            }
+        }
+        return false;
     }
 
     pub fn violationCount(self: *const Store) usize {
@@ -665,7 +787,7 @@ pub const Store = struct {
             const self_action = entry.value_ptr.*;
 
             if (other.errdeferred.get(region)) |other_action| {
-                if (self_action == other_action) {
+                if (errdeferActionEql(self_action, other_action)) {
                     try result.errdeferred.put(region, self_action);
                 }
             }
@@ -746,7 +868,7 @@ pub const Store = struct {
             const region = entry.key_ptr.*;
             const self_action = entry.value_ptr.*;
             const other_action = other.errdeferred.get(region) orelse return false;
-            if (self_action != other_action) return false;
+            if (!errdeferActionEql(self_action, other_action)) return false;
         }
 
         var owners_iter = self.owners.iterator();

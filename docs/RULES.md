@@ -506,6 +506,8 @@ Detects allocator/resource misuse: double-free, free-without-alloc, close-withou
 
 Resources stored in aggregates are treated as escaping with the aggregate.
 
+**Resource modeling:** Built-in allocator detection includes `alloc`/`free`, `dupe`, and `create`/`destroy`. Configurable `resource_models` can add project-specific APIs. `kind: "free_owned"` models APIs like `deinit` that free resources owned by a value without freeing the value itself.
+
 **Bad:**
 ```zig
 fn foo(allocator: std.mem.Allocator) !void {

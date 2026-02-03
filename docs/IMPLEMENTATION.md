@@ -1431,6 +1431,8 @@ fn isErrorSwallowed(cfg: *const Cfg, catch_node_idx: u32, engine: *const Analysi
 
 The `StoreViolationsEngineChecker` (`src/checkers/store_violations_engine.zig`) reports allocator/resource misuse: double-free, free-without-alloc, close-without-open, use-after-free/close, and leaks. It runs the engine per function and scans `ProgramState` store violations.
 
+The resource call model supports config-defined `free_owned` operations (for deinit-like APIs that free owned resources without freeing the receiver) and applies errdeferred releases on error returns to surface double-free issues on error paths.
+
 #### Ownership escape heuristics
 
 The store model tracks when resources "escape" (ownership transferred) to avoid false leak reports.

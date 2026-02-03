@@ -2,6 +2,6 @@
 const std = @import("std");
 
 fn foo(allocator: std.mem.Allocator) void {
-    const s = allocator.dupeZ(u8, "hello") catch return;
+    const s: []u8 = allocator.dupeZ(u8, "hello") catch return;
     _ = s;
 }
