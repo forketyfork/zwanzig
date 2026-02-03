@@ -24,6 +24,7 @@ pub const CacheKey = struct {
         file_content: []const u8,
         target: ?*const BuildMetadata,
         tool_version: []const u8,
+        type_info_available: bool,
         enabled_rules: []const []const u8,
     ) CacheKey {
         var key: CacheKey = undefined;
@@ -46,6 +47,7 @@ pub const CacheKey = struct {
         std.crypto.hash.sha2.Sha256.hash(tool_version, &key.version_hash, .{});
 
         var config_hasher = std.crypto.hash.sha2.Sha256.init(.{});
+        config_hasher.update(&[_]u8{if (type_info_available) 1 else 0});
         for (enabled_rules) |rule_name| {
             config_hasher.update(rule_name);
             config_hasher.update("\x00");
@@ -303,7 +305,7 @@ test "CacheKey: init and format" {
     };
 
     const rules = [_][]const u8{ "rule1", "rule2" };
-    const key = CacheKey.init("test content", &target, "1.0.0", &rules);
+    const key = CacheKey.init("test content", &target, "1.0.0", false, &rules);
 
     var buf: [256]u8 = undefined;
     const path = try Cache.getCachePath(key, &buf);
@@ -315,9 +317,9 @@ test "CacheKey: init and format" {
 
 test "CacheKey: eql" {
     const rules = [_][]const u8{"rule1"};
-    const key1 = CacheKey.init("test", null, "1.0.0", &rules);
-    const key2 = CacheKey.init("test", null, "1.0.0", &rules);
-    const key3 = CacheKey.init("different", null, "1.0.0", &rules);
+    const key1 = CacheKey.init("test", null, "1.0.0", false, &rules);
+    const key2 = CacheKey.init("test", null, "1.0.0", false, &rules);
+    const key3 = CacheKey.init("different", null, "1.0.0", false, &rules);
 
     try std.testing.expect(key1.eql(key2));
     try std.testing.expect(!key1.eql(key3));
@@ -325,8 +327,8 @@ test "CacheKey: eql" {
 
 test "CacheKey: version changes invalidate" {
     const rules = [_][]const u8{"rule1"};
-    const key1 = CacheKey.init("test", null, "1.0.0", &rules);
-    const key2 = CacheKey.init("test", null, "1.0.1", &rules);
+    const key1 = CacheKey.init("test", null, "1.0.0", false, &rules);
+    const key2 = CacheKey.init("test", null, "1.0.1", false, &rules);
 
     try std.testing.expect(!key1.eql(key2));
 }
@@ -334,16 +336,16 @@ test "CacheKey: version changes invalidate" {
 test "CacheKey: config changes invalidate" {
     const rules1 = [_][]const u8{"rule1"};
     const rules2 = [_][]const u8{ "rule1", "rule2" };
-    const key1 = CacheKey.init("test", null, "1.0.0", &rules1);
-    const key2 = CacheKey.init("test", null, "1.0.0", &rules2);
+    const key1 = CacheKey.init("test", null, "1.0.0", false, &rules1);
+    const key2 = CacheKey.init("test", null, "1.0.0", false, &rules2);
 
     try std.testing.expect(!key1.eql(key2));
 }
 
 test "CacheKey: deterministic across runs" {
     const rules = [_][]const u8{ "rule1", "rule2" };
-    const key1 = CacheKey.init("test content", null, "1.0.0", &rules);
-    const key2 = CacheKey.init("test content", null, "1.0.0", &rules);
+    const key1 = CacheKey.init("test content", null, "1.0.0", false, &rules);
+    const key2 = CacheKey.init("test content", null, "1.0.0", false, &rules);
 
     try std.testing.expect(key1.eql(key2));
     try std.testing.expect(std.mem.eql(u8, &key1.file_hash, &key2.file_hash));
@@ -354,7 +356,7 @@ test "CacheKey: deterministic across runs" {
 test "CacheEntry: write and read" {
     const allocator = std.testing.allocator;
     const rules = [_][]const u8{"rule1"};
-    const key = CacheKey.init("test", null, "1.0.0", &rules);
+    const key = CacheKey.init("test", null, "1.0.0", false, &rules);
     const entry = CacheEntry.init(key, 42);
 
     var tmp_dir = std.testing.tmpDir(.{});
@@ -391,7 +393,7 @@ test "Cache: put and get" {
     defer cache.deinit();
 
     const rules = [_][]const u8{"rule1"};
-    const key = CacheKey.init("test content", null, "1.0.0", &rules);
+    const key = CacheKey.init("test content", null, "1.0.0", false, &rules);
     const data = "cached data";
 
     try cache.put(key, data);
@@ -415,7 +417,7 @@ test "Cache: get non-existent key returns null" {
     defer cache.deinit();
 
     const rules = [_][]const u8{"rule1"};
-    const key = CacheKey.init("non-existent", null, "1.0.0", &rules);
+    const key = CacheKey.init("non-existent", null, "1.0.0", false, &rules);
     const result = try cache.get(key);
 
     try std.testing.expectEqual(@as(?[]u8, null), result);
@@ -438,7 +440,7 @@ test "Cache: invalidate removes entry" {
     defer cache.deinit();
 
     const rules = [_][]const u8{"rule1"};
-    const key = CacheKey.init("test", null, "1.0.0", &rules);
+    const key = CacheKey.init("test", null, "1.0.0", false, &rules);
     try cache.put(key, "data");
 
     try cache.invalidate(key);
@@ -464,8 +466,8 @@ test "Cache: clear removes all entries" {
     defer cache.deinit();
 
     const rules = [_][]const u8{"rule1"};
-    const key1 = CacheKey.init("test1", null, "1.0.0", &rules);
-    const key2 = CacheKey.init("test2", null, "1.0.0", &rules);
+    const key1 = CacheKey.init("test1", null, "1.0.0", false, &rules);
+    const key2 = CacheKey.init("test2", null, "1.0.0", false, &rules);
 
     try cache.put(key1, "data1");
     try cache.put(key2, "data2");
@@ -489,7 +491,7 @@ test "Cache: handles access denied gracefully" {
     defer cache.deinit();
 
     const rules = [_][]const u8{"rule1"};
-    const key = CacheKey.init("test", null, "1.0.0", &rules);
+    const key = CacheKey.init("test", null, "1.0.0", false, &rules);
 
     try cache.put(key, "data");
 

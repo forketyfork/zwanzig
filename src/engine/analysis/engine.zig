@@ -6,6 +6,7 @@ const Cfg = cfg_mod.Cfg;
 const CfgNode = cfg_mod.CfgNode;
 const EdgeKind = cfg_mod.EdgeKind;
 const CfgBuilder = cfg_mod.CfgBuilder;
+const cached_artifacts_mod = @import("../../cached_artifacts.zig");
 const Source = @import("../../source.zig").Source;
 const BuildMetadata = @import("../../build_metadata.zig").BuildMetadata;
 const assertions = @import("../../assertions.zig");
@@ -25,6 +26,12 @@ const VarResolver = @import("../var_resolver.zig").VarResolver;
 const ExplodedGraph = @import("../graph.zig").ExplodedGraph;
 const AstNodeId = ids.AstNodeId;
 const CfgNodeId = ids.CfgNodeId;
+const CachedArtifacts = cached_artifacts_mod.CachedArtifacts;
+
+const FunctionCfgEntry = struct {
+    cfg: *Cfg,
+    owned: bool,
+};
 
 /// Worklist-based analysis engine.
 /// Traverses the CFG and builds an exploded graph with deduplication.
@@ -48,7 +55,7 @@ pub const AnalysisEngine = struct {
     /// Cache of built CFGs for functions (by AST node index).
     /// Stores pointers to heap-allocated CFGs for stable addresses that survive
     /// hashmap rehashing.
-    function_cfgs: std.AutoHashMap(AstNodeId, *Cfg),
+    function_cfgs: std.AutoHashMap(AstNodeId, FunctionCfgEntry),
     /// Map from function name to AST node index
     function_names: std.StringHashMap(AstNodeId),
     /// Cache of scope-aware variable resolvers per function
@@ -75,6 +82,8 @@ pub const AnalysisEngine = struct {
     config: ?*const Config,
     /// Whether widening is enabled.
     use_widening: bool,
+    /// Cached CFG artifacts for this source (optional, not owned).
+    cached_artifacts: ?*CachedArtifacts,
     /// Scratch buffer for FQN construction
     fqn_buffer: [256]u8 = undefined,
 
@@ -107,7 +116,7 @@ pub const AnalysisEngine = struct {
             .max_inline_depth = default_max_inline_depth,
             .max_worklist_steps = default_max_worklist_steps,
             .source = null,
-            .function_cfgs = std.AutoHashMap(AstNodeId, *Cfg).init(allocator),
+            .function_cfgs = std.AutoHashMap(AstNodeId, FunctionCfgEntry).init(allocator),
             .function_names = std.StringHashMap(AstNodeId).init(allocator),
             .var_resolvers = std.AutoHashMap(AstNodeId, *VarResolver).init(allocator),
             .assertion_scopes = std.AutoHashMap(AstNodeId, assertions.AssertionScope).init(allocator),
@@ -120,6 +129,7 @@ pub const AnalysisEngine = struct {
             .type_context = null,
             .config = null,
             .use_widening = false,
+            .cached_artifacts = null,
         };
     }
 
@@ -135,9 +145,10 @@ pub const AnalysisEngine = struct {
         self.worklist.deinit(self.allocator);
         // Deinit and free all cached CFGs
         var iter = self.function_cfgs.valueIterator();
-        while (iter.next()) |cfg_ptr| {
-            cfg_ptr.*.deinit();
-            self.allocator.destroy(cfg_ptr.*);
+        while (iter.next()) |entry| {
+            if (!entry.owned) continue;
+            entry.cfg.deinit();
+            self.allocator.destroy(entry.cfg);
         }
         self.function_cfgs.deinit();
         self.function_names.deinit();
@@ -188,6 +199,10 @@ pub const AnalysisEngine = struct {
     /// Set the config for resource models.
     pub fn setConfig(self: *AnalysisEngine, config: *const Config) void {
         self.config = config;
+    }
+
+    pub fn setCachedArtifacts(self: *AnalysisEngine, artifacts: *CachedArtifacts) void {
+        self.cached_artifacts = artifacts;
     }
 
     /// Enable or disable the use of function summaries.
@@ -291,19 +306,45 @@ pub const AnalysisEngine = struct {
     /// Get or build a CFG for a function by its AST node index.
     pub fn getOrBuildFunctionCfg(self: *AnalysisEngine, fn_ast_node: AstNodeId) ?*const Cfg {
         // Check cache first - returns the pointer stored in the map
-        if (self.function_cfgs.get(fn_ast_node)) |cfg_ptr| {
-            return cfg_ptr;
+        if (self.function_cfgs.get(fn_ast_node)) |entry| {
+            return entry.cfg;
+        }
+
+        if (self.cached_artifacts) |artifacts| {
+            const fn_index = ids.astIndex(fn_ast_node);
+            if (artifacts.getCfg(fn_index)) |cfg_ptr| {
+                self.function_cfgs.put(fn_ast_node, .{ .cfg = @constCast(cfg_ptr), .owned = false }) catch return cfg_ptr;
+                return cfg_ptr;
+            }
         }
 
         // Build the CFG if source is available
         const src = self.source orelse return null;
         var builder = CfgBuilder.init(self.allocator);
+        builder.setTypeContext(self.type_context);
         const cfg_opt = builder.buildFromFn(src, fn_ast_node) catch return null;
         if (cfg_opt) |cfg| {
             // Allocate CFG on the heap for stable address
             const cfg_ptr = self.allocator.create(Cfg) catch return null;
             cfg_ptr.* = cfg;
-            self.function_cfgs.put(fn_ast_node, cfg_ptr) catch {
+
+            if (self.cached_artifacts) |artifacts| {
+                const fn_index = ids.astIndex(fn_ast_node);
+                self.function_cfgs.put(fn_ast_node, .{ .cfg = cfg_ptr, .owned = false }) catch {
+                    cfg_ptr.deinit();
+                    self.allocator.destroy(cfg_ptr);
+                    return null;
+                };
+                artifacts.addCfg(fn_index, cfg_ptr) catch {
+                    _ = self.function_cfgs.remove(fn_ast_node);
+                    cfg_ptr.deinit();
+                    self.allocator.destroy(cfg_ptr);
+                    return null;
+                };
+                return cfg_ptr;
+            }
+
+            self.function_cfgs.put(fn_ast_node, .{ .cfg = cfg_ptr, .owned = true }) catch {
                 cfg_ptr.deinit();
                 self.allocator.destroy(cfg_ptr);
                 return null;

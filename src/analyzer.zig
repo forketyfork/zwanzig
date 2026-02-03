@@ -261,6 +261,7 @@ pub const Analyzer = struct {
 
         var source = Source.init(scratch_allocator, file_path, content);
         defer source.deinit();
+        const type_info_available = source.hasTypeInfo();
 
         var cached_artifacts: ?CachedArtifacts = null;
         defer if (cached_artifacts) |*ca| ca.deinit();
@@ -286,6 +287,7 @@ pub const Analyzer = struct {
                 content,
                 self.getBuildMetadata(),
                 self.tool_version,
+                type_info_available,
                 enabled_rules_buf.items,
             );
             cache_key = key;
@@ -299,6 +301,13 @@ pub const Analyzer = struct {
                         break :blk null;
                     };
                 }
+            }
+        }
+
+        if (cached_artifacts == null) {
+            cached_artifacts = CachedArtifacts.init(scratch_allocator);
+            if (cached_artifacts) |*artifacts| {
+                artifacts.had_type_info = type_info_available;
             }
         }
 
@@ -316,7 +325,9 @@ pub const Analyzer = struct {
             scratch_diagnostics.deinit(scratch_allocator);
         }
 
-        try self.runChecksOnSource(&source, scratch_allocator, &scratch_diagnostics, &result.stats);
+        if (cached_artifacts) |*artifacts| {
+            try self.runChecksOnSource(&source, scratch_allocator, artifacts, &scratch_diagnostics, &result.stats);
+        }
 
         try filterDiagnosticsWithSuppressions(scratch_allocator, content, &scratch_diagnostics);
 
@@ -328,20 +339,17 @@ pub const Analyzer = struct {
 
         if (self.use_cache and cache_key != null) {
             if (self.cache) |*c| {
-                var artifacts = CachedArtifacts.init(scratch_allocator);
-                defer artifacts.deinit();
+                if (cached_artifacts) |*artifacts| {
+                    const serialized = artifacts.serialize(scratch_allocator) catch |err| {
+                        log.debug("analyzeResult: failed to serialize artifacts: {}", .{err});
+                        return result;
+                    };
+                    defer scratch_allocator.free(serialized);
 
-                artifacts.had_type_info = source.hasTypeInfo();
-
-                const serialized = artifacts.serialize(scratch_allocator) catch |err| {
-                    log.debug("analyzeResult: failed to serialize artifacts: {}", .{err});
-                    return result;
-                };
-                defer scratch_allocator.free(serialized);
-
-                c.put(cache_key.?, serialized) catch |err| {
-                    log.debug("analyzeResult: failed to cache artifacts: {}", .{err});
-                };
+                    c.put(cache_key.?, serialized) catch |err| {
+                        log.debug("analyzeResult: failed to cache artifacts: {}", .{err});
+                    };
+                }
             }
         }
 
@@ -377,6 +385,7 @@ pub const Analyzer = struct {
         self: *Analyzer,
         source: *Source,
         scratch_allocator: std.mem.Allocator,
+        cached_artifacts: *CachedArtifacts,
         diagnostics: *std.ArrayList(Diagnostic),
         analysis_stats: *checker_mod.AnalysisStats,
     ) !void {
@@ -397,6 +406,7 @@ pub const Analyzer = struct {
                 .use_widening = self.use_widening,
             },
             .config = self.getConfig(),
+            .cached_artifacts = cached_artifacts,
             .dump_cfg_dir = self.dump_cfg_dir,
             .dump_exploded_graph_dir = self.dump_exploded_graph_dir,
             .dump_annotated_cfg_dir = self.dump_annotated_cfg_dir,

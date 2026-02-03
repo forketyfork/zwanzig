@@ -157,66 +157,64 @@ pub const EmptyCatchEngineChecker = struct {
         diagnostics: *std.ArrayList(Diagnostic),
         context: checker_mod.CheckerContext,
     ) CheckerError!void {
-        var builder = context.createCfgBuilder(allocator);
+        var cfg_handle = (context.getOrBuildCfg(allocator, src, fn_node) catch return) orelse return;
+        defer cfg_handle.deinit();
 
-        // Build CFG for the function
-        var cfg_opt = builder.buildFromFn(src, fn_node) catch return;
-        if (cfg_opt) |*cfg| {
-            defer cfg.deinit();
+        // Run the analysis engine with a worklist limit to avoid pathological cases
+        var engine = AnalysisEngine.initWithSource(allocator, cfg_handle.cfg, src);
+        defer engine.deinit();
+        engine.setCheckerName("empty-catch-engine");
+        if (context.cached_artifacts) |artifacts| {
+            engine.setCachedArtifacts(artifacts);
+        }
+        if (context.build_metadata) |metadata| {
+            engine.setBuildMetadata(metadata);
+        }
+        if (context.analysis_limits.max_worklist_steps) |steps| {
+            engine.setMaxWorklistSteps(steps);
+        }
+        if (context.analysis_limits.max_states_per_point) |max| {
+            engine.setMaxStatesPerPoint(max);
+        }
+        if (context.analysis_limits.use_widening) |use_w| {
+            engine.setUseWidening(use_w);
+        }
+        engine.run() catch |err| switch (err) {
+            error.OutOfMemory => return error.OutOfMemory,
+            error.AnalysisLimitExceeded => {},
+        };
+        if (context.analysis_stats) |stats| {
+            stats.recordRun(engine.getGraph().getDroppedStateCount());
+            stats.recordWidening(engine.getGraph().getWidenedNodeCount(), engine.getGraph().getWideningConvergedCount());
+        }
 
-            // Run the analysis engine with a worklist limit to avoid pathological cases
-            var engine = AnalysisEngine.initWithSource(allocator, cfg, src);
-            defer engine.deinit();
-            engine.setCheckerName("empty-catch-engine");
-            if (context.build_metadata) |metadata| {
-                engine.setBuildMetadata(metadata);
-            }
-            if (context.analysis_limits.max_worklist_steps) |steps| {
-                engine.setMaxWorklistSteps(steps);
-            }
-            if (context.analysis_limits.max_states_per_point) |max| {
-                engine.setMaxStatesPerPoint(max);
-            }
-            if (context.analysis_limits.use_widening) |use_w| {
-                engine.setUseWidening(use_w);
-            }
-            engine.run() catch |err| switch (err) {
-                error.OutOfMemory => return error.OutOfMemory,
-                error.AnalysisLimitExceeded => {},
-            };
-            if (context.analysis_stats) |stats| {
-                stats.recordRun(engine.getGraph().getDroppedStateCount());
-                stats.recordWidening(engine.getGraph().getWidenedNodeCount(), engine.getGraph().getWideningConvergedCount());
-            }
+        // Dump visualizations if requested
+        if (context.dump_exploded_graph_dir) |dir| {
+            engine_mod.dot.writeExplodedGraphToFile(engine.getGraph(), dir, src.getFilePath(), cfg_handle.cfg.fn_name, allocator);
+        }
+        if (context.dump_annotated_cfg_dir) |dir| {
+            engine_mod.dot.writeAnnotatedCfgToFile(engine.getGraph(), dir, src.getFilePath(), cfg_handle.cfg.fn_name, allocator);
+        }
+        if (context.dump_path_trace_dir) |dir| {
+            engine_mod.dot.writePathTracesToFile(engine.getGraph(), dir, src.getFilePath(), cfg_handle.cfg.fn_name, allocator);
+        }
 
-            // Dump visualizations if requested
-            if (context.dump_exploded_graph_dir) |dir| {
-                engine_mod.dot.writeExplodedGraphToFile(engine.getGraph(), dir, src.getFilePath(), cfg.fn_name, allocator);
-            }
-            if (context.dump_annotated_cfg_dir) |dir| {
-                engine_mod.dot.writeAnnotatedCfgToFile(engine.getGraph(), dir, src.getFilePath(), cfg.fn_name, allocator);
-            }
-            if (context.dump_path_trace_dir) |dir| {
-                engine_mod.dot.writePathTracesToFile(engine.getGraph(), dir, src.getFilePath(), cfg.fn_name, allocator);
-            }
+        // Examine CFG nodes for catch_expr with empty handlers
+        for (cfg_handle.cfg.nodes.items) |cfg_node| {
+            if (cfg_node.ir_node.tag == .catch_expr) {
+                if (hasEmptyHandler(cfg_handle.cfg, cfg_node.index)) {
+                    // Get source range from IR node
+                    if (cfg_node.ir_node.source_range) |range| {
+                        const diag = Diagnostic.init(
+                            allocator,
+                            src.getFilePath(),
+                            "empty-catch-engine",
+                            .warning,
+                            "Empty catch block detected. Consider handling the error or using '_' to explicitly ignore it.",
+                            range,
+                        ) catch return;
 
-            // Examine CFG nodes for catch_expr with empty handlers
-            for (cfg.nodes.items) |cfg_node| {
-                if (cfg_node.ir_node.tag == .catch_expr) {
-                    if (hasEmptyHandler(cfg, cfg_node.index)) {
-                        // Get source range from IR node
-                        if (cfg_node.ir_node.source_range) |range| {
-                            const diag = Diagnostic.init(
-                                allocator,
-                                src.getFilePath(),
-                                "empty-catch-engine",
-                                .warning,
-                                "Empty catch block detected. Consider handling the error or using '_' to explicitly ignore it.",
-                                range,
-                            ) catch return;
-
-                            diagnostics.append(allocator, diag) catch return;
-                        }
+                        diagnostics.append(allocator, diag) catch return;
                     }
                 }
             }
