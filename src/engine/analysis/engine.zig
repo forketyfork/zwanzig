@@ -7,6 +7,7 @@ const CfgNode = cfg_mod.CfgNode;
 const EdgeKind = cfg_mod.EdgeKind;
 const CfgBuilder = cfg_mod.CfgBuilder;
 const cached_artifacts_mod = @import("../../cached_artifacts.zig");
+const ast_walk = @import("../../ast_walk.zig");
 const Source = @import("../../source.zig").Source;
 const BuildMetadata = @import("../../build_metadata.zig").BuildMetadata;
 const assertions = @import("../../assertions.zig");
@@ -84,6 +85,8 @@ pub const AnalysisEngine = struct {
     use_widening: bool,
     /// Cached CFG artifacts for this source (optional, not owned).
     cached_artifacts: ?*CachedArtifacts,
+    /// Cached parent map for AST scope checks.
+    parent_map: ?[]u32,
     /// Scratch buffer for FQN construction
     fqn_buffer: [256]u8 = undefined,
 
@@ -130,6 +133,7 @@ pub const AnalysisEngine = struct {
             .config = null,
             .use_widening = false,
             .cached_artifacts = null,
+            .parent_map = null,
         };
     }
 
@@ -163,7 +167,32 @@ pub const AnalysisEngine = struct {
             scope.deinit(self.allocator);
         }
         self.assertion_scopes.deinit();
+        if (self.parent_map) |map| {
+            self.allocator.free(map);
+        }
         self.summary_cache.deinit();
+    }
+
+    pub fn getParentMap(self: *AnalysisEngine, tree: *const std.zig.Ast) ![]const u32 {
+        if (self.parent_map) |map| return map;
+
+        const tags = tree.nodes.items(.tag);
+        const parent_map = try self.allocator.alloc(u32, tags.len);
+        @memset(parent_map, 0);
+        for (0..tags.len) |i| {
+            switch (tags[i]) {
+                .fn_decl,
+                .test_decl,
+                .simple_var_decl,
+                .local_var_decl,
+                .global_var_decl,
+                .aligned_var_decl,
+                => ast_walk.fillParentMap(tree, @intCast(i), parent_map),
+                else => {},
+            }
+        }
+        self.parent_map = parent_map;
+        return parent_map;
     }
 
     /// Set the maximum inline depth for interprocedural analysis.
@@ -914,8 +943,10 @@ pub const AnalysisEngine = struct {
             },
             .ret => {
                 if (ir_node.ast_node) |ast_node| {
+                    var tree_opt: ?*const std.zig.Ast = null;
                     if (self.source) |src| {
                         if (src.ast() catch null) |tree| {
+                            tree_opt = tree;
                             const data = tree.nodes.items(.data);
                             const tags = tree.nodes.items(.tag);
                             if (ast_node < data.len) {
@@ -975,7 +1006,10 @@ pub const AnalysisEngine = struct {
                         }
                     }
                     if (new_state.isErrorPath()) {
-                        try new_state.applyErrdeferredReleases();
+                        if (tree_opt) |tree| {
+                            const parent_map = try self.getParentMap(tree);
+                            try new_state.applyErrdeferredReleases(ast_node, parent_map);
+                        }
                     }
                 }
             },

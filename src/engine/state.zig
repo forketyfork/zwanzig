@@ -330,23 +330,23 @@ pub const ProgramState = struct {
         self.invalidateCache();
     }
 
-    pub fn trackErrdeferredFree(self: *ProgramState, region: VarId, call_token: ?u32) !void {
-        try self.store.markErrdeferredFree(region, call_token);
+    pub fn trackErrdeferredFree(self: *ProgramState, region: VarId, call_token: ?u32, scope_node: ?u32) !void {
+        try self.store.markErrdeferredFree(region, call_token, scope_node);
         self.invalidateCache();
     }
 
-    pub fn trackErrdeferredFreeOwned(self: *ProgramState, region: VarId, call_token: ?u32) !void {
-        try self.store.markErrdeferredFreeOwned(region, call_token);
+    pub fn trackErrdeferredFreeOwned(self: *ProgramState, region: VarId, call_token: ?u32, scope_node: ?u32) !void {
+        try self.store.markErrdeferredFreeOwned(region, call_token, scope_node);
         self.invalidateCache();
     }
 
-    pub fn trackErrdeferredClose(self: *ProgramState, region: VarId, call_token: ?u32) !void {
-        try self.store.markErrdeferredClose(region, call_token);
+    pub fn trackErrdeferredClose(self: *ProgramState, region: VarId, call_token: ?u32, scope_node: ?u32) !void {
+        try self.store.markErrdeferredClose(region, call_token, scope_node);
         self.invalidateCache();
     }
 
-    pub fn applyErrdeferredReleases(self: *ProgramState) !void {
-        try self.store.applyErrdeferredReleases();
+    pub fn applyErrdeferredReleases(self: *ProgramState, return_node: u32, parent_map: []const u32) !void {
+        try self.store.applyErrdeferredReleases(return_node, parent_map);
         self.invalidateCache();
     }
 

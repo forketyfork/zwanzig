@@ -7,7 +7,7 @@ const Holder = struct {
 };
 
 fn makePath(allocator: std.mem.Allocator) Err![:0]const u8 {
-    const s = try allocator.dupeZ(u8, "hello");
+    const s: [:0]const u8 = try allocator.dupeZ(u8, "hello");
     return s;
 }
 

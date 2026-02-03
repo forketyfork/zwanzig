@@ -503,7 +503,7 @@ pub fn mixin(comptime _Engine: type) type {
             const container_var = _Engine.var_resolution.resolveVarIdFromExpr(self, base_node, current_cfg) orelse return;
             const resource_var = _Engine.var_resolution.resolveVarIdFromExpr(self, rhs_node, current_cfg) orelse return;
             try state.trackOwnership(resource_var, container_var);
-            try escapeOwnedFromFieldBase(self, state, tree, base_node, container_var, resource_var);
+            try _Engine.ownership.escapeOwnedFromFieldBase(self, state, tree, base_node, container_var, resource_var);
         }
 
         pub fn escapeReturnedVars(self: *_Engine, state: *ProgramState, fn_node: ids.AstNodeId, current_cfg: *const Cfg) EngineError!void {

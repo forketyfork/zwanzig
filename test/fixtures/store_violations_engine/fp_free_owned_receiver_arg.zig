@@ -4,8 +4,7 @@ const Owner = struct {
     allocator: std.mem.Allocator,
     buf: []u8,
 
-    fn deinit(self: *Owner, allocator: std.mem.Allocator) void {
-        _ = allocator;
+    fn deinit(self: *Owner, _: std.mem.Allocator) void {
         self.allocator.free(self.buf);
     }
 };

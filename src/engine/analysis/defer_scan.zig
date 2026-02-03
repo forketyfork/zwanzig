@@ -1,3 +1,4 @@
+const std = @import("std");
 const ids = @import("../../ids.zig");
 const Cfg = @import("../../cfg.zig").Cfg;
 const ProgramState = @import("../state.zig").ProgramState;
@@ -11,20 +12,30 @@ pub fn mixin(comptime _Engine: type) type {
             const data = tree.nodes.items(.data);
             if (defer_node >= data.len) return;
             const body_node = @intFromEnum(data[defer_node].node);
-            try scanDeferredBody(self, state, body_node, current_cfg, false);
+            try scanDeferredBody(self, state, body_node, current_cfg, false, null);
         }
 
         pub fn applyErrdeferredReleases(self: *_Engine, state: *ProgramState, defer_node: u32, current_cfg: *const Cfg) EngineError!void {
             const src = self.source orelse return;
             const tree = src.ast() catch return;
             const data = tree.nodes.items(.data);
+            const tags = tree.nodes.items(.tag);
             if (defer_node >= data.len) return;
             const body_node = @intFromEnum(data[defer_node].opt_token_and_node[1]);
             if (body_node == 0) return;
-            try scanDeferredBody(self, state, body_node, current_cfg, true);
+            const parent_map = try self.getParentMap(tree);
+            const scope_node = findErrdeferScope(tags, parent_map, defer_node);
+            try scanDeferredBody(self, state, body_node, current_cfg, true, scope_node);
         }
 
-        pub fn scanDeferredBody(self: *_Engine, state: *ProgramState, node: u32, current_cfg: *const Cfg, error_only: bool) EngineError!void {
+        pub fn scanDeferredBody(
+            self: *_Engine,
+            state: *ProgramState,
+            node: u32,
+            current_cfg: *const Cfg,
+            error_only: bool,
+            scope_node: ?u32,
+        ) EngineError!void {
             const src = self.source orelse return;
             const tree = src.ast() catch return;
             const tags = tree.nodes.items(.tag);
@@ -41,7 +52,7 @@ pub fn mixin(comptime _Engine: type) type {
                                 if (call_info.target_expr) |arg_node| {
                                     if (_Engine.var_resolution.resolveVarIdFromExpr(self, arg_node, current_cfg)) |var_id| {
                                         if (error_only) {
-                                            try state.trackErrdeferredFree(var_id, call_token);
+                                            try state.trackErrdeferredFree(var_id, call_token, scope_node);
                                         } else {
                                             try state.trackDeferredFree(var_id, call_token);
                                         }
@@ -52,7 +63,7 @@ pub fn mixin(comptime _Engine: type) type {
                                 if (call_info.target_expr) |arg_node| {
                                     if (_Engine.var_resolution.resolveVarIdFromExpr(self, arg_node, current_cfg)) |var_id| {
                                         if (error_only) {
-                                            try state.trackErrdeferredFreeOwned(var_id, call_token);
+                                            try state.trackErrdeferredFreeOwned(var_id, call_token, scope_node);
                                         } else {
                                             try state.trackDeferredFreeOwned(var_id, call_token);
                                         }
@@ -63,7 +74,7 @@ pub fn mixin(comptime _Engine: type) type {
                                 if (call_info.target_expr) |arg_node| {
                                     if (_Engine.var_resolution.resolveVarIdFromExpr(self, arg_node, current_cfg)) |var_id| {
                                         if (error_only) {
-                                            try state.trackErrdeferredClose(var_id, call_token);
+                                            try state.trackErrdeferredClose(var_id, call_token, scope_node);
                                         } else {
                                             try state.trackDeferredClose(var_id, call_token);
                                         }
@@ -102,25 +113,25 @@ pub fn mixin(comptime _Engine: type) type {
                     }
 
                     for (statements) |stmt| {
-                        try scanDeferredBody(self, state, stmt, current_cfg, error_only);
+                        try scanDeferredBody(self, state, stmt, current_cfg, error_only, scope_node);
                     }
                 },
                 .@"if", .if_simple => {
                     const full_if = tree.fullIf(@enumFromInt(node)) orelse return;
                     if (full_if.payload_token) |tok| {
                         try _Engine.payloads.bindPayloadAlias(self, state, tok, @intFromEnum(full_if.ast.cond_expr), current_cfg);
-                        try scanDeferredBody(self, state, @intFromEnum(full_if.ast.then_expr), current_cfg, error_only);
+                        try scanDeferredBody(self, state, @intFromEnum(full_if.ast.then_expr), current_cfg, error_only, scope_node);
                         state.resetRegion(ids.varId(tok));
                     } else {
-                        try scanDeferredBody(self, state, @intFromEnum(full_if.ast.then_expr), current_cfg, error_only);
+                        try scanDeferredBody(self, state, @intFromEnum(full_if.ast.then_expr), current_cfg, error_only, scope_node);
                     }
                     if (full_if.ast.else_expr.unwrap()) |else_node| {
                         if (full_if.error_token) |tok| {
                             try _Engine.payloads.bindPayloadUnknown(self, state, tok);
-                            try scanDeferredBody(self, state, @intFromEnum(else_node), current_cfg, error_only);
+                            try scanDeferredBody(self, state, @intFromEnum(else_node), current_cfg, error_only, scope_node);
                             state.resetRegion(ids.varId(tok));
                         } else {
-                            try scanDeferredBody(self, state, @intFromEnum(else_node), current_cfg, error_only);
+                            try scanDeferredBody(self, state, @intFromEnum(else_node), current_cfg, error_only, scope_node);
                         }
                     }
                 },
@@ -128,18 +139,18 @@ pub fn mixin(comptime _Engine: type) type {
                     const full_while = tree.fullWhile(@enumFromInt(node)) orelse return;
                     if (full_while.payload_token) |tok| {
                         try _Engine.payloads.bindPayloadAlias(self, state, tok, @intFromEnum(full_while.ast.cond_expr), current_cfg);
-                        try scanDeferredBody(self, state, @intFromEnum(full_while.ast.then_expr), current_cfg, error_only);
+                        try scanDeferredBody(self, state, @intFromEnum(full_while.ast.then_expr), current_cfg, error_only, scope_node);
                         state.resetRegion(ids.varId(tok));
                     } else {
-                        try scanDeferredBody(self, state, @intFromEnum(full_while.ast.then_expr), current_cfg, error_only);
+                        try scanDeferredBody(self, state, @intFromEnum(full_while.ast.then_expr), current_cfg, error_only, scope_node);
                     }
                     if (full_while.ast.else_expr.unwrap()) |else_node| {
                         if (full_while.error_token) |tok| {
                             try _Engine.payloads.bindPayloadUnknown(self, state, tok);
-                            try scanDeferredBody(self, state, @intFromEnum(else_node), current_cfg, error_only);
+                            try scanDeferredBody(self, state, @intFromEnum(else_node), current_cfg, error_only, scope_node);
                             state.resetRegion(ids.varId(tok));
                         } else {
-                            try scanDeferredBody(self, state, @intFromEnum(else_node), current_cfg, error_only);
+                            try scanDeferredBody(self, state, @intFromEnum(else_node), current_cfg, error_only, scope_node);
                         }
                     }
                 },
@@ -147,23 +158,52 @@ pub fn mixin(comptime _Engine: type) type {
                     const full_for = tree.fullFor(@enumFromInt(node)) orelse return;
                     if (full_for.payload_token != 0) {
                         try _Engine.payloads.bindForPayloads(self, state, full_for.payload_token);
-                        try scanDeferredBody(self, state, @intFromEnum(full_for.ast.then_expr), current_cfg, error_only);
+                        try scanDeferredBody(self, state, @intFromEnum(full_for.ast.then_expr), current_cfg, error_only, scope_node);
                     } else {
-                        try scanDeferredBody(self, state, @intFromEnum(full_for.ast.then_expr), current_cfg, error_only);
+                        try scanDeferredBody(self, state, @intFromEnum(full_for.ast.then_expr), current_cfg, error_only, scope_node);
                     }
                     if (full_for.ast.else_expr.unwrap()) |else_node| {
-                        try scanDeferredBody(self, state, @intFromEnum(else_node), current_cfg, error_only);
+                        try scanDeferredBody(self, state, @intFromEnum(else_node), current_cfg, error_only, scope_node);
                     }
                 },
                 .@"switch", .switch_comma => {
                     const full_switch = tree.switchFull(@enumFromInt(node));
                     for (full_switch.ast.cases) |case_node| {
                         const full_case = tree.fullSwitchCase(case_node) orelse continue;
-                        try scanDeferredBody(self, state, @intFromEnum(full_case.ast.target_expr), current_cfg, error_only);
+                        try scanDeferredBody(self, state, @intFromEnum(full_case.ast.target_expr), current_cfg, error_only, scope_node);
                     }
                 },
                 else => {},
             }
+        }
+
+        fn findErrdeferScope(tags: []const std.zig.Ast.Node.Tag, parent_map: []const u32, node: u32) ?u32 {
+            var current = node;
+            var depth: u32 = 0;
+            while (current < parent_map.len and depth < 64) : (depth += 1) {
+                const parent = parent_map[current];
+                if (parent == 0 or parent >= tags.len) return null;
+                switch (tags[parent]) {
+                    .block,
+                    .block_semicolon,
+                    .block_two,
+                    .block_two_semicolon,
+                    .@"if",
+                    .if_simple,
+                    .@"while",
+                    .while_simple,
+                    .while_cont,
+                    .@"for",
+                    .for_simple,
+                    .@"switch",
+                    .switch_comma,
+                    .fn_decl,
+                    .test_decl,
+                    => return parent,
+                    else => current = parent,
+                }
+            }
+            return null;
         }
     };
 }

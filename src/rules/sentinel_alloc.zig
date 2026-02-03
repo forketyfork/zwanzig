@@ -267,13 +267,6 @@ pub const SentinelAllocRule = struct {
                             }
                         }
                     }
-                    if (type_node_opt == null) {
-                        if (full.ast.init_node.unwrap()) |init_node| {
-                            if (ast_walk.isAncestor(@intFromEnum(init_node), call_node, parent_map)) {
-                                return TypeInfo{ .kind = .slice, .sentinel = .{ .value = 0 } };
-                            }
-                        }
-                    }
                     return null;
                 },
                 .@"return" => {
@@ -464,7 +457,7 @@ pub const SentinelAllocRule = struct {
         if (base_token >= token_tags.len or token_tags[base_token] != .identifier) return null;
         const base_name = tree.tokenSlice(base_token);
 
-        const type_name = findVarDeclTypeName(tree, tags, datas, token_tags, base_name) orelse return null;
+        const type_name = findVarDeclTypeName(tree, tags, token_tags, base_name) orelse return null;
         if (findStructFieldSentinel(struct_fields, type_name, field_name)) |has_sentinel| {
             return if (has_sentinel)
                 TypeInfo{ .kind = .slice, .sentinel = .{ .value = 0 } }
@@ -478,11 +471,9 @@ pub const SentinelAllocRule = struct {
     fn findVarDeclTypeName(
         tree: *const Ast,
         tags: []const Ast.Node.Tag,
-        datas: []const Ast.Node.Data,
         token_tags: []const std.zig.Token.Tag,
         name: []const u8,
     ) ?[]const u8 {
-        _ = datas;
         const main_tokens = tree.nodes.items(.main_token);
         for (0..tags.len) |i| {
             const node_idx: u32 = @intCast(i);
