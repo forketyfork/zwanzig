@@ -54,6 +54,8 @@ Example:
 
 JSON works well with CI pipelines and editor integrations.
 
+Diagnostics may include an optional `related` location when an issue has a secondary source range (e.g., escape origin).
+
 ## SARIF
 
 ```bash
@@ -61,3 +63,5 @@ zwanzig --format sarif src/
 ```
 
 [SARIF 2.1.0](https://docs.oasis-open.org/sarif/sarif/v2.1.0/sarif-v2.1.0.html) format, supported by GitHub code scanning, VS Code's SARIF extension, and SonarQube.
+
+Secondary locations are emitted as `relatedLocations` when available.

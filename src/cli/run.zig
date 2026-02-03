@@ -240,10 +240,13 @@ fn configureAnalyzer(analyzer: *Analyzer, cli_args: CliArgs, final_config: Merge
     if (final_config.use_widening) |use_w| {
         analyzer.setUseWidening(use_w);
     }
-    if (final_config.resource_models.len > 0) {
+    const has_models = final_config.resource_models.len > 0 or final_config.escape_models.len > 0 or final_config.escape_max_depth != null;
+    if (has_models) {
         analyzer.setConfig(.{
             .rule_filter = .none,
             .resource_models = final_config.resource_models,
+            .escape_models = final_config.escape_models,
+            .escape_max_depth = final_config.escape_max_depth,
         });
     }
 

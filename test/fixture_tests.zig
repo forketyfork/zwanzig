@@ -19,6 +19,7 @@ const UnusedParameterRule = src.rules.unused_parameter.UnusedParameterRule;
 const OptionalUnwrapEngineChecker = src.checkers.optional_unwrap_engine.OptionalUnwrapEngineChecker;
 const UnreachableCodeChecker = src.checkers.unreachable_code_checker.UnreachableCodeChecker;
 const StoreViolationsEngineChecker = src.checkers.store_violations_engine.StoreViolationsEngineChecker;
+const StackEscapeEngineChecker = src.checkers.stack_escape_engine.StackEscapeEngineChecker;
 
 test "dupe_import fixtures" {
     try runFixturesInDir(std.testing.allocator, &DupeImportRule.rule, "test/fixtures/dupe_import");
@@ -74,4 +75,8 @@ test "unreachable_code_engine fixtures" {
 
 test "store_violations_engine fixtures" {
     try runCheckerFixturesInDir(std.testing.allocator, &StoreViolationsEngineChecker.checker, "test/fixtures/store_violations_engine");
+}
+
+test "stack_escape_engine fixtures" {
+    try runCheckerFixturesInDir(std.testing.allocator, &StackEscapeEngineChecker.checker, "test/fixtures/stack_escape_engine");
 }

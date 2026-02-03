@@ -15,6 +15,7 @@ const OptionalUnwrapEngineChecker = @import("../checkers/optional_unwrap_engine.
 const SwallowedErrorChecker = @import("../checkers/swallowed_error.zig").SwallowedErrorChecker;
 const UnreachableCodeChecker = @import("../checkers/unreachable_code_checker.zig").UnreachableCodeChecker;
 const StoreViolationsEngineChecker = @import("../checkers/store_violations_engine.zig").StoreViolationsEngineChecker;
+const StackEscapeEngineChecker = @import("../checkers/stack_escape_engine.zig").StackEscapeEngineChecker;
 
 const Analyzer = analyzer_mod.Analyzer;
 
@@ -37,4 +38,5 @@ pub fn registerDefaults(analyzer: *Analyzer) !void {
     try analyzer.registerChecker(&SwallowedErrorChecker.checker);
     try analyzer.registerChecker(&UnreachableCodeChecker.checker);
     try analyzer.registerChecker(&StoreViolationsEngineChecker.checker);
+    try analyzer.registerChecker(&StackEscapeEngineChecker.checker);
 }

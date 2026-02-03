@@ -57,6 +57,7 @@ pub const Diagnostic = struct {
     severity: Severity,
     message: []const u8,
     range: SourceRange,
+    related_range: ?SourceRange = null,
 
     pub fn init(
         allocator: std.mem.Allocator,
@@ -73,6 +74,27 @@ pub const Diagnostic = struct {
             .severity = severity,
             .message = owned_message,
             .range = range,
+            .related_range = null,
+        };
+    }
+
+    pub fn initWithRelated(
+        allocator: std.mem.Allocator,
+        file_path: []const u8,
+        rule_id: []const u8,
+        severity: Severity,
+        message: []const u8,
+        range: SourceRange,
+        related_range: ?SourceRange,
+    ) !Diagnostic {
+        const owned_message = try allocator.dupe(u8, message);
+        return .{
+            .file_path = file_path,
+            .rule_id = rule_id,
+            .severity = severity,
+            .message = owned_message,
+            .range = range,
+            .related_range = related_range,
         };
     }
 
@@ -89,6 +111,20 @@ pub const Diagnostic = struct {
         return init(allocator, file_path, rule_id, severity, message, SourceRange.fromSingleLocation(loc));
     }
 
+    pub fn initAtLocationWithRelated(
+        allocator: std.mem.Allocator,
+        file_path: []const u8,
+        rule_id: []const u8,
+        severity: Severity,
+        message: []const u8,
+        line: usize,
+        column: usize,
+        related_range: ?SourceRange,
+    ) !Diagnostic {
+        const loc = Location.init(line, column);
+        return initWithRelated(allocator, file_path, rule_id, severity, message, SourceRange.fromSingleLocation(loc), related_range);
+    }
+
     pub fn deinit(self: *Diagnostic, allocator: std.mem.Allocator) void {
         allocator.free(self.message);
     }
@@ -103,6 +139,7 @@ pub const Diagnostic = struct {
             .severity = self.severity,
             .message = try allocator.dupe(u8, self.message),
             .range = self.range,
+            .related_range = self.related_range,
         };
     }
 
@@ -115,6 +152,9 @@ pub const Diagnostic = struct {
             self.rule_id,
             self.message,
         });
+        if (self.related_range) |related| {
+            try writer.print("  related: {d}:{d}\n", .{ related.start.line, related.start.column });
+        }
     }
 
     fn writeJsonString(writer: anytype, s: []const u8) !void {
@@ -151,6 +191,13 @@ pub const Diagnostic = struct {
         try writer.print("        \"start\": {{\"line\": {d}, \"column\": {d}}},\n", .{ self.range.start.line, self.range.start.column });
         try writer.print("        \"end\": {{\"line\": {d}, \"column\": {d}}}\n", .{ self.range.end.line, self.range.end.column });
         try writer.writeAll("      }\n");
+        if (self.related_range) |related| {
+            try writer.writeAll(",\n");
+            try writer.writeAll("      \"related\": {\n");
+            try writer.print("        \"start\": {{\"line\": {d}, \"column\": {d}}},\n", .{ related.start.line, related.start.column });
+            try writer.print("        \"end\": {{\"line\": {d}, \"column\": {d}}}\n", .{ related.end.line, related.end.column });
+            try writer.writeAll("      }\n");
+        }
         try writer.writeAll("    }");
     }
 
@@ -184,6 +231,25 @@ pub const Diagnostic = struct {
         try writer.writeAll("              }\n");
         try writer.writeAll("            }\n");
         try writer.writeAll("          ]\n");
+        if (self.related_range) |related| {
+            try writer.writeAll("          ,\"relatedLocations\": [\n");
+            try writer.writeAll("            {\n");
+            try writer.writeAll("              \"physicalLocation\": {\n");
+            try writer.writeAll("                \"artifactLocation\": {\n");
+            try writer.writeAll("                  \"uri\": ");
+            try writeJsonString(writer, self.file_path);
+            try writer.writeAll("\n");
+            try writer.writeAll("                },\n");
+            try writer.writeAll("                \"region\": {\n");
+            try writer.print("                  \"startLine\": {d},\n", .{related.start.line});
+            try writer.print("                  \"startColumn\": {d},\n", .{related.start.column});
+            try writer.print("                  \"endLine\": {d},\n", .{related.end.line});
+            try writer.print("                  \"endColumn\": {d}\n", .{related.end.column});
+            try writer.writeAll("                }\n");
+            try writer.writeAll("              }\n");
+            try writer.writeAll("            }\n");
+            try writer.writeAll("          ]\n");
+        }
         try writer.writeAll("        }");
     }
 
@@ -269,6 +335,33 @@ pub const Diagnostic = struct {
         try jw.endObject(); // physicalLocation
         try jw.endObject(); // location item
         try jw.endArray(); // locations
+
+        if (self.related_range) |related| {
+            try jw.objectField("relatedLocations");
+            try jw.beginArray();
+            try jw.beginObject();
+            try jw.objectField("physicalLocation");
+            try jw.beginObject();
+            try jw.objectField("artifactLocation");
+            try jw.beginObject();
+            try jw.objectField("uri");
+            try jw.write(self.file_path);
+            try jw.endObject();
+            try jw.objectField("region");
+            try jw.beginObject();
+            try jw.objectField("startLine");
+            try jw.write(related.start.line);
+            try jw.objectField("startColumn");
+            try jw.write(related.start.column);
+            try jw.objectField("endLine");
+            try jw.write(related.end.line);
+            try jw.objectField("endColumn");
+            try jw.write(related.end.column);
+            try jw.endObject(); // region
+            try jw.endObject(); // physicalLocation
+            try jw.endObject(); // related item
+            try jw.endArray(); // relatedLocations
+        }
 
         try jw.endObject(); // result
     }

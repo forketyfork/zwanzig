@@ -57,6 +57,8 @@ Widening is on by default. Use `--use-widening` to force it on from the CLI (ove
 - `max_states_per_point`: Maximum unique states per CFG point (positive integer)
 - `use_widening`: Enable loop-header widening for convergence (boolean, default: true)
 - `resource_models`: Array of custom resource model definitions (see below)
+- `escape_models`: Array of escape model definitions for `stack-escape-engine` (see below)
+- `escape_max_depth`: Max helper-call depth for stack escape tracking (positive integer, default: 3)
 - `enabled_rules` and `disabled_rules` are mutually exclusive - only one can be present
 
 Sample config: [docs/zwanzig.sample.json](zwanzig.sample.json)
@@ -107,3 +109,38 @@ Define custom resource acquisition/release patterns for `store-violations-engine
 1. Config-defined models (checked first, in order)
 2. Built-in patterns (`alloc`/`free`, `create`/`destroy`, `open`/`close`)
 3. Type-based detection (return types like `File`, `Dir`, etc.)
+
+## Stack escape models
+
+Define escape/capture rules for `stack-escape-engine`.
+
+### Example `.zwanzig.json` with escape models
+
+```json
+{
+  "escape_max_depth": 3,
+  "escape_models": [
+    {
+      "fqn": "std.process.Child.init",
+      "param_indices": [0],
+      "captures_into": "return"
+    },
+    {
+      "method_name": "append",
+      "receiver_type": "std.ArrayList",
+      "param_indices": [0],
+      "captures_into": "receiver"
+    }
+  ]
+}
+```
+
+### Escape model fields
+
+| Field | Description |
+|-------|-------------|
+| `fqn` | Fully-qualified name pattern (e.g., `"std.process.Child.init"`) |
+| `method_name` | Method name to match (e.g., `"append"`) |
+| `receiver_type` | Type of the receiver object (e.g., `"std.ArrayList"`) |
+| `param_indices` | Indices of arguments that are captured (0-based) |
+| `captures_into` | Where the capture escapes: `return`, `receiver`, `global`, or `thread` |
