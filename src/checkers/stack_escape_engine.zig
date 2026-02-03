@@ -190,19 +190,31 @@ pub const StackEscapeEngineChecker = struct {
         var spawn_sites: std.ArrayList(SpawnSite) = .empty;
         defer spawn_sites.deinit(allocator);
 
+        var spawn_seen = std.AutoHashMap(u32, usize).init(allocator);
+        defer spawn_seen.deinit();
+
         var join_nodes = std.AutoHashMap(ids.VarId, std.ArrayList(ids.CfgNodeId)).init(allocator);
         defer deinitVarNodeMap(allocator, &join_nodes);
 
         var detach_nodes = std.AutoHashMap(ids.VarId, std.ArrayList(ids.CfgNodeId)).init(allocator);
         defer deinitVarNodeMap(allocator, &detach_nodes);
 
+        var direct_join_spawns = std.AutoHashMap(u32, void).init(allocator);
+        defer direct_join_spawns.deinit();
+
+        var direct_detach_spawns = std.AutoHashMap(u32, void).init(allocator);
+        defer direct_detach_spawns.deinit();
+
         try collectThreadCalls(
             &analysis_ctx,
             cfg_handle.cfg,
             &call_cfg_map,
             &spawn_sites,
+            &spawn_seen,
             &join_nodes,
             &detach_nodes,
+            &direct_join_spawns,
+            &direct_detach_spawns,
         );
 
         var spawn_join_guaranteed = std.AutoHashMap(u32, bool).init(allocator);
@@ -213,6 +225,8 @@ pub const StackEscapeEngineChecker = struct {
             spawn_sites.items,
             &join_nodes,
             &detach_nodes,
+            &direct_join_spawns,
+            &direct_detach_spawns,
             &spawn_join_guaranteed,
         );
 
@@ -229,6 +243,7 @@ pub const StackEscapeEngineChecker = struct {
         call_node: u32,
         cfg_node: ids.CfgNodeId,
         thread_var: ?ids.VarId,
+        has_try: bool,
     };
 
     fn buildCallCfgMap(
@@ -256,16 +271,47 @@ pub const StackEscapeEngineChecker = struct {
         cfg: *const Cfg,
         call_cfg_map: *const std.AutoHashMap(u32, ids.CfgNodeId),
         spawn_sites: *std.ArrayList(SpawnSite),
+        spawn_seen: *std.AutoHashMap(u32, usize),
         join_nodes: *std.AutoHashMap(ids.VarId, std.ArrayList(ids.CfgNodeId)),
         detach_nodes: *std.AutoHashMap(ids.VarId, std.ArrayList(ids.CfgNodeId)),
+        direct_join_spawns: *std.AutoHashMap(u32, void),
+        direct_detach_spawns: *std.AutoHashMap(u32, void),
     ) !void {
         for (cfg.nodes.items) |node| {
             const ast_node = node.ir_node.ast_node orelse continue;
 
             switch (node.ir_node.tag) {
-                .var_decl => try handleVarDeclSpawn(ctx, ast_node, node.index, call_cfg_map, spawn_sites),
-                .assign => try handleAssignSpawn(ctx, node.ir_node, node.index, call_cfg_map, spawn_sites),
-                .call => try handleThreadMethodCall(ctx, ast_node, node.index, join_nodes, detach_nodes),
+                .var_decl => try handleVarDeclSpawn(ctx, ast_node, node.index, call_cfg_map, spawn_sites, spawn_seen),
+                .assign => try handleAssignSpawn(ctx, node.ir_node, node.index, call_cfg_map, spawn_sites, spawn_seen),
+                .call => {
+                    if (isThreadSpawnCall(ctx, ast_node)) {
+                        try appendSpawnSite(spawn_sites, spawn_seen, ast_node, node.index, null, false, ctx.resolver.allocator);
+                    }
+                    try handleThreadMethodCall(
+                        ctx,
+                        ast_node,
+                        node.index,
+                        join_nodes,
+                        detach_nodes,
+                        direct_join_spawns,
+                        direct_detach_spawns,
+                    );
+                },
+                .try_expr, .catch_expr => {
+                    const call_node = unwrapCallNode(ctx.tree, ast_node) orelse continue;
+                    if (isThreadSpawnCall(ctx, call_node)) {
+                        try appendSpawnSite(spawn_sites, spawn_seen, call_node, node.index, null, true, ctx.resolver.allocator);
+                    }
+                    try handleThreadMethodCall(
+                        ctx,
+                        call_node,
+                        node.index,
+                        join_nodes,
+                        detach_nodes,
+                        direct_join_spawns,
+                        direct_detach_spawns,
+                    );
+                },
                 else => {},
             }
         }
@@ -277,6 +323,7 @@ pub const StackEscapeEngineChecker = struct {
         cfg_node: ids.CfgNodeId,
         call_cfg_map: *const std.AutoHashMap(u32, ids.CfgNodeId),
         spawn_sites: *std.ArrayList(SpawnSite),
+        spawn_seen: *std.AutoHashMap(u32, usize),
     ) !void {
         const tree = ctx.tree;
         const tags = tree.nodes.items(.tag);
@@ -295,7 +342,9 @@ pub const StackEscapeEngineChecker = struct {
         if (!isThreadSpawnCall(ctx, call_node)) return;
         const spawn_cfg = call_cfg_map.get(call_node) orelse cfg_node;
 
-        try spawn_sites.append(ctx.resolver.allocator, .{ .call_node = call_node, .cfg_node = spawn_cfg, .thread_var = var_id });
+        const init_tag = tags[init_idx];
+        const has_try = init_tag == .@"try" or init_tag == .@"catch";
+        try appendSpawnSite(spawn_sites, spawn_seen, call_node, spawn_cfg, var_id, has_try, ctx.resolver.allocator);
     }
 
     fn handleAssignSpawn(
@@ -304,6 +353,7 @@ pub const StackEscapeEngineChecker = struct {
         cfg_node: ids.CfgNodeId,
         call_cfg_map: *const std.AutoHashMap(u32, ids.CfgNodeId),
         spawn_sites: *std.ArrayList(SpawnSite),
+        spawn_seen: *std.AutoHashMap(u32, usize),
     ) !void {
         const tree = ctx.tree;
         const tags = tree.nodes.items(.tag);
@@ -323,7 +373,38 @@ pub const StackEscapeEngineChecker = struct {
         const var_id = ctx.resolver.resolve(lhs_node) orelse return;
         const spawn_cfg = call_cfg_map.get(call_node) orelse cfg_node;
 
-        try spawn_sites.append(ctx.resolver.allocator, .{ .call_node = call_node, .cfg_node = spawn_cfg, .thread_var = var_id });
+        const rhs_tag = tags[rhs_node];
+        const has_try = rhs_tag == .@"try" or rhs_tag == .@"catch";
+        try appendSpawnSite(spawn_sites, spawn_seen, call_node, spawn_cfg, var_id, has_try, ctx.resolver.allocator);
+    }
+
+    fn appendSpawnSite(
+        spawn_sites: *std.ArrayList(SpawnSite),
+        spawn_seen: *std.AutoHashMap(u32, usize),
+        call_node: u32,
+        cfg_node: ids.CfgNodeId,
+        thread_var: ?ids.VarId,
+        has_try: bool,
+        allocator: std.mem.Allocator,
+    ) !void {
+        if (spawn_seen.get(call_node)) |idx| {
+            var site = &spawn_sites.items[idx];
+            if (site.thread_var == null and thread_var != null) {
+                site.thread_var = thread_var;
+            }
+            if (!site.has_try and has_try) {
+                site.has_try = true;
+            }
+            return;
+        }
+        const idx = spawn_sites.items.len;
+        try spawn_seen.put(call_node, idx);
+        try spawn_sites.append(allocator, .{
+            .call_node = call_node,
+            .cfg_node = cfg_node,
+            .thread_var = thread_var,
+            .has_try = has_try,
+        });
     }
 
     fn handleThreadMethodCall(
@@ -332,36 +413,72 @@ pub const StackEscapeEngineChecker = struct {
         cfg_node: ids.CfgNodeId,
         join_nodes: *std.AutoHashMap(ids.VarId, std.ArrayList(ids.CfgNodeId)),
         detach_nodes: *std.AutoHashMap(ids.VarId, std.ArrayList(ids.CfgNodeId)),
+        direct_join_spawns: *std.AutoHashMap(u32, void),
+        direct_detach_spawns: *std.AutoHashMap(u32, void),
     ) !void {
         const tree = ctx.tree;
+        const tags = tree.nodes.items(.tag);
+        const method = threadMethod(tree, call_node) orelse return;
+        const base_node = method.base_node;
+
+        if (base_node < tags.len and tags[base_node] == .identifier) {
+            const var_id = ctx.resolver.resolve(base_node) orelse return;
+            if (method.kind == .join) {
+                try appendVarNode(join_nodes, var_id, cfg_node, ctx.resolver.allocator);
+            } else {
+                try appendVarNode(detach_nodes, var_id, cfg_node, ctx.resolver.allocator);
+            }
+            return;
+        }
+
+        const base_call = unwrapCallNode(tree, base_node) orelse return;
+        if (!isThreadSpawnCall(ctx, base_call)) return;
+        if (method.kind == .join) {
+            try direct_join_spawns.put(base_call, {});
+        } else {
+            try direct_detach_spawns.put(base_call, {});
+        }
+    }
+
+    const ThreadMethod = struct {
+        kind: enum { join, detach },
+        base_node: u32,
+    };
+
+    fn threadMethod(tree: *const std.zig.Ast, call_node: u32) ?ThreadMethod {
         const tags = tree.nodes.items(.tag);
         const datas = tree.nodes.items(.data);
         const token_tags = tree.tokens.items(.tag);
 
-        if (call_node >= tags.len) return;
-        if (!isCallNode(tags[call_node])) return;
+        if (call_node >= tags.len) return null;
+        if (!isCallNode(tags[call_node])) return null;
 
         var call_buf: [1]std.zig.Ast.Node.Index = undefined;
-        const full_call = tree.fullCall(&call_buf, @enumFromInt(call_node)) orelse return;
+        const full_call = tree.fullCall(&call_buf, @enumFromInt(call_node)) orelse return null;
         const callee_node: u32 = @intFromEnum(full_call.ast.fn_expr);
-        if (callee_node >= tags.len) return;
-        if (tags[callee_node] != .field_access) return;
+        if (callee_node >= tags.len) return null;
+        if (tags[callee_node] != .field_access) return null;
 
         const field_access_data = datas[callee_node].node_and_token;
         const base_node = @intFromEnum(field_access_data[0]);
         const field_token = field_access_data[1];
-        if (field_token >= token_tags.len or token_tags[field_token] != .identifier) return;
+        if (field_token >= token_tags.len or token_tags[field_token] != .identifier) return null;
         const field_name = tree.tokenSlice(field_token);
 
-        if (!std.mem.eql(u8, field_name, "join") and !std.mem.eql(u8, field_name, "detach")) return;
-        if (base_node >= tags.len or tags[base_node] != .identifier) return;
-
-        const var_id = ctx.resolver.resolve(base_node) orelse return;
         if (std.mem.eql(u8, field_name, "join")) {
-            try appendVarNode(join_nodes, var_id, cfg_node, ctx.resolver.allocator);
-        } else {
-            try appendVarNode(detach_nodes, var_id, cfg_node, ctx.resolver.allocator);
+            return .{ .kind = .join, .base_node = base_node };
         }
+        if (std.mem.eql(u8, field_name, "detach")) {
+            return .{ .kind = .detach, .base_node = base_node };
+        }
+        return null;
+    }
+
+    fn spawnCallFromThreadMethod(ctx: *AnalysisContext, call_node: u32) ?u32 {
+        const method = threadMethod(ctx.tree, call_node) orelse return null;
+        const base_call = unwrapCallNode(ctx.tree, method.base_node) orelse return null;
+        if (!isThreadSpawnCall(ctx, base_call)) return null;
+        return base_call;
     }
 
     fn appendVarNode(
@@ -385,6 +502,8 @@ pub const StackEscapeEngineChecker = struct {
         spawn_sites: []const SpawnSite,
         join_nodes: *std.AutoHashMap(ids.VarId, std.ArrayList(ids.CfgNodeId)),
         detach_nodes: *std.AutoHashMap(ids.VarId, std.ArrayList(ids.CfgNodeId)),
+        direct_join_spawns: *std.AutoHashMap(u32, void),
+        direct_detach_spawns: *std.AutoHashMap(u32, void),
         results: *std.AutoHashMap(u32, bool),
     ) !void {
         var succs = try buildSuccessorLists(allocator, cfg);
@@ -392,14 +511,33 @@ pub const StackEscapeEngineChecker = struct {
 
         for (spawn_sites) |site| {
             var guaranteed = false;
-            if (site.thread_var) |var_id| {
+            if (direct_detach_spawns.get(site.call_node) != null) {
+                guaranteed = false;
+            } else if (direct_join_spawns.get(site.call_node) != null) {
+                guaranteed = true;
+            } else if (site.thread_var) |var_id| {
                 if (detach_nodes.get(var_id) == null) {
                     if (join_nodes.get(var_id)) |list| {
                         guaranteed = isJoinGuaranteed(allocator, cfg, succs.items, site.cfg_node, list.items);
+                        if (!guaranteed and site.has_try) {
+                            guaranteed = true;
+                        }
                     }
                 }
             }
             try results.put(site.call_node, guaranteed);
+        }
+
+        var join_iter = direct_join_spawns.keyIterator();
+        while (join_iter.next()) |call_node| {
+            if (results.get(call_node.*) == null) {
+                try results.put(call_node.*, true);
+            }
+        }
+
+        var detach_iter = direct_detach_spawns.keyIterator();
+        while (detach_iter.next()) |call_node| {
+            try results.put(call_node.*, false);
         }
     }
 
@@ -532,6 +670,17 @@ pub const StackEscapeEngineChecker = struct {
                     diagnostics,
                     reported,
                 );
+                if (spawnCallFromThreadMethod(ctx, ast_node)) |spawn_call| {
+                    try checkCallEscapes(
+                        allocator,
+                        ctx,
+                        spawn_call,
+                        in_state,
+                        spawn_join_guaranteed,
+                        diagnostics,
+                        reported,
+                    );
+                }
             },
             .try_expr, .catch_expr => {
                 if (unwrapCallNode(tree, ast_node)) |call_node| {
@@ -544,6 +693,17 @@ pub const StackEscapeEngineChecker = struct {
                         diagnostics,
                         reported,
                     );
+                    if (spawnCallFromThreadMethod(ctx, call_node)) |spawn_call| {
+                        try checkCallEscapes(
+                            allocator,
+                            ctx,
+                            spawn_call,
+                            in_state,
+                            spawn_join_guaranteed,
+                            diagnostics,
+                            reported,
+                        );
+                    }
                 }
             },
             .ret => {
@@ -701,9 +861,9 @@ pub const StackEscapeEngineChecker = struct {
     }
 
     fn resolveEscapeMatch(ctx: *AnalysisContext, call_info: CallInfo) ?EscapeMatch {
+        const is_thread_spawn = isThreadSpawnFqn(call_info.fqn);
         if (ctx.config) |config| {
             if (config.matchEscapeModel(call_info.method_name, call_info.receiver_type, call_info.fqn)) |model| {
-                const is_thread_spawn = call_info.fqn != null and std.mem.eql(u8, call_info.fqn.?, "std.Thread.spawn");
                 return .{
                     .param_indices = model.param_indices,
                     .captures_into = model.captures_into,
@@ -716,7 +876,7 @@ pub const StackEscapeEngineChecker = struct {
             if (std.mem.eql(u8, fqn, "std.process.Child.init")) {
                 return .{ .param_indices = &.{0}, .captures_into = .@"return", .is_thread_spawn = false };
             }
-            if (std.mem.eql(u8, fqn, "std.Thread.spawn")) {
+            if (is_thread_spawn) {
                 return .{ .param_indices = &.{2}, .captures_into = .thread, .is_thread_spawn = true };
             }
         }
@@ -848,8 +1008,12 @@ pub const StackEscapeEngineChecker = struct {
 
     fn isThreadSpawnCall(ctx: *AnalysisContext, call_node: u32) bool {
         const call_info = resolveCallInfo(ctx, call_node) orelse return false;
-        if (call_info.fqn) |fqn| {
-            return std.mem.eql(u8, fqn, "std.Thread.spawn");
+        return isThreadSpawnFqn(call_info.fqn);
+    }
+
+    fn isThreadSpawnFqn(fqn: ?[]const u8) bool {
+        if (fqn) |name| {
+            return std.mem.eql(u8, name, "std.Thread.spawn");
         }
         return false;
     }
