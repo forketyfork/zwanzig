@@ -330,12 +330,17 @@ pub const AnalysisEngine = struct {
 
             if (self.cached_artifacts) |artifacts| {
                 const fn_index = ids.astIndex(fn_ast_node);
-                artifacts.addCfg(fn_index, cfg_ptr) catch {
+                self.function_cfgs.put(fn_ast_node, .{ .cfg = cfg_ptr, .owned = false }) catch {
                     cfg_ptr.deinit();
                     self.allocator.destroy(cfg_ptr);
                     return null;
                 };
-                self.function_cfgs.put(fn_ast_node, .{ .cfg = cfg_ptr, .owned = false }) catch return cfg_ptr;
+                artifacts.addCfg(fn_index, cfg_ptr) catch {
+                    _ = self.function_cfgs.remove(fn_ast_node);
+                    cfg_ptr.deinit();
+                    self.allocator.destroy(cfg_ptr);
+                    return null;
+                };
                 return cfg_ptr;
             }
 
