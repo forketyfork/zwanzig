@@ -7,6 +7,7 @@ pub fn mixin(comptime _Engine: type) type {
         const ResourceCallKind = enum {
             alloc,
             free,
+            free_owned,
             open,
             close,
         };
@@ -105,20 +106,28 @@ pub fn mixin(comptime _Engine: type) type {
                     const kind: ResourceCallKind = switch (model_kind) {
                         .alloc => .alloc,
                         .free => .free,
+                        .free_owned => .free_owned,
                         .open => .open,
                         .close => .close,
                     };
-                    const target_expr: ?u32 = if (kind == .free or kind == .close) (first_arg orelse base_node) else null;
+                    const target_expr: ?u32 = switch (kind) {
+                        .free, .close => first_arg orelse base_node,
+                        .free_owned => base_node,
+                        else => null,
+                    };
                     return .{ .kind = kind, .target_expr = target_expr, .call_node = call_ast_node };
                 }
             }
 
             // Priority 2: Built-in heuristics (allocator methods)
             if (allocator_utils.isAllocatorExpr(tree, self.type_context, base_node)) {
-                if (std.mem.eql(u8, field_name, "alloc") or std.mem.eql(u8, field_name, "dupe")) {
+                if (std.mem.eql(u8, field_name, "alloc") or
+                    std.mem.eql(u8, field_name, "dupe") or
+                    std.mem.eql(u8, field_name, "create"))
+                {
                     return .{ .kind = .alloc, .target_expr = null, .call_node = call_ast_node };
                 }
-                if (std.mem.eql(u8, field_name, "free")) {
+                if (std.mem.eql(u8, field_name, "free") or std.mem.eql(u8, field_name, "destroy")) {
                     return .{ .kind = .free, .target_expr = first_arg, .call_node = call_ast_node };
                 }
             }

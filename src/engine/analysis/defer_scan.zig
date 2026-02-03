@@ -41,9 +41,20 @@ pub fn mixin(comptime _Engine: type) type {
                                 if (call_info.target_expr) |arg_node| {
                                     if (_Engine.var_resolution.resolveVarIdFromExpr(self, arg_node, current_cfg)) |var_id| {
                                         if (error_only) {
-                                            try state.trackErrdeferredFree(var_id);
+                                            try state.trackErrdeferredFree(var_id, call_token);
                                         } else {
                                             try state.trackDeferredFree(var_id, call_token);
+                                        }
+                                    }
+                                }
+                            },
+                            .free_owned => {
+                                if (call_info.target_expr) |arg_node| {
+                                    if (_Engine.var_resolution.resolveVarIdFromExpr(self, arg_node, current_cfg)) |var_id| {
+                                        if (error_only) {
+                                            try state.trackErrdeferredFreeOwned(var_id, call_token);
+                                        } else {
+                                            try state.trackDeferredFreeOwned(var_id, call_token);
                                         }
                                     }
                                 }
@@ -52,7 +63,7 @@ pub fn mixin(comptime _Engine: type) type {
                                 if (call_info.target_expr) |arg_node| {
                                     if (_Engine.var_resolution.resolveVarIdFromExpr(self, arg_node, current_cfg)) |var_id| {
                                         if (error_only) {
-                                            try state.trackErrdeferredClose(var_id);
+                                            try state.trackErrdeferredClose(var_id, call_token);
                                         } else {
                                             try state.trackDeferredClose(var_id, call_token);
                                         }

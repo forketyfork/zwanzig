@@ -37,12 +37,14 @@ fn isAllocatorName(tree: *const std.zig.Ast, expr_node: u32) bool {
         .identifier => {
             const token = main_tokens[expr_node];
             if (token >= token_tags.len or token_tags[token] != .identifier) return false;
-            return std.mem.eql(u8, tree.tokenSlice(token), "allocator");
+            const name = tree.tokenSlice(token);
+            return std.mem.eql(u8, name, "allocator") or std.mem.endsWith(u8, name, "allocator");
         },
         .field_access => {
             const field_token = datas[expr_node].node_and_token[1];
             if (field_token >= token_tags.len or token_tags[field_token] != .identifier) return false;
-            return std.mem.eql(u8, tree.tokenSlice(field_token), "allocator");
+            const name = tree.tokenSlice(field_token);
+            return std.mem.eql(u8, name, "allocator") or std.mem.endsWith(u8, name, "allocator");
         },
         else => return false,
     }

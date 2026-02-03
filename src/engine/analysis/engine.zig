@@ -817,6 +817,34 @@ pub const AnalysisEngine = struct {
                         try ownership.checkUseAfterFreeInExpr(self, &new_state, rhs_node, current_cfg);
                         try ownership.markEscapedInExpr(self, &new_state, rhs_node, current_cfg);
                         try ownership.recordOwnershipFromFieldAssign(self, &new_state, lhs_node, rhs_node, current_cfg);
+                        if (resource_calls.resolveResourceCall(self, rhs_node)) |call_info| {
+                            switch (call_info.kind) {
+                                .alloc, .open => {
+                                    if (self.source) |src| {
+                                        if (src.ast() catch null) |tree| {
+                                            const tags = tree.nodes.items(.tag);
+                                            const datas = tree.nodes.items(.data);
+                                            if (lhs_node < tags.len and tags[lhs_node] == .field_access) {
+                                                if (var_resolution.resolveVarIdFromExpr(self, lhs_node, current_cfg)) |field_var| {
+                                                    switch (call_info.kind) {
+                                                        .alloc => try new_state.trackAllocation(field_var),
+                                                        .open => try new_state.trackOpen(field_var),
+                                                        else => {},
+                                                    }
+                                                    const field_access_data = datas[lhs_node].node_and_token;
+                                                    const base_node = @intFromEnum(field_access_data[0]);
+                                                    if (var_resolution.resolveVarIdFromExpr(self, base_node, current_cfg)) |container_var| {
+                                                        try new_state.trackOwnership(field_var, container_var);
+                                                        try ownership.escapeOwnedFromFieldBase(self, &new_state, tree, base_node, container_var, field_var);
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                },
+                                else => {},
+                            }
+                        }
                     }
                 }
             },
@@ -840,6 +868,14 @@ pub const AnalysisEngine = struct {
                                     }
                                 }
                             },
+                            .free_owned => {
+                                if (call_info.target_expr) |arg_node| {
+                                    if (var_resolution.resolveVarIdFromExpr(self, arg_node, current_cfg)) |var_id| {
+                                        const call_token = ownership.resolveCallToken(self, call_info.call_node);
+                                        try new_state.trackFreeOwned(var_id, call_token);
+                                    }
+                                }
+                            },
                             .close => {
                                 if (call_info.target_expr) |arg_node| {
                                     if (var_resolution.resolveVarIdFromExpr(self, arg_node, current_cfg)) |var_id| {
@@ -850,7 +886,7 @@ pub const AnalysisEngine = struct {
                             },
                             else => {},
                         }
-                        if (call_info.kind != .free and call_info.kind != .close) {
+                        if (call_info.kind != .free and call_info.kind != .free_owned and call_info.kind != .close) {
                             try ownership.checkUseAfterFreeInCall(self, &new_state, ast_node, current_cfg);
                         }
                     } else {
@@ -887,8 +923,8 @@ pub const AnalysisEngine = struct {
                                     const ret_expr_idx = @intFromEnum(ret_expr);
                                     try ownership.checkUseAfterFreeInExpr(self, &new_state, ret_expr_idx, current_cfg);
 
-                                    // Fast path: literal error value (e.g., return error.Foo)
-                                    if (ret_expr_idx < tags.len and tags[ret_expr_idx] == .error_value) {
+                                    // Fast path: expression that is definitely an error value
+                                    if (isDefinitelyErrorExpr(tree, ret_expr_idx)) {
                                         new_state.setErrorState(.error_active);
                                     } else if (ret_expr_idx < tags.len and tags[ret_expr_idx] == .identifier) {
                                         if (var_resolution.resolveDeclInfoFromIdentifier(self, ret_expr_idx, current_cfg)) |decl_info| {
@@ -938,6 +974,9 @@ pub const AnalysisEngine = struct {
                             }
                         }
                     }
+                    if (new_state.isErrorPath()) {
+                        try new_state.applyErrdeferredReleases();
+                    }
                 }
             },
             .try_expr, .catch_expr => {
@@ -976,6 +1015,35 @@ pub const AnalysisEngine = struct {
         status: ?bool,
         init_node: ?u32,
     };
+
+    fn isDefinitelyErrorExpr(tree: *const std.zig.Ast, expr_node: u32) bool {
+        const tags = tree.nodes.items(.tag);
+        if (expr_node >= tags.len) return false;
+
+        switch (tags[expr_node]) {
+            .error_value => return true,
+            .@"switch", .switch_comma => {
+                const full_switch = tree.switchFull(@enumFromInt(expr_node));
+                if (full_switch.ast.cases.len == 0) return false;
+                for (full_switch.ast.cases) |case_node| {
+                    const full_case = tree.fullSwitchCase(case_node) orelse return false;
+                    if (!isDefinitelyErrorExpr(tree, @intFromEnum(full_case.ast.target_expr))) {
+                        return false;
+                    }
+                }
+                return true;
+            },
+            .@"if", .if_simple => {
+                const full_if = tree.fullIf(@enumFromInt(expr_node)) orelse return false;
+                if (!isDefinitelyErrorExpr(tree, @intFromEnum(full_if.ast.then_expr))) return false;
+                if (full_if.ast.else_expr.unwrap()) |else_node| {
+                    return isDefinitelyErrorExpr(tree, @intFromEnum(else_node));
+                }
+                return false;
+            },
+            else => return false,
+        }
+    }
 
     fn declErrorUnionInfo(tree: *const std.zig.Ast, decl_node: u32) DeclErrorUnionInfo {
         const tags = tree.nodes.items(.tag);

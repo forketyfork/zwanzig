@@ -2,6 +2,6 @@
 const std = @import("std");
 
 fn foo(allocator: std.mem.Allocator) void {
-    const s = allocator.allocPrintSentinel(0, "{d}", .{42}) catch return;
+    const s: []u8 = allocator.allocPrintSentinel(0, "{d}", .{42}) catch return;
     _ = s;
 }

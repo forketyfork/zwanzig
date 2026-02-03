@@ -89,6 +89,11 @@ Define custom resource acquisition/release patterns for `store-violations-engine
     {
       "kind": "free",
       "fqn": "my_pool.deallocate"
+    },
+    {
+      "kind": "free_owned",
+      "method_name": "deinit",
+      "receiver_type": "*MyType"
     }
   ]
 }
@@ -98,7 +103,7 @@ Define custom resource acquisition/release patterns for `store-violations-engine
 
 | Field | Description |
 |-------|-------------|
-| `kind` | Resource operation type: `alloc`, `free`, `open`, or `close` |
+| `kind` | Resource operation type: `alloc`, `free`, `free_owned`, `open`, or `close` |
 | `method_name` | Method name to match (e.g., `"acquire"`) |
 | `receiver_type` | Type of the receiver object (e.g., `"MyResource"`) |
 | `return_type` | Return type of the function (e.g., `"FileHandle"`) |
@@ -109,6 +114,10 @@ Define custom resource acquisition/release patterns for `store-violations-engine
 1. Config-defined models (checked first, in order)
 2. Built-in patterns (`alloc`/`free`, `create`/`destroy`, `open`/`close`)
 3. Type-based detection (return types like `File`, `Dir`, etc.)
+
+### `free_owned`
+
+Use `free_owned` for APIs like `deinit` that free resources *owned by* a value but do not free the value itself. For example, `std.ArrayList.deinit` frees its buffer but not the list struct.
 
 ## Stack escape models
 

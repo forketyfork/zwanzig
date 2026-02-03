@@ -268,6 +268,12 @@ pub const ProgramState = struct {
         self.invalidateCache();
     }
 
+    /// Track freeing resources owned by a region (does not free the region itself).
+    pub fn trackFreeOwned(self: *ProgramState, region: VarId, call_token: ?u32) !void {
+        try self.store.markFreeOwned(region, call_token);
+        self.invalidateCache();
+    }
+
     /// Track a resource close for a region.
     pub fn trackClose(self: *ProgramState, region: VarId, call_token: ?u32) !void {
         try self.store.markClosed(region, call_token);
@@ -312,19 +318,35 @@ pub const ProgramState = struct {
         self.invalidateCache();
     }
 
+    /// Track a deferred free-owned for a region.
+    pub fn trackDeferredFreeOwned(self: *ProgramState, region: VarId, call_token: ?u32) !void {
+        try self.store.markDeferredFreeOwned(region, call_token);
+        self.invalidateCache();
+    }
+
     /// Track a deferred close for a region.
     pub fn trackDeferredClose(self: *ProgramState, region: VarId, call_token: ?u32) !void {
         try self.store.markDeferredClose(region, call_token);
         self.invalidateCache();
     }
 
-    pub fn trackErrdeferredFree(self: *ProgramState, region: VarId) !void {
-        try self.store.markErrdeferredFree(region);
+    pub fn trackErrdeferredFree(self: *ProgramState, region: VarId, call_token: ?u32) !void {
+        try self.store.markErrdeferredFree(region, call_token);
         self.invalidateCache();
     }
 
-    pub fn trackErrdeferredClose(self: *ProgramState, region: VarId) !void {
-        try self.store.markErrdeferredClose(region);
+    pub fn trackErrdeferredFreeOwned(self: *ProgramState, region: VarId, call_token: ?u32) !void {
+        try self.store.markErrdeferredFreeOwned(region, call_token);
+        self.invalidateCache();
+    }
+
+    pub fn trackErrdeferredClose(self: *ProgramState, region: VarId, call_token: ?u32) !void {
+        try self.store.markErrdeferredClose(region, call_token);
+        self.invalidateCache();
+    }
+
+    pub fn applyErrdeferredReleases(self: *ProgramState) !void {
+        try self.store.applyErrdeferredReleases();
         self.invalidateCache();
     }
 

@@ -434,6 +434,56 @@ pub fn mixin(comptime _Engine: type) type {
             }
         }
 
+        fn baseEscapes(
+            self: *_Engine,
+            state: *ProgramState,
+            tree: *const std.zig.Ast,
+            base_node: u32,
+            container_var: ids.VarId,
+        ) bool {
+            const tags = tree.nodes.items(.tag);
+            const main_tokens = tree.nodes.items(.main_token);
+            const token_tags = tree.tokens.items(.tag);
+
+            if (base_node < tags.len and tags[base_node] == .identifier) {
+                const token = main_tokens[base_node];
+                if (token < token_tags.len and token_tags[token] == .identifier) {
+                    const name = tree.tokenSlice(token);
+                    if (std.mem.eql(u8, name, "self")) {
+                        return true;
+                    }
+                }
+            }
+
+            if (self.type_context) |type_ctx| {
+                const token = ids.varIndex(container_var);
+                if (token < token_tags.len and token_tags[token] == .identifier) {
+                    const var_name = tree.tokenSlice(token);
+                    if (type_ctx.getDeclType(var_name)) |type_info| {
+                        if (type_info.kind == .pointer) {
+                            return true;
+                        }
+                    }
+                }
+            }
+
+            return state.getRegionState(container_var) == null;
+        }
+
+        pub fn escapeOwnedFromFieldBase(
+            self: *_Engine,
+            state: *ProgramState,
+            tree: *const std.zig.Ast,
+            base_node: u32,
+            container_var: ids.VarId,
+            resource_var: ids.VarId,
+        ) EngineError!void {
+            if (baseEscapes(self, state, tree, base_node, container_var)) {
+                try state.trackEscapeOwned(resource_var);
+                state.trackEscape(resource_var);
+            }
+        }
+
         pub fn recordOwnershipFromFieldAssign(
             self: *_Engine,
             state: *ProgramState,
@@ -445,8 +495,6 @@ pub fn mixin(comptime _Engine: type) type {
             const tree = src.ast() catch return;
             const tags = tree.nodes.items(.tag);
             const datas = tree.nodes.items(.data);
-            const main_tokens = tree.nodes.items(.main_token);
-            const token_tags = tree.tokens.items(.tag);
 
             if (lhs_node >= tags.len or tags[lhs_node] != .field_access) return;
 
@@ -455,38 +503,7 @@ pub fn mixin(comptime _Engine: type) type {
             const container_var = _Engine.var_resolution.resolveVarIdFromExpr(self, base_node, current_cfg) orelse return;
             const resource_var = _Engine.var_resolution.resolveVarIdFromExpr(self, rhs_node, current_cfg) orelse return;
             try state.trackOwnership(resource_var, container_var);
-
-            const base_escapes = blk: {
-                if (base_node < tags.len and tags[base_node] == .identifier) {
-                    const token = main_tokens[base_node];
-                    if (token < token_tags.len and token_tags[token] == .identifier) {
-                        const name = tree.tokenSlice(token);
-                        if (std.mem.eql(u8, name, "self")) {
-                            break :blk true;
-                        }
-                    }
-                }
-                if (self.type_context) |type_ctx| {
-                    const token = ids.varIndex(container_var);
-                    if (token < token_tags.len and token_tags[token] == .identifier) {
-                        const var_name = tree.tokenSlice(token);
-                        if (type_ctx.getDeclType(var_name)) |type_info| {
-                            if (type_info.kind == .pointer) {
-                                break :blk true;
-                            }
-                        }
-                    }
-                }
-                if (state.getRegionState(container_var) == null) {
-                    break :blk true;
-                }
-                break :blk false;
-            };
-
-            if (base_escapes) {
-                try state.trackEscapeOwned(resource_var);
-                state.trackEscape(resource_var);
-            }
+            try escapeOwnedFromFieldBase(self, state, tree, base_node, container_var, resource_var);
         }
 
         pub fn escapeReturnedVars(self: *_Engine, state: *ProgramState, fn_node: ids.AstNodeId, current_cfg: *const Cfg) EngineError!void {

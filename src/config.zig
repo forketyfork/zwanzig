@@ -5,6 +5,7 @@ const RuleFilter = @import("rule_filter.zig").RuleFilter;
 pub const ResourceModelKind = enum {
     alloc,
     free,
+    free_owned,
     open,
     close,
 };
@@ -546,6 +547,8 @@ fn parseResourceModels(allocator: std.mem.Allocator, value: std.json.Value) Conf
             .alloc
         else if (std.mem.eql(u8, kind_str, "free"))
             .free
+        else if (std.mem.eql(u8, kind_str, "free_owned"))
+            .free_owned
         else if (std.mem.eql(u8, kind_str, "open"))
             .open
         else if (std.mem.eql(u8, kind_str, "close"))
@@ -742,6 +745,24 @@ test "parseConfig: resource_models with fqn" {
     try std.testing.expectEqualStrings("mymodule.createResource", config.resource_models[0].fqn.?);
 }
 
+test "parseConfig: resource_models free_owned" {
+    const allocator = std.testing.allocator;
+    const content =
+        \\{
+        \\  "resource_models": [
+        \\    {"kind": "free_owned", "method_name": "deinit", "receiver_type": "*MyType"}
+        \\  ]
+        \\}
+    ;
+    var config = try parseConfig(allocator, content);
+    defer config.deinit(allocator);
+
+    try std.testing.expectEqual(@as(usize, 1), config.resource_models.len);
+    try std.testing.expectEqual(ResourceModelKind.free_owned, config.resource_models[0].kind);
+    try std.testing.expectEqualStrings("deinit", config.resource_models[0].method_name.?);
+    try std.testing.expectEqualStrings("*MyType", config.resource_models[0].receiver_type.?);
+}
+
 test "parseConfig: escape_models" {
     const allocator = std.testing.allocator;
     const content =
@@ -788,6 +809,7 @@ test "Config.matchResourceModel" {
             ResourceModel{ .kind = .open, .method_name = "acquire" },
             ResourceModel{ .kind = .close, .method_name = "release", .receiver_type = "MyHandle" },
             ResourceModel{ .kind = .alloc, .fqn = "mymodule.createResource" },
+            ResourceModel{ .kind = .free_owned, .method_name = "deinit", .receiver_type = "*MyType" },
         },
     };
 
@@ -810,6 +832,10 @@ test "Config.matchResourceModel" {
     // Match by FQN
     const fqn_match = cfg.matchResourceModel("createResource", null, null, "mymodule.createResource");
     try std.testing.expectEqual(ResourceModelKind.alloc, fqn_match.?);
+
+    // Match by receiver type + method name
+    const free_owned_match = cfg.matchResourceModel("deinit", "*MyType", null, null);
+    try std.testing.expectEqual(ResourceModelKind.free_owned, free_owned_match.?);
 
     // No FQN match - wrong FQN
     const no_fqn_match = cfg.matchResourceModel("createResource", null, null, "othermodule.createResource");
