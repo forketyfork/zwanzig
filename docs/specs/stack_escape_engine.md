@@ -46,7 +46,7 @@ High-level flow (per function):
 1. Build CFG and analyze calls and assignments.
 2. Track origins for expressions and variables.
 3. Detect escape sinks and apply models.
-4. If a stack origin reaches an escape sink, emit a diagnostic with
+4. If a stack origin reaches an escape sink on any path, emit a diagnostic with
    capture-site and origin-site locations.
 
 ## Origin Classification
@@ -66,16 +66,17 @@ Mark as static if:
 
 ### Heap (safe)
 Mark as heap if derived from:
-- allocator calls (recognized by existing resource models or common std patterns)
-- `std.heap` or known allocator APIs
+- allocator calls (recognized by config `resource_models` of kind `alloc`)
+- common allocator patterns (e.g., `allocator.alloc`, `allocator.dupe`, `std.fmt.allocPrint`)
+- `std.heap.*_allocator` values when used as allocators
 
 ### Unknown
 Fallback when origin cannot be inferred. Unknown should not trigger diagnostics
 unless the origin is later proven stack-backed by propagation.
 
 ### ZIR usage
-If type info is available, use ZIR to determine compile-time literals for array
-elements. If ZIR is unavailable, fall back to AST heuristics.
+If type info is available, use ZIR for const/decl classification. Array literal
+element checks still use AST heuristics plus comptime parameter detection.
 
 ## Propagation Rules
 Track origin through:
@@ -112,6 +113,8 @@ Capture semantics:
 Best-effort definition of "join guaranteed":
 - `join()` post-dominates the spawn call in the CFG
 - no `detach()` is called on the thread value before `join()`
+- for `try std.Thread.spawn(...)`, ignore the `try_error` edge from the spawn
+  site (no thread is created on the error path)
 
 If post-dominator calculation is not available, use a conservative
 approximation:

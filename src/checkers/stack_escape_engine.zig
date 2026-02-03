@@ -11,6 +11,7 @@ const EscapeCapture = @import("../config.zig").EscapeCapture;
 const ids = @import("../ids.zig");
 const VarResolver = @import("../engine/var_resolver.zig").VarResolver;
 const Cfg = @import("../cfg.zig").Cfg;
+const EdgeKind = @import("../cfg.zig").EdgeKind;
 
 const default_helper_depth: u32 = 3;
 
@@ -119,6 +120,7 @@ pub const StackEscapeEngineChecker = struct {
         receiver_type: ?[]const u8,
         fqn: ?[]const u8,
         params: []const std.zig.Ast.Node.Index,
+        base_node: ?u32,
     };
 
     const EscapeMatch = struct {
@@ -135,6 +137,7 @@ pub const StackEscapeEngineChecker = struct {
         config: ?*const Config,
         helper_depth: u32,
         fqn_buffer: *[256]u8,
+        comptime_params: ?*const std.AutoHashMap(ids.VarId, void),
     };
 
     fn checkAst(
@@ -168,6 +171,9 @@ pub const StackEscapeEngineChecker = struct {
         defer resolver.deinit();
 
         var fqn_buffer: [256]u8 = undefined;
+        var comptime_params = std.AutoHashMap(ids.VarId, void).init(allocator);
+        defer comptime_params.deinit();
+        try collectComptimeParams(tree, fn_node, &comptime_params);
         const helper_depth = if (context.config) |config|
             config.escape_max_depth orelse default_helper_depth
         else
@@ -181,6 +187,7 @@ pub const StackEscapeEngineChecker = struct {
             .config = context.config,
             .helper_depth = helper_depth,
             .fqn_buffer = &fqn_buffer,
+            .comptime_params = &comptime_params,
         };
 
         var call_cfg_map = std.AutoHashMap(u32, ids.CfgNodeId).init(allocator);
@@ -243,7 +250,7 @@ pub const StackEscapeEngineChecker = struct {
         call_node: u32,
         cfg_node: ids.CfgNodeId,
         thread_var: ?ids.VarId,
-        has_try: bool,
+        has_try_error_edge: bool,
     };
 
     fn buildCallCfgMap(
@@ -300,7 +307,8 @@ pub const StackEscapeEngineChecker = struct {
                 .try_expr, .catch_expr => {
                     const call_node = unwrapCallNode(ctx.tree, ast_node) orelse continue;
                     if (isThreadSpawnCall(ctx, call_node)) {
-                        try appendSpawnSite(spawn_sites, spawn_seen, call_node, node.index, null, true, ctx.resolver.allocator);
+                        const has_try_error_edge = node.ir_node.tag == .try_expr;
+                        try appendSpawnSite(spawn_sites, spawn_seen, call_node, node.index, null, has_try_error_edge, ctx.resolver.allocator);
                     }
                     try handleThreadMethodCall(
                         ctx,
@@ -343,8 +351,8 @@ pub const StackEscapeEngineChecker = struct {
         const spawn_cfg = call_cfg_map.get(call_node) orelse cfg_node;
 
         const init_tag = tags[init_idx];
-        const has_try = init_tag == .@"try" or init_tag == .@"catch";
-        try appendSpawnSite(spawn_sites, spawn_seen, call_node, spawn_cfg, var_id, has_try, ctx.resolver.allocator);
+        const has_try_error_edge = init_tag == .@"try";
+        try appendSpawnSite(spawn_sites, spawn_seen, call_node, spawn_cfg, var_id, has_try_error_edge, ctx.resolver.allocator);
     }
 
     fn handleAssignSpawn(
@@ -374,8 +382,8 @@ pub const StackEscapeEngineChecker = struct {
         const spawn_cfg = call_cfg_map.get(call_node) orelse cfg_node;
 
         const rhs_tag = tags[rhs_node];
-        const has_try = rhs_tag == .@"try" or rhs_tag == .@"catch";
-        try appendSpawnSite(spawn_sites, spawn_seen, call_node, spawn_cfg, var_id, has_try, ctx.resolver.allocator);
+        const has_try_error_edge = rhs_tag == .@"try";
+        try appendSpawnSite(spawn_sites, spawn_seen, call_node, spawn_cfg, var_id, has_try_error_edge, ctx.resolver.allocator);
     }
 
     fn appendSpawnSite(
@@ -384,7 +392,7 @@ pub const StackEscapeEngineChecker = struct {
         call_node: u32,
         cfg_node: ids.CfgNodeId,
         thread_var: ?ids.VarId,
-        has_try: bool,
+        has_try_error_edge: bool,
         allocator: std.mem.Allocator,
     ) !void {
         if (spawn_seen.get(call_node)) |idx| {
@@ -392,8 +400,8 @@ pub const StackEscapeEngineChecker = struct {
             if (site.thread_var == null and thread_var != null) {
                 site.thread_var = thread_var;
             }
-            if (!site.has_try and has_try) {
-                site.has_try = true;
+            if (!site.has_try_error_edge and has_try_error_edge) {
+                site.has_try_error_edge = true;
             }
             return;
         }
@@ -403,7 +411,7 @@ pub const StackEscapeEngineChecker = struct {
             .call_node = call_node,
             .cfg_node = cfg_node,
             .thread_var = thread_var,
-            .has_try = has_try,
+            .has_try_error_edge = has_try_error_edge,
         });
     }
 
@@ -507,7 +515,7 @@ pub const StackEscapeEngineChecker = struct {
         results: *std.AutoHashMap(u32, bool),
     ) !void {
         var succs = try buildSuccessorLists(allocator, cfg);
-        defer deinitNodeLists(allocator, &succs);
+        defer deinitEdgeLists(allocator, &succs);
 
         for (spawn_sites) |site| {
             var guaranteed = false;
@@ -518,10 +526,14 @@ pub const StackEscapeEngineChecker = struct {
             } else if (site.thread_var) |var_id| {
                 if (detach_nodes.get(var_id) == null) {
                     if (join_nodes.get(var_id)) |list| {
-                        guaranteed = isJoinGuaranteed(allocator, cfg, succs.items, site.cfg_node, list.items);
-                        if (!guaranteed and site.has_try) {
-                            guaranteed = true;
-                        }
+                        guaranteed = isJoinGuaranteed(
+                            allocator,
+                            cfg,
+                            succs.items,
+                            site.cfg_node,
+                            list.items,
+                            site.has_try_error_edge,
+                        );
                     }
                 }
             }
@@ -562,7 +574,7 @@ pub const StackEscapeEngineChecker = struct {
         }
 
         var succs = try buildSuccessorLists(allocator, cfg);
-        defer deinitNodeLists(allocator, &succs);
+        defer deinitEdgeLists(allocator, &succs);
 
         var preds = try buildPredecessorLists(allocator, cfg);
         defer deinitNodeLists(allocator, &preds);
@@ -602,7 +614,7 @@ pub const StackEscapeEngineChecker = struct {
                 out_states[idx].deinit();
                 out_states[idx] = try new_out.clone();
                 for (succs.items[idx].items) |succ| {
-                    try worklist.append(allocator, succ);
+                    try worklist.append(allocator, succ.to);
                 }
             }
         }
@@ -909,6 +921,7 @@ pub const StackEscapeEngineChecker = struct {
                     .receiver_type = null,
                     .fqn = name,
                     .params = full_call.ast.params,
+                    .base_node = null,
                 };
             },
             .field_access => {
@@ -925,6 +938,7 @@ pub const StackEscapeEngineChecker = struct {
                     .receiver_type = receiver_type,
                     .fqn = fqn,
                     .params = full_call.ast.params,
+                    .base_node = base_node,
                 };
             },
             else => return null,
@@ -1323,6 +1337,10 @@ pub const StackEscapeEngineChecker = struct {
             }
         }
 
+        if (isHeapAllocCall(ctx, call_info)) {
+            return .{ .kind = .heap, .token = treeMainToken(ctx.tree, call_node) };
+        }
+
         if (depth > 0) {
             if (resolveHelperReturnParamIndex(ctx, call_info)) |param_index| {
                 if (param_index < call_info.params.len) {
@@ -1516,6 +1534,14 @@ pub const StackEscapeEngineChecker = struct {
             }
         }
 
+        if (ctx.comptime_params) |params| {
+            if (ctx.resolver.resolve(ident_node)) |var_id| {
+                if (params.get(var_id) != null) {
+                    return true;
+                }
+            }
+        }
+
         if (ctx.type_ctx) |type_ctx| {
             if (type_ctx.isDeclConst(name)) {
                 return true;
@@ -1606,6 +1632,7 @@ pub const StackEscapeEngineChecker = struct {
                 const child = @intFromEnum(datas[expr_node].node_and_token[0]);
                 return isComptimeExpr(ctx, child);
             },
+            .@"comptime" => return isComptimeExpr(ctx, @intFromEnum(datas[expr_node].node)),
             .builtin_call, .builtin_call_comma, .builtin_call_two, .builtin_call_two_comma => {
                 const name = builtinCallName(tree, tags, expr_node) orelse return false;
                 if (std.mem.eql(u8, name, "@as")) {
@@ -1648,13 +1675,15 @@ pub const StackEscapeEngineChecker = struct {
     }
 
     fn mergeOrigin(a: Origin, b: Origin) Origin {
+        // May-escape merge: keep any proven stack origin, otherwise preserve known safe origins.
         if (a.kind == .stack or b.kind == .stack) {
             var token: ?u32 = null;
             if (a.kind == .stack) token = a.token;
             if (token == null and b.kind == .stack) token = b.token;
             return .{ .kind = .stack, .token = token };
         }
-        if (a.kind == .unknown or b.kind == .unknown) return Origin.unknown();
+        if (a.kind == .unknown) return b;
+        if (b.kind == .unknown) return a;
         if (a.kind == b.kind) return a;
         return Origin.unknown();
     }
@@ -1664,14 +1693,23 @@ pub const StackEscapeEngineChecker = struct {
         return (@as(u64, call_node) << 32) | @as(u64, origin);
     }
 
-    fn buildSuccessorLists(allocator: std.mem.Allocator, cfg: *const Cfg) !NodeLists {
-        var lists = try allocator.alloc(std.ArrayList(ids.CfgNodeId), cfg.nodeCount());
+    const EdgeRef = struct {
+        to: ids.CfgNodeId,
+        kind: EdgeKind,
+    };
+
+    const EdgeLists = struct {
+        items: []std.ArrayList(EdgeRef),
+    };
+
+    fn buildSuccessorLists(allocator: std.mem.Allocator, cfg: *const Cfg) !EdgeLists {
+        var lists = try allocator.alloc(std.ArrayList(EdgeRef), cfg.nodeCount());
         for (lists) |*list| {
             list.* = .empty;
         }
         for (cfg.edges.items) |edge| {
             const idx: usize = @intCast(ids.cfgIndex(edge.from));
-            try lists[idx].append(allocator, edge.to);
+            try lists[idx].append(allocator, .{ .to = edge.to, .kind = edge.kind });
         }
         return .{ .items = lists };
     }
@@ -1692,6 +1730,13 @@ pub const StackEscapeEngineChecker = struct {
         items: []std.ArrayList(ids.CfgNodeId),
     };
 
+    fn deinitEdgeLists(allocator: std.mem.Allocator, lists: *EdgeLists) void {
+        for (lists.items) |*list| {
+            list.deinit(allocator);
+        }
+        allocator.free(lists.items);
+    }
+
     fn deinitNodeLists(allocator: std.mem.Allocator, lists: *NodeLists) void {
         for (lists.items) |*list| {
             list.deinit(allocator);
@@ -1702,12 +1747,16 @@ pub const StackEscapeEngineChecker = struct {
     fn isJoinGuaranteed(
         allocator: std.mem.Allocator,
         cfg: *const Cfg,
-        succs: []std.ArrayList(ids.CfgNodeId),
+        succs: []std.ArrayList(EdgeRef),
         spawn_node: ids.CfgNodeId,
         join_nodes: []const ids.CfgNodeId,
+        has_try_error_edge: bool,
     ) bool {
+        // For `try spawn`, ignore the try_error edge from the spawn site:
+        // no thread is created on that error path, so join isn't required there.
+        const skip_try_error_from = if (has_try_error_edge) spawn_node else null;
         for (join_nodes) |join_node| {
-            if (!isExitReachableWithoutNode(allocator, cfg, succs, spawn_node, join_node)) {
+            if (!isExitReachableWithoutNode(allocator, cfg, succs, spawn_node, join_node, skip_try_error_from)) {
                 return true;
             }
         }
@@ -1717,9 +1766,10 @@ pub const StackEscapeEngineChecker = struct {
     fn isExitReachableWithoutNode(
         allocator: std.mem.Allocator,
         cfg: *const Cfg,
-        succs: []std.ArrayList(ids.CfgNodeId),
+        succs: []std.ArrayList(EdgeRef),
         start: ids.CfgNodeId,
         blocked: ids.CfgNodeId,
+        skip_try_error_from: ?ids.CfgNodeId,
     ) bool {
         const node_count = cfg.nodeCount();
         var visited = allocator.alloc(bool, node_count) catch return true;
@@ -1737,14 +1787,168 @@ pub const StackEscapeEngineChecker = struct {
             if (current == cfg.exit) return true;
             const idx: usize = @intCast(ids.cfgIndex(current));
             for (succs[idx].items) |succ| {
-                if (succ == blocked) continue;
-                const succ_idx: usize = @intCast(ids.cfgIndex(succ));
+                if (succ.to == blocked) continue;
+                if (skip_try_error_from) |skip_node| {
+                    if (current == skip_node and succ.kind == .try_error) continue;
+                }
+                const succ_idx: usize = @intCast(ids.cfgIndex(succ.to));
                 if (visited[succ_idx]) continue;
                 visited[succ_idx] = true;
-                queue.append(allocator, succ) catch return true;
+                queue.append(allocator, succ.to) catch return true;
             }
         }
 
         return false;
+    }
+
+    fn collectComptimeParams(
+        tree: *const std.zig.Ast,
+        fn_node: ids.AstNodeId,
+        out: *std.AutoHashMap(ids.VarId, void),
+    ) !void {
+        const fn_index = ids.astIndex(fn_node);
+        const tags = tree.nodes.items(.tag);
+        if (fn_index >= tags.len) return;
+        if (tags[fn_index] != .fn_decl) return;
+
+        const data = tree.nodes.items(.data)[fn_index];
+        const proto_node = @intFromEnum(data.node_and_node[0]);
+        if (proto_node == 0 or proto_node >= tags.len) return;
+
+        var buffer: [1]std.zig.Ast.Node.Index = undefined;
+        const proto = switch (tags[proto_node]) {
+            .fn_proto => tree.fnProto(@enumFromInt(proto_node)),
+            .fn_proto_simple => tree.fnProtoSimple(&buffer, @enumFromInt(proto_node)),
+            .fn_proto_one => tree.fnProtoOne(&buffer, @enumFromInt(proto_node)),
+            .fn_proto_multi => tree.fnProtoMulti(@enumFromInt(proto_node)),
+            else => return,
+        };
+
+        var it = proto.iterate(tree);
+        while (it.next()) |param| {
+            const comptime_token = param.comptime_noalias orelse continue;
+            if (tree.tokenTag(comptime_token) != .keyword_comptime) continue;
+            const name_token = param.name_token orelse continue;
+            if (tree.tokenTag(name_token) != .identifier) continue;
+            try out.put(ids.varId(name_token), {});
+        }
+    }
+
+    fn isHeapAllocCall(ctx: *AnalysisContext, call_info: CallInfo) bool {
+        // Treat allocator-backed values as heap to avoid misclassifying them as stack origins.
+        if (ctx.config) |config| {
+            var return_type_str: ?[]const u8 = null;
+            if (ctx.type_ctx) |type_ctx| {
+                if (type_ctx.getExpressionType(call_info.call_node)) |ti| {
+                    return_type_str = ti.type_str;
+                }
+            }
+            if (config.matchResourceModel(call_info.method_name, call_info.receiver_type, return_type_str, call_info.fqn)) |kind| {
+                if (kind == .alloc) return true;
+            }
+        }
+
+        if (isAllocatorMethodCall(ctx, call_info)) return true;
+        if (isAllocPrintCall(ctx, call_info)) return true;
+
+        return false;
+    }
+
+    fn isAllocatorMethodCall(ctx: *AnalysisContext, call_info: CallInfo) bool {
+        const base_node = call_info.base_node orelse return false;
+        if (!isAllocatorExpr(ctx, base_node)) return false;
+
+        return std.mem.eql(u8, call_info.method_name, "alloc") or
+            std.mem.eql(u8, call_info.method_name, "allocWithOptions") or
+            std.mem.eql(u8, call_info.method_name, "allocAdvanced") or
+            std.mem.eql(u8, call_info.method_name, "allocSentinel") or
+            std.mem.eql(u8, call_info.method_name, "allocSentinelAdvanced") or
+            std.mem.eql(u8, call_info.method_name, "create") or
+            std.mem.eql(u8, call_info.method_name, "dupe") or
+            std.mem.eql(u8, call_info.method_name, "dupeZ") or
+            std.mem.eql(u8, call_info.method_name, "dupeSentinel");
+    }
+
+    fn isAllocPrintCall(ctx: *AnalysisContext, call_info: CallInfo) bool {
+        if (!std.mem.eql(u8, call_info.method_name, "allocPrint")) return false;
+        if (call_info.params.len == 0) return false;
+        const allocator_arg = @intFromEnum(call_info.params[0]);
+        return isAllocatorExpr(ctx, allocator_arg);
+    }
+
+    fn isAllocatorExpr(ctx: *AnalysisContext, expr_node: u32) bool {
+        if (isAllocatorType(ctx, expr_node)) return true;
+        if (isAllocatorName(ctx, expr_node)) return true;
+        if (isStdHeapAllocatorAccess(ctx, expr_node)) return true;
+        return false;
+    }
+
+    fn isAllocatorType(ctx: *AnalysisContext, expr_node: u32) bool {
+        const type_ctx = ctx.type_ctx orelse return false;
+        const info = type_ctx.getExpressionType(expr_node) orelse return false;
+        const type_str = info.type_str orelse return false;
+        return isAllocatorTypeName(type_str);
+    }
+
+    fn isAllocatorTypeName(type_str: []const u8) bool {
+        var slice = type_str;
+        while (slice.len > 0 and (slice[0] == '*' or slice[0] == '?')) {
+            slice = slice[1..];
+        }
+        if (std.mem.startsWith(u8, slice, "const ")) {
+            slice = slice["const ".len..];
+        }
+        return std.mem.eql(u8, slice, "std.mem.Allocator");
+    }
+
+    fn isAllocatorName(ctx: *AnalysisContext, expr_node: u32) bool {
+        const tree = ctx.tree;
+        const tags = tree.nodes.items(.tag);
+        const datas = tree.nodes.items(.data);
+        const token_tags = tree.tokens.items(.tag);
+        const main_tokens = tree.nodes.items(.main_token);
+
+        if (expr_node >= tags.len) return false;
+        switch (tags[expr_node]) {
+            .identifier => {
+                const token = main_tokens[expr_node];
+                if (token >= token_tags.len or token_tags[token] != .identifier) return false;
+                return std.mem.eql(u8, tree.tokenSlice(token), "allocator");
+            },
+            .field_access => {
+                const field_token = datas[expr_node].node_and_token[1];
+                if (field_token >= token_tags.len or token_tags[field_token] != .identifier) return false;
+                return std.mem.eql(u8, tree.tokenSlice(field_token), "allocator");
+            },
+            else => return false,
+        }
+    }
+
+    fn isStdHeapAllocatorAccess(ctx: *AnalysisContext, expr_node: u32) bool {
+        const tree = ctx.tree;
+        const tags = tree.nodes.items(.tag);
+        const datas = tree.nodes.items(.data);
+        const token_tags = tree.tokens.items(.tag);
+        const main_tokens = tree.nodes.items(.main_token);
+
+        if (expr_node >= tags.len or tags[expr_node] != .field_access) return false;
+        const access = datas[expr_node].node_and_token;
+        const field_token = access[1];
+        if (field_token >= token_tags.len or token_tags[field_token] != .identifier) return false;
+        const field_name = tree.tokenSlice(field_token);
+        if (!std.mem.endsWith(u8, field_name, "allocator")) return false;
+
+        const base_node = @intFromEnum(access[0]);
+        if (base_node >= tags.len or tags[base_node] != .field_access) return false;
+        const base_access = datas[base_node].node_and_token;
+        const base_field_token = base_access[1];
+        if (base_field_token >= token_tags.len or token_tags[base_field_token] != .identifier) return false;
+        if (!std.mem.eql(u8, tree.tokenSlice(base_field_token), "heap")) return false;
+
+        const root_node = @intFromEnum(base_access[0]);
+        if (root_node >= tags.len or tags[root_node] != .identifier) return false;
+        const root_token = main_tokens[root_node];
+        if (root_token >= token_tags.len or token_tags[root_token] != .identifier) return false;
+        return std.mem.eql(u8, tree.tokenSlice(root_token), "std");
     }
 };

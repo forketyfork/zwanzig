@@ -113,6 +113,7 @@ Define custom resource acquisition/release patterns for `store-violations-engine
 ## Stack escape models
 
 Define escape/capture rules for `stack-escape-engine`.
+`resource_models` entries with `kind: "alloc"` are also used to classify heap-backed values.
 
 ### Example `.zwanzig.json` with escape models
 

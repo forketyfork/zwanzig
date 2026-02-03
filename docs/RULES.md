@@ -523,6 +523,7 @@ Key patterns:
 - Stack array literals (e.g., `&.{ "open", owned_url }`) captured into a long-lived value
 - Values captured into detached threads without a guaranteed `join()`
 - Returning values that contain stack-backed references
+- Escape is reported if any path proves a stack-backed origin can reach a capture sink
 
 **Bad:**
 ```zig
@@ -554,3 +555,7 @@ Built-in escape models:
 Config:
 - `escape_models`: custom escape/capture rules
 - `escape_max_depth`: helper call depth for origin tracking (default: 3)
+- `resource_models` of kind `alloc` are used to treat allocator-backed values as heap
+
+Notes:
+- `try std.Thread.spawn(...)` ignores the `try_error` edge when checking join guarantees (no thread is created on the error path).
