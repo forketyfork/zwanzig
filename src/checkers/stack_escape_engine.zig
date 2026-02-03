@@ -12,6 +12,8 @@ const ids = @import("../ids.zig");
 const VarResolver = @import("../engine/var_resolver.zig").VarResolver;
 const Cfg = @import("../cfg.zig").Cfg;
 const EdgeKind = @import("../cfg.zig").EdgeKind;
+const call_utils = @import("../analysis/call_utils.zig");
+const allocator_utils = @import("../analysis/allocator_utils.zig");
 
 const default_helper_depth: u32 = 3;
 
@@ -930,8 +932,8 @@ pub const StackEscapeEngineChecker = struct {
                 const field_token = field_access_data[1];
                 if (field_token >= token_tags.len or token_tags[field_token] != .identifier) return null;
                 const field_name = tree.tokenSlice(field_token);
-                const receiver_type = getReceiverTypeName(ctx, base_node);
-                const fqn = constructFqn(ctx, base_node, field_name);
+                const receiver_type = call_utils.getReceiverTypeName(ctx.type_ctx, ctx.tree, base_node);
+                const fqn = call_utils.constructFqn(ctx.tree, base_node, field_name, ctx.fqn_buffer);
                 return .{
                     .call_node = call_node,
                     .method_name = field_name,
@@ -943,81 +945,6 @@ pub const StackEscapeEngineChecker = struct {
             },
             else => return null,
         }
-    }
-
-    fn getReceiverTypeName(ctx: *AnalysisContext, base_node: u32) ?[]const u8 {
-        if (ctx.type_ctx) |type_ctx| {
-            if (type_ctx.getExpressionType(base_node)) |ti| {
-                return ti.type_str;
-            }
-        }
-        return null;
-    }
-
-    fn constructFqn(ctx: *AnalysisContext, base_node: u32, method_name: []const u8) ?[]const u8 {
-        const tree = ctx.tree;
-        const tags = tree.nodes.items(.tag);
-        const datas = tree.nodes.items(.data);
-        const main_tokens = tree.nodes.items(.main_token);
-        const token_tags = tree.tokens.items(.tag);
-
-        var parts: [16][]const u8 = undefined;
-        var count: usize = 0;
-        var node = base_node;
-
-        while (true) {
-            if (node >= tags.len) return null;
-
-            switch (tags[node]) {
-                .identifier => {
-                    const ident_token = main_tokens[node];
-                    if (ident_token >= token_tags.len or token_tags[ident_token] != .identifier) return null;
-                    if (count >= parts.len) return null;
-                    parts[count] = tree.tokenSlice(ident_token);
-                    count += 1;
-                    break;
-                },
-                .field_access => {
-                    const field_access = datas[node].node_and_token;
-                    const field_token = field_access[1];
-                    if (field_token >= token_tags.len or token_tags[field_token] != .identifier) return null;
-                    if (count >= parts.len) return null;
-                    parts[count] = tree.tokenSlice(field_token);
-                    count += 1;
-                    node = @intFromEnum(field_access[0]);
-                },
-                else => return null,
-            }
-        }
-
-        var pos: usize = 0;
-        var idx: usize = count;
-        while (idx > 0) : (idx -= 1) {
-            if (!appendFqnPart(ctx, parts[idx - 1], &pos)) return null;
-            if (idx > 1) {
-                if (!appendFqnSeparator(ctx, &pos)) return null;
-            }
-        }
-
-        if (!appendFqnSeparator(ctx, &pos)) return null;
-        if (!appendFqnPart(ctx, method_name, &pos)) return null;
-
-        return ctx.fqn_buffer[0..pos];
-    }
-
-    fn appendFqnPart(ctx: *AnalysisContext, part: []const u8, pos: *usize) bool {
-        if (part.len == 0) return false;
-        if (pos.* + part.len > ctx.fqn_buffer.len) return false;
-        std.mem.copyForwards(u8, ctx.fqn_buffer[pos.* .. pos.* + part.len], part);
-        pos.* += part.len;
-        return true;
-    }
-
-    fn appendFqnSeparator(ctx: *AnalysisContext, pos: *usize) bool {
-        if (pos.* >= ctx.fqn_buffer.len) return false;
-        ctx.fqn_buffer[pos.*] = '.';
-        pos.* += 1;
-        return true;
     }
 
     fn isThreadSpawnCall(ctx: *AnalysisContext, call_node: u32) bool {
@@ -1105,10 +1032,7 @@ pub const StackEscapeEngineChecker = struct {
                 const pair = datas[expr_node].node_and_node;
                 return originOfExpr(ctx, state, @intFromEnum(pair[0]), depth);
             },
-            .field_access => {
-                const data = datas[expr_node].node_and_token;
-                return originOfExpr(ctx, state, @intFromEnum(data[0]), depth);
-            },
+            .field_access => return originFromFieldAccess(ctx, state, expr_node, depth),
             .@"try" => return originOfExpr(ctx, state, @intFromEnum(datas[expr_node].node), depth),
             .@"catch" => {
                 const pair = datas[expr_node].node_and_node;
@@ -1140,6 +1064,11 @@ pub const StackEscapeEngineChecker = struct {
     }
 
     fn originFromIdentifier(ctx: *AnalysisContext, state: *const OriginState, ident_node: u32) Origin {
+        // Local array values live on the stack even when initialized from comptime literals.
+        if (localArrayOriginToken(ctx, ident_node)) |origin_token| {
+            return .{ .kind = .stack, .token = origin_token };
+        }
+
         if (ctx.resolver.resolve(ident_node)) |var_id| {
             if (state.get(var_id)) |origin| return origin;
         }
@@ -1372,6 +1301,39 @@ pub const StackEscapeEngineChecker = struct {
         return if (has_any) combined else Origin.unknown();
     }
 
+    fn originFromFieldAccess(ctx: *AnalysisContext, state: *const OriginState, expr_node: u32, depth: u32) Origin {
+        const tree = ctx.tree;
+        const datas = tree.nodes.items(.data);
+        const token_tags = tree.tokens.items(.tag);
+        const base_node = @intFromEnum(datas[expr_node].node_and_token[0]);
+        const field_token = datas[expr_node].node_and_token[1];
+
+        // Local struct fields storing arrays still live on the stack.
+        if (isLocalDecl(ctx, base_node)) {
+            if (ctx.type_ctx) |type_ctx| {
+                if (type_ctx.getExpressionType(expr_node)) |info| {
+                    if (info.kind == .array) {
+                        return .{ .kind = .stack, .token = treeMainToken(tree, expr_node) };
+                    }
+                    if (info.type_str) |type_str| {
+                        if (isArrayValueTypeName(type_str)) {
+                            return .{ .kind = .stack, .token = treeMainToken(tree, expr_node) };
+                        }
+                    }
+                }
+            }
+        }
+
+        if (field_token < token_tags.len and token_tags[field_token] == .identifier) {
+            const field_name = tree.tokenSlice(field_token);
+            if (localStructFieldArrayOrigin(ctx, base_node, field_name)) |origin| {
+                return origin;
+            }
+        }
+
+        return originOfExpr(ctx, state, base_node, depth);
+    }
+
     fn resolveHelperReturnParamIndex(ctx: *AnalysisContext, call_info: CallInfo) ?u32 {
         const tree = ctx.tree;
         const tags = tree.nodes.items(.tag);
@@ -1475,6 +1437,7 @@ pub const StackEscapeEngineChecker = struct {
                 var buf: [2]std.zig.Ast.Node.Index = undefined;
                 const params = tree.builtinCallParams(&buf, @enumFromInt(expr_node)) orelse return null;
                 if (params.len == 0) return null;
+                // @ptrCast is a single-argument builtin in Zig 0.15; the type comes from context.
                 const value_index: usize = if (std.mem.eql(u8, name, "@as")) 1 else 0;
                 if (value_index >= params.len) return null;
                 return resolveParamNameFromExpr(tree, @intFromEnum(params[value_index]));
@@ -1565,6 +1528,194 @@ pub const StackEscapeEngineChecker = struct {
             return !decl_info.is_top_level;
         }
         return false;
+    }
+
+    fn localArrayOriginToken(ctx: *AnalysisContext, ident_node: u32) ?u32 {
+        const tree = ctx.tree;
+        const tags = tree.nodes.items(.tag);
+        if (ident_node >= tags.len or tags[ident_node] != .identifier) return null;
+        if (!isLocalDecl(ctx, ident_node)) return null;
+        if (ctx.resolver.resolveDeclNode(ident_node)) |decl_node| {
+            if (isArrayDeclNode(tree, decl_node)) {
+                return declNameToken(ctx, ident_node) orelse treeMainToken(tree, ident_node);
+            }
+        }
+
+        if (ctx.type_ctx) |type_ctx| {
+            const type_info = type_ctx.getExpressionType(ident_node) orelse return null;
+            if (type_info.kind == .array) {
+                return declNameToken(ctx, ident_node) orelse treeMainToken(tree, ident_node);
+            }
+            if (type_info.type_str) |type_str| {
+                if (isArrayValueTypeName(type_str)) {
+                    return declNameToken(ctx, ident_node) orelse treeMainToken(tree, ident_node);
+                }
+            }
+        }
+
+        return null;
+    }
+
+    fn declNameToken(ctx: *AnalysisContext, ident_node: u32) ?u32 {
+        const decl_node = ctx.resolver.resolveDeclNode(ident_node) orelse return null;
+        const full = ctx.tree.fullVarDecl(@enumFromInt(decl_node)) orelse return null;
+        const name_token = full.ast.mut_token + 1;
+        if (name_token >= ctx.tree.tokens.items(.tag).len) return null;
+        if (ctx.tree.tokenTag(name_token) == .identifier) {
+            return name_token;
+        }
+        return treeMainToken(ctx.tree, decl_node);
+    }
+
+    fn isArrayValueTypeName(type_str: []const u8) bool {
+        var slice = type_str;
+        if (slice.len > 0 and slice[0] == '?') {
+            slice = slice[1..];
+        }
+        if (std.mem.startsWith(u8, slice, "const ")) {
+            slice = slice["const ".len..];
+        }
+        if (std.mem.startsWith(u8, slice, "volatile ")) {
+            slice = slice["volatile ".len..];
+        }
+        if (slice.len < 2 or slice[0] != '[') return false;
+        const second = slice[1];
+        if (second == ']' or second == '*') return false;
+        return true;
+    }
+
+    fn isArrayDeclNode(tree: *const std.zig.Ast, decl_node: u32) bool {
+        const tags = tree.nodes.items(.tag);
+        if (decl_node >= tags.len) return false;
+        switch (tags[decl_node]) {
+            .simple_var_decl,
+            .aligned_var_decl,
+            .local_var_decl,
+            .global_var_decl,
+            => {},
+            else => return false,
+        }
+
+        const full = tree.fullVarDecl(@enumFromInt(decl_node)) orelse return false;
+        if (full.ast.type_node.unwrap()) |type_node| {
+            if (isArrayTypeNode(tree, @intFromEnum(type_node))) {
+                return true;
+            }
+        }
+        if (full.ast.init_node.unwrap()) |init_node| {
+            if (isArrayLiteralNode(tree, @intFromEnum(init_node))) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    fn isArrayTypeNode(tree: *const std.zig.Ast, type_node: u32) bool {
+        const tags = tree.nodes.items(.tag);
+        if (type_node >= tags.len) return false;
+        return tags[type_node] == .array_type or tags[type_node] == .array_type_sentinel;
+    }
+
+    fn isArrayLiteralNode(tree: *const std.zig.Ast, node: u32) bool {
+        const tags = tree.nodes.items(.tag);
+        if (node >= tags.len) return false;
+        return switch (tags[node]) {
+            .array_init,
+            .array_init_comma,
+            .array_init_one,
+            .array_init_one_comma,
+            .array_init_dot,
+            .array_init_dot_comma,
+            .array_init_dot_two,
+            .array_init_dot_two_comma,
+            => true,
+            else => false,
+        };
+    }
+
+    fn localStructFieldArrayOrigin(ctx: *AnalysisContext, base_node: u32, field_name: []const u8) ?Origin {
+        const tree = ctx.tree;
+        const tags = tree.nodes.items(.tag);
+        const token_tags = tree.tokens.items(.tag);
+
+        if (base_node >= tags.len or tags[base_node] != .identifier) return null;
+        if (!isLocalDecl(ctx, base_node)) return null;
+        const decl_node = ctx.resolver.resolveDeclNode(base_node) orelse return null;
+        const full = tree.fullVarDecl(@enumFromInt(decl_node)) orelse return null;
+        const init_node = full.ast.init_node.unwrap() orelse return null;
+        const init_idx = @intFromEnum(init_node);
+
+        switch (tags[init_idx]) {
+            .struct_init,
+            .struct_init_comma,
+            .struct_init_one,
+            .struct_init_one_comma,
+            .struct_init_dot,
+            .struct_init_dot_comma,
+            .struct_init_dot_two,
+            .struct_init_dot_two_comma,
+            => {},
+            else => return null,
+        }
+
+        var buf: [2]std.zig.Ast.Node.Index = undefined;
+        const struct_init = tree.fullStructInit(&buf, @enumFromInt(init_idx)) orelse return null;
+        for (struct_init.ast.fields) |field_node| {
+            const field = tree.fullContainerField(field_node) orelse continue;
+            var name_token = field.ast.main_token;
+            if (name_token >= token_tags.len) continue;
+            if (token_tags[name_token] != .identifier) {
+                if (token_tags[name_token] == .period and name_token + 1 < token_tags.len and token_tags[name_token + 1] == .identifier) {
+                    name_token += 1;
+                } else {
+                    continue;
+                }
+            }
+            const name = tree.tokenSlice(name_token);
+            if (!std.mem.eql(u8, name, field_name)) continue;
+
+            if (field.ast.value_expr.unwrap()) |value_expr| {
+                return arrayValueOrigin(ctx, @intFromEnum(value_expr));
+            }
+            if (field.ast.tuple_like) {
+                if (field.ast.type_expr.unwrap()) |value_expr| {
+                    return arrayValueOrigin(ctx, @intFromEnum(value_expr));
+                }
+            }
+        }
+
+        return null;
+    }
+
+    fn arrayValueOrigin(ctx: *AnalysisContext, value_node: u32) ?Origin {
+        const tree = ctx.tree;
+        const tags = tree.nodes.items(.tag);
+        if (value_node >= tags.len) return null;
+
+        if (isArrayLiteralNode(tree, value_node)) {
+            return .{ .kind = .stack, .token = treeMainToken(tree, value_node) };
+        }
+
+        if (tags[value_node] == .identifier) {
+            if (localArrayOriginToken(ctx, value_node)) |token| {
+                return .{ .kind = .stack, .token = token };
+            }
+        }
+
+        if (ctx.type_ctx) |type_ctx| {
+            if (type_ctx.getExpressionType(value_node)) |info| {
+                if (info.kind == .array) {
+                    return .{ .kind = .stack, .token = treeMainToken(tree, value_node) };
+                }
+                if (info.type_str) |type_str| {
+                    if (isArrayValueTypeName(type_str)) {
+                        return .{ .kind = .stack, .token = treeMainToken(tree, value_node) };
+                    }
+                }
+            }
+        }
+
+        return null;
     }
 
     fn isConstDeclNode(tree: *const std.zig.Ast, decl_node: u32) bool {
@@ -1752,26 +1903,35 @@ pub const StackEscapeEngineChecker = struct {
         join_nodes: []const ids.CfgNodeId,
         has_try_error_edge: bool,
     ) bool {
+        if (join_nodes.len == 0) return false;
         // For `try spawn`, ignore the try_error edge from the spawn site:
         // no thread is created on that error path, so join isn't required there.
         const skip_try_error_from = if (has_try_error_edge) spawn_node else null;
-        for (join_nodes) |join_node| {
-            if (!isExitReachableWithoutNode(allocator, cfg, succs, spawn_node, join_node, skip_try_error_from)) {
-                return true;
-            }
-        }
-        return false;
+        // Join is guaranteed only if no path reaches exit while avoiding all join nodes.
+        return !isExitReachableWithoutAnyNode(allocator, cfg, succs, spawn_node, join_nodes, skip_try_error_from);
     }
 
-    fn isExitReachableWithoutNode(
+    fn isExitReachableWithoutAnyNode(
         allocator: std.mem.Allocator,
         cfg: *const Cfg,
         succs: []std.ArrayList(EdgeRef),
         start: ids.CfgNodeId,
-        blocked: ids.CfgNodeId,
+        blocked_nodes: []const ids.CfgNodeId,
         skip_try_error_from: ?ids.CfgNodeId,
     ) bool {
         const node_count = cfg.nodeCount();
+        var blocked = allocator.alloc(bool, node_count) catch return true;
+        defer allocator.free(blocked);
+        @memset(blocked, false);
+        for (blocked_nodes) |node| {
+            const idx: usize = @intCast(ids.cfgIndex(node));
+            if (idx < blocked.len) {
+                blocked[idx] = true;
+            }
+        }
+
+        if (blocked[@intCast(ids.cfgIndex(start))]) return false;
+
         var visited = allocator.alloc(bool, node_count) catch return true;
         defer allocator.free(visited);
         @memset(visited, false);
@@ -1783,15 +1943,15 @@ pub const StackEscapeEngineChecker = struct {
 
         while (queue.items.len > 0) {
             const current = queue.pop() orelse break;
-            if (current == blocked) continue;
+            if (blocked[@intCast(ids.cfgIndex(current))]) continue;
             if (current == cfg.exit) return true;
             const idx: usize = @intCast(ids.cfgIndex(current));
             for (succs[idx].items) |succ| {
-                if (succ.to == blocked) continue;
+                const succ_idx: usize = @intCast(ids.cfgIndex(succ.to));
+                if (blocked[succ_idx]) continue;
                 if (skip_try_error_from) |skip_node| {
                     if (current == skip_node and succ.kind == .try_error) continue;
                 }
-                const succ_idx: usize = @intCast(ids.cfgIndex(succ.to));
                 if (visited[succ_idx]) continue;
                 visited[succ_idx] = true;
                 queue.append(allocator, succ.to) catch return true;
@@ -1856,7 +2016,7 @@ pub const StackEscapeEngineChecker = struct {
 
     fn isAllocatorMethodCall(ctx: *AnalysisContext, call_info: CallInfo) bool {
         const base_node = call_info.base_node orelse return false;
-        if (!isAllocatorExpr(ctx, base_node)) return false;
+        if (!allocator_utils.isAllocatorExpr(ctx.tree, ctx.type_ctx, base_node)) return false;
 
         return std.mem.eql(u8, call_info.method_name, "alloc") or
             std.mem.eql(u8, call_info.method_name, "allocWithOptions") or
@@ -1873,82 +2033,6 @@ pub const StackEscapeEngineChecker = struct {
         if (!std.mem.eql(u8, call_info.method_name, "allocPrint")) return false;
         if (call_info.params.len == 0) return false;
         const allocator_arg = @intFromEnum(call_info.params[0]);
-        return isAllocatorExpr(ctx, allocator_arg);
-    }
-
-    fn isAllocatorExpr(ctx: *AnalysisContext, expr_node: u32) bool {
-        if (isAllocatorType(ctx, expr_node)) return true;
-        if (isAllocatorName(ctx, expr_node)) return true;
-        if (isStdHeapAllocatorAccess(ctx, expr_node)) return true;
-        return false;
-    }
-
-    fn isAllocatorType(ctx: *AnalysisContext, expr_node: u32) bool {
-        const type_ctx = ctx.type_ctx orelse return false;
-        const info = type_ctx.getExpressionType(expr_node) orelse return false;
-        const type_str = info.type_str orelse return false;
-        return isAllocatorTypeName(type_str);
-    }
-
-    fn isAllocatorTypeName(type_str: []const u8) bool {
-        var slice = type_str;
-        while (slice.len > 0 and (slice[0] == '*' or slice[0] == '?')) {
-            slice = slice[1..];
-        }
-        if (std.mem.startsWith(u8, slice, "const ")) {
-            slice = slice["const ".len..];
-        }
-        return std.mem.eql(u8, slice, "std.mem.Allocator");
-    }
-
-    fn isAllocatorName(ctx: *AnalysisContext, expr_node: u32) bool {
-        const tree = ctx.tree;
-        const tags = tree.nodes.items(.tag);
-        const datas = tree.nodes.items(.data);
-        const token_tags = tree.tokens.items(.tag);
-        const main_tokens = tree.nodes.items(.main_token);
-
-        if (expr_node >= tags.len) return false;
-        switch (tags[expr_node]) {
-            .identifier => {
-                const token = main_tokens[expr_node];
-                if (token >= token_tags.len or token_tags[token] != .identifier) return false;
-                return std.mem.eql(u8, tree.tokenSlice(token), "allocator");
-            },
-            .field_access => {
-                const field_token = datas[expr_node].node_and_token[1];
-                if (field_token >= token_tags.len or token_tags[field_token] != .identifier) return false;
-                return std.mem.eql(u8, tree.tokenSlice(field_token), "allocator");
-            },
-            else => return false,
-        }
-    }
-
-    fn isStdHeapAllocatorAccess(ctx: *AnalysisContext, expr_node: u32) bool {
-        const tree = ctx.tree;
-        const tags = tree.nodes.items(.tag);
-        const datas = tree.nodes.items(.data);
-        const token_tags = tree.tokens.items(.tag);
-        const main_tokens = tree.nodes.items(.main_token);
-
-        if (expr_node >= tags.len or tags[expr_node] != .field_access) return false;
-        const access = datas[expr_node].node_and_token;
-        const field_token = access[1];
-        if (field_token >= token_tags.len or token_tags[field_token] != .identifier) return false;
-        const field_name = tree.tokenSlice(field_token);
-        if (!std.mem.endsWith(u8, field_name, "allocator")) return false;
-
-        const base_node = @intFromEnum(access[0]);
-        if (base_node >= tags.len or tags[base_node] != .field_access) return false;
-        const base_access = datas[base_node].node_and_token;
-        const base_field_token = base_access[1];
-        if (base_field_token >= token_tags.len or token_tags[base_field_token] != .identifier) return false;
-        if (!std.mem.eql(u8, tree.tokenSlice(base_field_token), "heap")) return false;
-
-        const root_node = @intFromEnum(base_access[0]);
-        if (root_node >= tags.len or tags[root_node] != .identifier) return false;
-        const root_token = main_tokens[root_node];
-        if (root_token >= token_tags.len or token_tags[root_token] != .identifier) return false;
-        return std.mem.eql(u8, tree.tokenSlice(root_token), "std");
+        return allocator_utils.isAllocatorExpr(ctx.tree, ctx.type_ctx, allocator_arg);
     }
 };

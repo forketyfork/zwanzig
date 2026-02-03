@@ -115,6 +115,8 @@ Best-effort definition of "join guaranteed":
 - no `detach()` is called on the thread value before `join()`
 - for `try std.Thread.spawn(...)`, ignore the `try_error` edge from the spawn
   site (no thread is created on the error path)
+ - joins on all branches count as guaranteed if no path reaches function exit
+   without passing through at least one `join()` call
 
 If post-dominator calculation is not available, use a conservative
 approximation:
