@@ -57,6 +57,7 @@ pub const Diagnostic = struct {
     severity: Severity,
     message: []const u8,
     range: SourceRange,
+    related_range: ?SourceRange = null,
 
     pub fn init(
         allocator: std.mem.Allocator,
@@ -73,6 +74,27 @@ pub const Diagnostic = struct {
             .severity = severity,
             .message = owned_message,
             .range = range,
+            .related_range = null,
+        };
+    }
+
+    pub fn initWithRelated(
+        allocator: std.mem.Allocator,
+        file_path: []const u8,
+        rule_id: []const u8,
+        severity: Severity,
+        message: []const u8,
+        range: SourceRange,
+        related_range: ?SourceRange,
+    ) !Diagnostic {
+        const owned_message = try allocator.dupe(u8, message);
+        return .{
+            .file_path = file_path,
+            .rule_id = rule_id,
+            .severity = severity,
+            .message = owned_message,
+            .range = range,
+            .related_range = related_range,
         };
     }
 
@@ -89,6 +111,20 @@ pub const Diagnostic = struct {
         return init(allocator, file_path, rule_id, severity, message, SourceRange.fromSingleLocation(loc));
     }
 
+    pub fn initAtLocationWithRelated(
+        allocator: std.mem.Allocator,
+        file_path: []const u8,
+        rule_id: []const u8,
+        severity: Severity,
+        message: []const u8,
+        line: usize,
+        column: usize,
+        related_range: ?SourceRange,
+    ) !Diagnostic {
+        const loc = Location.init(line, column);
+        return initWithRelated(allocator, file_path, rule_id, severity, message, SourceRange.fromSingleLocation(loc), related_range);
+    }
+
     pub fn deinit(self: *Diagnostic, allocator: std.mem.Allocator) void {
         allocator.free(self.message);
     }
@@ -103,6 +139,7 @@ pub const Diagnostic = struct {
             .severity = self.severity,
             .message = try allocator.dupe(u8, self.message),
             .range = self.range,
+            .related_range = self.related_range,
         };
     }
 
@@ -115,76 +152,65 @@ pub const Diagnostic = struct {
             self.rule_id,
             self.message,
         });
-    }
-
-    fn writeJsonString(writer: anytype, s: []const u8) !void {
-        try writer.writeByte('"');
-        for (s) |c| {
-            switch (c) {
-                '"' => try writer.writeAll("\\\""),
-                '\\' => try writer.writeAll("\\\\"),
-                '\n' => try writer.writeAll("\\n"),
-                '\r' => try writer.writeAll("\\r"),
-                '\t' => try writer.writeAll("\\t"),
-                0x00...0x08, 0x0B, 0x0C, 0x0E...0x1F => try writer.print("\\u{x:0>4}", .{c}),
-                else => try writer.writeByte(c),
-            }
+        if (self.related_range) |related| {
+            try writer.print("  related: {d}:{d}\n", .{ related.start.line, related.start.column });
         }
-        try writer.writeByte('"');
     }
 
-    pub fn writeJson(self: Diagnostic, writer: anytype) !void {
-        try writer.writeAll("    {\n");
-        try writer.writeAll("      \"file\": ");
-        try writeJsonString(writer, self.file_path);
-        try writer.writeAll(",\n");
-        try writer.writeAll("      \"rule\": ");
-        try writeJsonString(writer, self.rule_id);
-        try writer.writeAll(",\n");
-        try writer.writeAll("      \"severity\": ");
-        try writeJsonString(writer, self.severity.toString());
-        try writer.writeAll(",\n");
-        try writer.writeAll("      \"message\": ");
-        try writeJsonString(writer, self.message);
-        try writer.writeAll(",\n");
-        try writer.writeAll("      \"location\": {\n");
-        try writer.print("        \"start\": {{\"line\": {d}, \"column\": {d}}},\n", .{ self.range.start.line, self.range.start.column });
-        try writer.print("        \"end\": {{\"line\": {d}, \"column\": {d}}}\n", .{ self.range.end.line, self.range.end.column });
-        try writer.writeAll("      }\n");
-        try writer.writeAll("    }");
-    }
+    pub fn writeJsonValue(self: Diagnostic, jw: *std.json.Stringify) !void {
+        try jw.beginObject();
 
-    pub fn writeSarif(self: Diagnostic, writer: anytype) !void {
-        try writer.writeAll("        {\n");
-        try writer.writeAll("          \"ruleId\": ");
-        try writeJsonString(writer, self.rule_id);
-        try writer.writeAll(",\n");
-        try writer.writeAll("          \"level\": ");
-        try writeJsonString(writer, self.severity.toSarifLevel());
-        try writer.writeAll(",\n");
-        try writer.writeAll("          \"message\": {\n");
-        try writer.writeAll("            \"text\": ");
-        try writeJsonString(writer, self.message);
-        try writer.writeAll("\n");
-        try writer.writeAll("          },\n");
-        try writer.writeAll("          \"locations\": [\n");
-        try writer.writeAll("            {\n");
-        try writer.writeAll("              \"physicalLocation\": {\n");
-        try writer.writeAll("                \"artifactLocation\": {\n");
-        try writer.writeAll("                  \"uri\": ");
-        try writeJsonString(writer, self.file_path);
-        try writer.writeAll("\n");
-        try writer.writeAll("                },\n");
-        try writer.writeAll("                \"region\": {\n");
-        try writer.print("                  \"startLine\": {d},\n", .{self.range.start.line});
-        try writer.print("                  \"startColumn\": {d},\n", .{self.range.start.column});
-        try writer.print("                  \"endLine\": {d},\n", .{self.range.end.line});
-        try writer.print("                  \"endColumn\": {d}\n", .{self.range.end.column});
-        try writer.writeAll("                }\n");
-        try writer.writeAll("              }\n");
-        try writer.writeAll("            }\n");
-        try writer.writeAll("          ]\n");
-        try writer.writeAll("        }");
+        try jw.objectField("file");
+        try jw.write(self.file_path);
+
+        try jw.objectField("rule");
+        try jw.write(self.rule_id);
+
+        try jw.objectField("severity");
+        try jw.write(self.severity.toString());
+
+        try jw.objectField("message");
+        try jw.write(self.message);
+
+        try jw.objectField("location");
+        try jw.beginObject();
+        try jw.objectField("start");
+        try jw.beginObject();
+        try jw.objectField("line");
+        try jw.write(self.range.start.line);
+        try jw.objectField("column");
+        try jw.write(self.range.start.column);
+        try jw.endObject();
+        try jw.objectField("end");
+        try jw.beginObject();
+        try jw.objectField("line");
+        try jw.write(self.range.end.line);
+        try jw.objectField("column");
+        try jw.write(self.range.end.column);
+        try jw.endObject();
+        try jw.endObject();
+
+        if (self.related_range) |related| {
+            try jw.objectField("related");
+            try jw.beginObject();
+            try jw.objectField("start");
+            try jw.beginObject();
+            try jw.objectField("line");
+            try jw.write(related.start.line);
+            try jw.objectField("column");
+            try jw.write(related.start.column);
+            try jw.endObject();
+            try jw.objectField("end");
+            try jw.beginObject();
+            try jw.objectField("line");
+            try jw.write(related.end.line);
+            try jw.objectField("column");
+            try jw.write(related.end.column);
+            try jw.endObject();
+            try jw.endObject();
+        }
+
+        try jw.endObject();
     }
 
     /// Write SARIF result using std.json.Stringify for proper JSON encoding.
@@ -269,6 +295,33 @@ pub const Diagnostic = struct {
         try jw.endObject(); // physicalLocation
         try jw.endObject(); // location item
         try jw.endArray(); // locations
+
+        if (self.related_range) |related| {
+            try jw.objectField("relatedLocations");
+            try jw.beginArray();
+            try jw.beginObject();
+            try jw.objectField("physicalLocation");
+            try jw.beginObject();
+            try jw.objectField("artifactLocation");
+            try jw.beginObject();
+            try jw.objectField("uri");
+            try jw.write(self.file_path);
+            try jw.endObject();
+            try jw.objectField("region");
+            try jw.beginObject();
+            try jw.objectField("startLine");
+            try jw.write(related.start.line);
+            try jw.objectField("startColumn");
+            try jw.write(related.start.column);
+            try jw.objectField("endLine");
+            try jw.write(related.end.line);
+            try jw.objectField("endColumn");
+            try jw.write(related.end.column);
+            try jw.endObject(); // region
+            try jw.endObject(); // physicalLocation
+            try jw.endObject(); // related item
+            try jw.endArray(); // relatedLocations
+        }
 
         try jw.endObject(); // result
     }
@@ -491,58 +544,101 @@ test "LocationMapper handles trailing newline" {
 
 test "Diagnostic writeJson" {
     const testing = std.testing;
+    const allocator = testing.allocator;
 
     var diag = try Diagnostic.init(
-        testing.allocator,
+        allocator,
         "test.zig",
         "empty-catch",
         .err,
         "Empty catch block detected",
         SourceRange.init(Location.init(5, 10), Location.init(5, 15)),
     );
-    defer diag.deinit(testing.allocator);
+    defer diag.deinit(allocator);
 
-    var buffer: [512]u8 = undefined;
-    var stream = std.io.fixedBufferStream(&buffer);
-    try diag.writeJson(stream.writer());
+    var alloc_writer: std.io.Writer.Allocating = .init(allocator);
+    defer alloc_writer.deinit();
+    var jw: std.json.Stringify = .{
+        .writer = &alloc_writer.writer,
+        .options = .{ .whitespace = .indent_2 },
+    };
+    try diag.writeJsonValue(&jw);
 
-    const expected =
-        \\    {
-        \\      "file": "test.zig",
-        \\      "rule": "empty-catch",
-        \\      "severity": "error",
-        \\      "message": "Empty catch block detected",
-        \\      "location": {
-        \\        "start": {"line": 5, "column": 10},
-        \\        "end": {"line": 5, "column": 15}
-        \\      }
-        \\    }
-    ;
-    try testing.expectEqualStrings(expected, stream.getWritten());
+    const output = alloc_writer.written();
+    var parsed = try std.json.parseFromSlice(std.json.Value, allocator, output, .{});
+    defer parsed.deinit();
+
+    const obj = parsed.value.object;
+    const file_val = obj.get("file") orelse return error.MissingField;
+    try testing.expect(file_val == .string);
+    try testing.expectEqualStrings("test.zig", file_val.string);
+    const rule_val = obj.get("rule") orelse return error.MissingField;
+    try testing.expect(rule_val == .string);
+    try testing.expectEqualStrings("empty-catch", rule_val.string);
+    const severity_val = obj.get("severity") orelse return error.MissingField;
+    try testing.expect(severity_val == .string);
+    try testing.expectEqualStrings("error", severity_val.string);
+    const message_val = obj.get("message") orelse return error.MissingField;
+    try testing.expect(message_val == .string);
+    try testing.expectEqualStrings("Empty catch block detected", message_val.string);
+
+    const location_val = obj.get("location") orelse return error.MissingField;
+    try testing.expect(location_val == .object);
+    const location = location_val.object;
+    const start_val = location.get("start") orelse return error.MissingField;
+    try testing.expect(start_val == .object);
+    const start = start_val.object;
+    const end_val = location.get("end") orelse return error.MissingField;
+    try testing.expect(end_val == .object);
+    const end = end_val.object;
+
+    const start_line = start.get("line") orelse return error.MissingField;
+    try testing.expect(start_line == .integer);
+    const start_column = start.get("column") orelse return error.MissingField;
+    try testing.expect(start_column == .integer);
+    const end_line = end.get("line") orelse return error.MissingField;
+    try testing.expect(end_line == .integer);
+    const end_column = end.get("column") orelse return error.MissingField;
+    try testing.expect(end_column == .integer);
+
+    try testing.expectEqual(@as(i64, 5), start_line.integer);
+    try testing.expectEqual(@as(i64, 10), start_column.integer);
+    try testing.expectEqual(@as(i64, 5), end_line.integer);
+    try testing.expectEqual(@as(i64, 15), end_column.integer);
 }
 
 test "Diagnostic writeJson with special characters" {
     const testing = std.testing;
+    const allocator = testing.allocator;
 
     var diag = try Diagnostic.init(
-        testing.allocator,
+        allocator,
         "path/with\"quotes.zig",
         "test-rule",
         .warning,
         "Message with\nnewline and \"quotes\" and \\ backslash",
         SourceRange.init(Location.init(1, 1), Location.init(1, 1)),
     );
-    defer diag.deinit(testing.allocator);
+    defer diag.deinit(allocator);
 
-    var buffer: [512]u8 = undefined;
-    var stream = std.io.fixedBufferStream(&buffer);
-    try diag.writeJson(stream.writer());
+    var alloc_writer: std.io.Writer.Allocating = .init(allocator);
+    defer alloc_writer.deinit();
+    var jw: std.json.Stringify = .{
+        .writer = &alloc_writer.writer,
+        .options = .{ .whitespace = .indent_2 },
+    };
+    try diag.writeJsonValue(&jw);
 
-    const result = stream.getWritten();
-    try testing.expect(std.mem.indexOf(u8, result, "path/with\\\"quotes.zig") != null);
-    try testing.expect(std.mem.indexOf(u8, result, "Message with\\nnewline") != null);
-    try testing.expect(std.mem.indexOf(u8, result, "\\\"quotes\\\"") != null);
-    try testing.expect(std.mem.indexOf(u8, result, "\\\\") != null);
+    var parsed = try std.json.parseFromSlice(std.json.Value, allocator, alloc_writer.written(), .{});
+    defer parsed.deinit();
+
+    const obj = parsed.value.object;
+    const file_val = obj.get("file") orelse return error.MissingField;
+    try testing.expect(file_val == .string);
+    try testing.expectEqualStrings("path/with\"quotes.zig", file_val.string);
+    const message_val = obj.get("message") orelse return error.MissingField;
+    try testing.expect(message_val == .string);
+    try testing.expectEqualStrings("Message with\nnewline and \"quotes\" and \\ backslash", message_val.string);
 }
 
 test "Severity.toSarifLevel" {
@@ -550,41 +646,6 @@ test "Severity.toSarifLevel" {
     try testing.expectEqualStrings("note", Severity.hint.toSarifLevel());
     try testing.expectEqualStrings("warning", Severity.warning.toSarifLevel());
     try testing.expectEqualStrings("error", Severity.err.toSarifLevel());
-}
-
-test "Diagnostic writeSarif" {
-    const testing = std.testing;
-
-    var diag = try Diagnostic.init(
-        testing.allocator,
-        "test.zig",
-        "empty-catch",
-        .err,
-        "Empty catch block detected",
-        SourceRange.init(Location.init(5, 10), Location.init(5, 15)),
-    );
-    defer diag.deinit(testing.allocator);
-
-    var buffer: [1024]u8 = undefined;
-    var stream = std.io.fixedBufferStream(&buffer);
-    try diag.writeSarif(stream.writer());
-
-    const result = stream.getWritten();
-    try testing.expect(std.mem.indexOf(u8, result, "\"ruleId\":") != null);
-    try testing.expect(std.mem.indexOf(u8, result, "\"empty-catch\"") != null);
-    try testing.expect(std.mem.indexOf(u8, result, "\"level\":") != null);
-    try testing.expect(std.mem.indexOf(u8, result, "\"error\"") != null);
-    try testing.expect(std.mem.indexOf(u8, result, "\"message\":") != null);
-    try testing.expect(std.mem.indexOf(u8, result, "Empty catch block detected") != null);
-    try testing.expect(std.mem.indexOf(u8, result, "\"locations\":") != null);
-    try testing.expect(std.mem.indexOf(u8, result, "\"physicalLocation\":") != null);
-    try testing.expect(std.mem.indexOf(u8, result, "\"artifactLocation\":") != null);
-    try testing.expect(std.mem.indexOf(u8, result, "\"uri\": \"test.zig\"") != null);
-    try testing.expect(std.mem.indexOf(u8, result, "\"region\":") != null);
-    try testing.expect(std.mem.indexOf(u8, result, "\"startLine\": 5") != null);
-    try testing.expect(std.mem.indexOf(u8, result, "\"startColumn\": 10") != null);
-    try testing.expect(std.mem.indexOf(u8, result, "\"endLine\": 5") != null);
-    try testing.expect(std.mem.indexOf(u8, result, "\"endColumn\": 15") != null);
 }
 
 test "Diagnostic lessThan by file path" {

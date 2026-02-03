@@ -514,3 +514,48 @@ fn foo(allocator: std.mem.Allocator) !void {
     allocator.free(ptr); // double-free
 }
 ```
+
+### stack-escape-engine
+
+Detects stack-backed pointers/slices that escape the current function scope or async/thread lifetime.
+
+Key patterns:
+- Stack array literals (e.g., `&.{ "open", owned_url }`) captured into a long-lived value
+- Values captured into detached threads without a guaranteed `join()`
+- Returning values that contain stack-backed references
+- Escape is reported if any path proves a stack-backed origin can reach a capture sink
+
+**Bad:**
+```zig
+fn openUrl(allocator: std.mem.Allocator, url: []const u8) !void {
+    const owned_url = try allocator.dupe(u8, url);
+    const child = std.process.Child.init(&.{ "open", owned_url }, allocator);
+    const thread = try std.Thread.spawn(.{}, openUrlThread, .{ child });
+    thread.detach(); // child carries stack-backed argv
+}
+```
+
+**Good:**
+```zig
+fn openUrl(allocator: std.mem.Allocator, url: []const u8) !void {
+    const owned_url = try allocator.dupe(u8, url);
+    var argv = try allocator.alloc([]const u8, 2);
+    argv[0] = "open";
+    argv[1] = owned_url;
+    const child = std.process.Child.init(argv, allocator);
+    const thread = try std.Thread.spawn(.{}, openUrlThread, .{ child });
+    thread.join(); // join guarantees thread completion before return
+}
+```
+
+Built-in escape models:
+- `std.process.Child.init` captures `argv` into the returned `Child`
+- `std.Thread.spawn` captures its argument tuple into the spawned thread
+
+Config:
+- `escape_models`: custom escape/capture rules
+- `escape_max_depth`: helper call depth for origin tracking (default: 3)
+- `resource_models` of kind `alloc` are used to treat allocator-backed values as heap
+
+Notes:
+- `try std.Thread.spawn(...)` ignores the `try_error` edge when checking join guarantees (no thread is created on the error path).

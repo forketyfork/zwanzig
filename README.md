@@ -64,6 +64,7 @@ Engine-backed checkers:
 - empty-catch-engine: empty `catch {}` blocks
 - swallowed-error: catch blocks that ignore errors without rethrowing or logging
 - store-violations-engine: allocator/resource misuse (double-free, leaks, use-after-free/close)
+- stack-escape-engine: stack-backed values escaping via return or async/thread capture
 
 ## Limitations
 

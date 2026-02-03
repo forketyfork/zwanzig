@@ -28,4 +28,5 @@ pub const checkers = struct {
     pub const unreachable_code_checker = @import("checkers/unreachable_code_checker.zig");
     pub const store_violations_engine = @import("checkers/store_violations_engine.zig");
     pub const optional_unwrap_engine = @import("checkers/optional_unwrap_engine.zig");
+    pub const stack_escape_engine = @import("checkers/stack_escape_engine.zig");
 };

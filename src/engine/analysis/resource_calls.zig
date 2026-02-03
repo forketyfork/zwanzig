@@ -1,4 +1,6 @@
 const std = @import("std");
+const call_utils = @import("../../analysis/call_utils.zig");
+const allocator_utils = @import("../../analysis/allocator_utils.zig");
 
 pub fn mixin(comptime _Engine: type) type {
     return struct {
@@ -93,10 +95,10 @@ pub fn mixin(comptime _Engine: type) type {
                 }
 
                 // Extract receiver type from the base expression
-                const receiver_type = getReceiverTypeName(self, tree, base_node);
+                const receiver_type = call_utils.getReceiverTypeName(self.type_context, tree, base_node);
 
                 // Construct FQN from receiver.method
-                const fqn = constructFqn(self, tree, base_node, field_name);
+                const fqn = call_utils.constructFqn(tree, base_node, field_name, &self.fqn_buffer);
 
                 // Match against config resource models
                 if (config.matchResourceModel(field_name, receiver_type, return_type_str, fqn)) |model_kind| {
@@ -112,7 +114,7 @@ pub fn mixin(comptime _Engine: type) type {
             }
 
             // Priority 2: Built-in heuristics (allocator methods)
-            if (isAllocatorBase(self, tree, base_node)) {
+            if (allocator_utils.isAllocatorExpr(tree, self.type_context, base_node)) {
                 if (std.mem.eql(u8, field_name, "alloc") or std.mem.eql(u8, field_name, "dupe")) {
                     return .{ .kind = .alloc, .target_expr = null, .call_node = call_ast_node };
                 }
@@ -123,7 +125,7 @@ pub fn mixin(comptime _Engine: type) type {
 
             if (std.mem.eql(u8, field_name, "allocPrint")) {
                 if (first_arg) |arg_node| {
-                    if (isAllocatorBase(self, tree, arg_node)) {
+                    if (allocator_utils.isAllocatorExpr(tree, self.type_context, arg_node)) {
                         return .{ .kind = .alloc, .target_expr = null, .call_node = call_ast_node };
                     }
                 }
@@ -204,32 +206,6 @@ pub fn mixin(comptime _Engine: type) type {
             return .unknown;
         }
 
-        pub fn isAllocatorBase(self: *_Engine, tree: *const std.zig.Ast, base_node: u32) bool {
-            _ = self;
-            const tags = tree.nodes.items(.tag);
-            const datas = tree.nodes.items(.data);
-            const token_tags = tree.tokens.items(.tag);
-            const main_tokens = tree.nodes.items(.main_token);
-
-            if (base_node >= tags.len) return false;
-            switch (tags[base_node]) {
-                .identifier => {
-                    const base_token = main_tokens[base_node];
-                    if (base_token >= token_tags.len or token_tags[base_token] != .identifier) return false;
-                    const base_name = tree.tokenSlice(base_token);
-                    return std.mem.eql(u8, base_name, "allocator");
-                },
-                .field_access => {
-                    const field_access_data = datas[base_node].node_and_token;
-                    const field_token = field_access_data[1];
-                    if (field_token >= token_tags.len or token_tags[field_token] != .identifier) return false;
-                    const field_name = tree.tokenSlice(field_token);
-                    return std.mem.eql(u8, field_name, "allocator");
-                },
-                else => return false,
-            }
-        }
-
         pub fn isKnownOpenBase(self: *_Engine, tree: *const std.zig.Ast, base_node: u32) bool {
             _ = self;
             const tags = tree.nodes.items(.tag);
@@ -260,102 +236,6 @@ pub fn mixin(comptime _Engine: type) type {
                 },
                 else => return false,
             }
-        }
-
-        /// Get the type name of the receiver expression (for receiver_type matching).
-        /// For an expression like `myPool.open()`, this returns the type of `myPool`.
-        pub fn getReceiverTypeName(self: *_Engine, tree: *const std.zig.Ast, base_node: u32) ?[]const u8 {
-            const tags = tree.nodes.items(.tag);
-
-            if (base_node >= tags.len) return null;
-
-            // If the base is an identifier, try to get its type from TypeContext
-            if (tags[base_node] == .identifier) {
-                if (self.type_context) |type_ctx| {
-                    if (type_ctx.getExpressionType(base_node)) |ti| {
-                        return ti.type_str;
-                    }
-                }
-            }
-
-            // For field access, try to get the final field type
-            if (tags[base_node] == .field_access) {
-                if (self.type_context) |type_ctx| {
-                    if (type_ctx.getExpressionType(base_node)) |ti| {
-                        return ti.type_str;
-                    }
-                }
-            }
-
-            return null;
-        }
-
-        /// Construct a fully qualified name from a method call.
-        /// For `my.pool.open()`, this returns "my.pool.open".
-        /// Uses a static buffer, so the result is only valid until the next call.
-        pub fn constructFqn(self: *_Engine, tree: *const std.zig.Ast, base_node: u32, method_name: []const u8) ?[]const u8 {
-            const tags = tree.nodes.items(.tag);
-            const datas = tree.nodes.items(.data);
-            const main_tokens = tree.nodes.items(.main_token);
-            const token_tags = tree.tokens.items(.tag);
-
-            var parts: [16][]const u8 = undefined;
-            var count: usize = 0;
-            var node = base_node;
-
-            while (true) {
-                if (node >= tags.len) return null;
-
-                switch (tags[node]) {
-                    .identifier => {
-                        const ident_token = main_tokens[node];
-                        if (ident_token >= token_tags.len or token_tags[ident_token] != .identifier) return null;
-                        if (count >= parts.len) return null;
-                        parts[count] = tree.tokenSlice(ident_token);
-                        count += 1;
-                        break;
-                    },
-                    .field_access => {
-                        const field_access = datas[node].node_and_token;
-                        const field_token = field_access[1];
-                        if (field_token >= token_tags.len or token_tags[field_token] != .identifier) return null;
-                        if (count >= parts.len) return null;
-                        parts[count] = tree.tokenSlice(field_token);
-                        count += 1;
-                        node = @intFromEnum(field_access[0]);
-                    },
-                    else => return null,
-                }
-            }
-
-            var pos: usize = 0;
-            var idx: usize = count;
-            while (idx > 0) : (idx -= 1) {
-                if (!appendFqnPart(self, parts[idx - 1], &pos)) return null;
-                if (idx > 1) {
-                    if (!appendFqnSeparator(self, &pos)) return null;
-                }
-            }
-
-            if (!appendFqnSeparator(self, &pos)) return null;
-            if (!appendFqnPart(self, method_name, &pos)) return null;
-
-            return self.fqn_buffer[0..pos];
-        }
-
-        pub fn appendFqnPart(self: *_Engine, part: []const u8, pos: *usize) bool {
-            if (part.len == 0) return false;
-            if (pos.* + part.len > self.fqn_buffer.len) return false;
-            std.mem.copyForwards(u8, self.fqn_buffer[pos.* .. pos.* + part.len], part);
-            pos.* += part.len;
-            return true;
-        }
-
-        pub fn appendFqnSeparator(self: *_Engine, pos: *usize) bool {
-            if (pos.* >= self.fqn_buffer.len) return false;
-            self.fqn_buffer[pos.*] = '.';
-            pos.* += 1;
-            return true;
         }
 
         pub fn isDefinitelyNonAllocExpr(self: *_Engine, tree: *const std.zig.Ast, expr_node: u32) bool {

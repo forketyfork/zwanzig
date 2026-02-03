@@ -281,7 +281,8 @@ pub const TypeContext = struct {
             const node_idx: u32 = @intCast(i);
             if (tags[node_idx] == .simple_var_decl or
                 tags[node_idx] == .aligned_var_decl or
-                tags[node_idx] == .local_var_decl)
+                tags[node_idx] == .local_var_decl or
+                tags[node_idx] == .global_var_decl)
             {
                 const full_decl = tree.fullVarDecl(@enumFromInt(node_idx)) orelse continue;
                 const name_token = full_decl.ast.mut_token + 1;

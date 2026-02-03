@@ -11,6 +11,8 @@ pub const MergedConfig = struct {
     max_states_per_point: ?u32,
     use_widening: ?bool,
     resource_models: []const config.ResourceModel = &.{},
+    escape_models: []const config.EscapeModel = &.{},
+    escape_max_depth: ?u32 = null,
 };
 
 fn defaultRuleFilter(allocator: std.mem.Allocator) !RuleFilter {
@@ -34,6 +36,7 @@ pub fn mergeConfig(allocator: std.mem.Allocator, cli_args: CliArgs) !MergedConfi
                 .max_worklist_steps = cli_args.max_worklist_steps,
                 .max_states_per_point = cli_args.max_states_per_point,
                 .use_widening = cli_args.use_widening orelse true,
+                .escape_max_depth = null,
             };
         }
         return err;
@@ -42,6 +45,8 @@ pub fn mergeConfig(allocator: std.mem.Allocator, cli_args: CliArgs) !MergedConfi
     const max_states_per_point = cli_args.max_states_per_point orelse loaded_config.max_states_per_point;
     const use_widening = cli_args.use_widening orelse loaded_config.use_widening orelse true;
     const resource_models = loaded_config.resource_models;
+    const escape_models = loaded_config.escape_models;
+    const escape_max_depth = loaded_config.escape_max_depth;
 
     switch (cli_args.rule_filter) {
         .none => {
@@ -51,11 +56,14 @@ pub fn mergeConfig(allocator: std.mem.Allocator, cli_args: CliArgs) !MergedConfi
                 .max_states_per_point = max_states_per_point,
                 .use_widening = use_widening,
                 .resource_models = resource_models,
+                .escape_models = escape_models,
+                .escape_max_depth = escape_max_depth,
             };
         },
         .allowlist => {
             // Free only the rule_filter part, keep resource_models
             loaded_config.resource_models = &.{}; // Prevent deinit from freeing
+            loaded_config.escape_models = &.{}; // Prevent deinit from freeing
             loaded_config.deinit(allocator);
             return .{
                 .rule_filter = cli_args.rule_filter,
@@ -63,11 +71,14 @@ pub fn mergeConfig(allocator: std.mem.Allocator, cli_args: CliArgs) !MergedConfi
                 .max_states_per_point = max_states_per_point,
                 .use_widening = use_widening,
                 .resource_models = resource_models,
+                .escape_models = escape_models,
+                .escape_max_depth = escape_max_depth,
             };
         },
         .blocklist => {
             // Free only the rule_filter part, keep resource_models
             loaded_config.resource_models = &.{}; // Prevent deinit from freeing
+            loaded_config.escape_models = &.{}; // Prevent deinit from freeing
             loaded_config.deinit(allocator);
             return .{
                 .rule_filter = cli_args.rule_filter,
@@ -75,6 +86,8 @@ pub fn mergeConfig(allocator: std.mem.Allocator, cli_args: CliArgs) !MergedConfi
                 .max_states_per_point = max_states_per_point,
                 .use_widening = use_widening,
                 .resource_models = resource_models,
+                .escape_models = escape_models,
+                .escape_max_depth = escape_max_depth,
             };
         },
     }
@@ -117,6 +130,18 @@ pub fn freeMergedConfig(allocator: std.mem.Allocator, cli_args: CliArgs, merged:
     }
     if (merged.resource_models.len > 0) {
         allocator.free(merged.resource_models);
+    }
+
+    for (merged.escape_models) |model| {
+        if (model.fqn) |name| allocator.free(name);
+        if (model.method_name) |name| allocator.free(name);
+        if (model.receiver_type) |ty| allocator.free(ty);
+        if (model.param_indices.len > 0) {
+            allocator.free(model.param_indices);
+        }
+    }
+    if (merged.escape_models.len > 0) {
+        allocator.free(merged.escape_models);
     }
 }
 
