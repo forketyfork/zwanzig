@@ -104,7 +104,7 @@ pub const UnreachableCodeRule = struct {
             }
 
             const stmt_tag = tags[stmt];
-            if (stmt_tag == .@"return") {
+            if (stmt_tag == .@"return" or stmt_tag == .unreachable_literal) {
                 found_terminator = true;
             } else if (stmt_tag == .@"if" or stmt_tag == .if_simple) {
                 if (try isIfFullyTerminating(src, stmt)) {
@@ -292,7 +292,7 @@ pub const UnreachableCodeRule = struct {
 
         const node_tag = tags[node];
 
-        if (node_tag == .@"return") {
+        if (node_tag == .@"return" or node_tag == .unreachable_literal) {
             return true;
         }
 
@@ -329,7 +329,7 @@ pub const UnreachableCodeRule = struct {
         const last_stmt = statements[statements.len - 1];
         const last_tag = tags[last_stmt];
 
-        if (last_tag == .@"return") {
+        if (last_tag == .@"return" or last_tag == .unreachable_literal) {
             return true;
         }
 

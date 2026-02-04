@@ -6,7 +6,7 @@ Zwanzig has AST/token rules (legacy `Rule` interface) and checker-based passes (
 
 ### dupe-import
 
-Flags duplicate `@import` statements, usually from copy-paste mistakes or forgotten refactoring.
+Flags duplicate `@import` statements that repeat the same full import path (module string plus any chained field access), usually from copy-paste mistakes or forgotten refactoring.
 
 **Bad:**
 ```zig
@@ -22,7 +22,7 @@ const mem = std.mem;  // Use the already imported std
 
 ### todo
 
-Finds `// TODO` comments.
+Finds TODO comments in line, doc (`///`, `//!`), and block (`/* */`) comments. Matching is case-insensitive (`TODO`, `todo`, etc.).
 
 **Example:**
 ```zig
@@ -32,7 +32,7 @@ fn processData(data: []const u8) void {
 }
 ```
 
-Produces a hint with the TODO's message.
+Produces a hint with the TODO's message. If no message is provided (e.g. `// TODO:`), the rule reports a default message.
 
 ### file-as-struct
 
@@ -87,6 +87,7 @@ pub fn helper() void {
 
 Detects unused container-level `const`, `var`, and `fn` declarations that aren't exported. The check is conservative:
 - Exported (`pub`) declarations are ignored (they may be used externally)
+- `export` and `extern` declarations are ignored (they may be used by other compilation units)
 - Underscore-prefixed names (e.g., `_unused`) are ignored (explicit opt-out)
 - Special names like `main` and `panic` are ignored (entry points)
 
@@ -135,7 +136,7 @@ fn add(value: i32) i32 {
 
 ### unreachable-code
 
-Detects code after an unconditional terminator (`return`) or after fully terminating branches (`if`, `switch`, `while`).
+Detects code after an unconditional terminator (`return`, `unreachable`) or after fully terminating branches (`if`, `switch`, `while`).
 
 **Bad:**
 ```zig
@@ -211,7 +212,10 @@ fn foo() !void {
 
 ### shadowed-variable
 
-Detects variable shadowing across scopes, including payloads.
+Detects variable shadowing across scopes, including payloads (if/for/while/switch/catch/errdefer).
+
+Notes:
+- Underscore-prefixed identifiers (e.g. `_x`, `_unused`) are ignored and may intentionally shadow.
 
 **Bad:**
 ```zig
@@ -308,7 +312,9 @@ Enforces Zig naming conventions:
 - Types: PascalCase
 - Functions: camelCase
 - Variables/constants/parameters/payloads: snake_case (lowercase); SCREAMING_SNAKE_CASE only when mirroring established external conventions (e.g., `std.posix.ENOENT`)
-- When type info is available, type aliases and function type aliases are treated as types and should use PascalCase; heuristics also treat C-style `*_t` aliases as types
+- Namespaces/modules declared as `const` structs may use lowercase (e.g., `std.mem`)
+- Quoted identifiers (e.g., `@"weird-name"`) are exempt from these checks
+- When type info is available, type aliases and function type aliases are treated as types and should use PascalCase; heuristics also treat C-style `*_t` aliases as types (lowercase `*_t` names are allowed when mirroring external conventions like `fd_t`)
 
 **Bad:**
 ```zig
@@ -336,7 +342,7 @@ fn doThing(good_param: ?i32) void {
 
 ### unreachable-code-engine
 
-Detects path-sensitive unreachable code where the condition is a compile-time constant. Complements `unreachable-code` by handling constant `true`/`false` conditions (including const boolean identifiers). Only reports when the condition is definitely constant.
+Detects path-sensitive unreachable code where the condition is a compile-time constant. Complements `unreachable-code` by handling constant `true`/`false` conditions (including const boolean identifiers and constant expressions like `(1 + 1) == 2`). Only reports when the condition is definitely constant.
 
 **Bad:**
 ```zig
@@ -444,6 +450,21 @@ if (opt) |value| {
 }
 ```
 
+**Debug assertion guard:**
+```zig
+std.debug.assert(opt != null);
+const value = opt.?;  // Safe: assert guarantees non-null
+```
+
+**Switch null-case guard:**
+```zig
+switch (opt) {
+    null => return null,
+    else => |value| _ = value,
+}
+const value = opt.?;  // Safe: null path returned
+```
+
 **Comptime type expressions:**
 ```zig
 // Safe: evaluated at compile time, fails as compile error not runtime panic
@@ -537,6 +558,10 @@ Detects allocator/resource misuse: double-free, free-without-alloc, close-withou
 
 **Error-path leak policy:** Leak checks run only on normal return paths. When a function returns an error (detected by literal error values or type-based analysis), leak reports are suppressed. This avoids false positives in code that cleans up via `errdefer`.
 
+**Tracking scope:** The rule only tracks resources created by known alloc/open APIs (including built-in models for common std allocator and file/posix patterns). Closing a value that was not opened by a tracked API is reported as "close without tracked open". This includes manually constructed handles (for example, `std.fs.File{ .handle = fd }`) or values provided by external code, unless you model ownership with `resource_models`.
+
+**Diagnostics per path:** When multiple control-flow paths violate the rule, multiple diagnostics can be emitted for the same source line.
+
 Resources stored in aggregates are treated as escaping with the aggregate.
 
 **Resource modeling:** Built-in allocator detection includes `alloc`/`free`, `dupe`, and `create`/`destroy`. Configurable `resource_models` can add project-specific APIs. `kind: "free_owned"` models APIs like `deinit` that free resources owned by a value without freeing the value itself.
@@ -594,3 +619,5 @@ Config:
 
 Notes:
 - `try std.Thread.spawn(...)` ignores the `try_error` edge when checking join guarantees (no thread is created on the error path).
+- Joining must be guaranteed on all paths; a join in only some branches still reports an escape.
+- Capturing allocator-backed or static data does not trigger this rule.

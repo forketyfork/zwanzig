@@ -81,6 +81,11 @@ pub const ReturnLocalPointerRule = struct {
         try collectLocalArrays(allocator, tree, tags, token_tags, body_node, &local_arrays);
         if (local_arrays.items.len == 0) return;
 
+        var local_inits: std.ArrayList(LocalValueInfo) = .empty;
+        defer local_inits.deinit(allocator);
+
+        try collectLocalInits(allocator, tree, tags, token_tags, body_node, &local_inits);
+
         // Collect all return statements in the function body
         var return_nodes: std.ArrayList(u32) = .empty;
         defer return_nodes.deinit(allocator);
@@ -93,7 +98,16 @@ pub const ReturnLocalPointerRule = struct {
             const ret_expr_idx = @intFromEnum(ret_expr);
 
             for (local_arrays.items) |local_info| {
-                if (try checkReturnDerivedFromLocal(tree, tags, datas, main_tokens, ret_expr_idx, local_info.name)) {
+                if (try checkReturnDerivedFromLocal(
+                    tree,
+                    tags,
+                    datas,
+                    main_tokens,
+                    ret_expr_idx,
+                    local_info.name,
+                    local_inits.items,
+                    0,
+                )) {
                     const loc = try src.tokenLocation(main_tokens[ret_node]);
                     const message = try std.fmt.allocPrint(
                         allocator,
@@ -121,6 +135,11 @@ pub const ReturnLocalPointerRule = struct {
     const LocalArrayInfo = struct {
         node: u32,
         name: []const u8,
+    };
+
+    const LocalValueInfo = struct {
+        name: []const u8,
+        init_node: u32,
     };
 
     fn walkNoNestedFns(
@@ -259,6 +278,34 @@ pub const ReturnLocalPointerRule = struct {
         }
     }
 
+    fn collectLocalInits(
+        allocator: std.mem.Allocator,
+        tree: *const Ast,
+        tags: []const Ast.Node.Tag,
+        token_tags: []const std.zig.Token.Tag,
+        body_node: u32,
+        out: *std.ArrayList(LocalValueInfo),
+    ) RuleError!void {
+        var var_decls: std.ArrayList(u32) = .empty;
+        defer var_decls.deinit(allocator);
+
+        try collectNodesByTagSkippingNestedFns(allocator, tree, body_node, .local_var_decl, &var_decls);
+        try collectNodesByTagSkippingNestedFns(allocator, tree, body_node, .simple_var_decl, &var_decls);
+        try collectNodesByTagSkippingNestedFns(allocator, tree, body_node, .aligned_var_decl, &var_decls);
+
+        for (var_decls.items) |var_node| {
+            const full = tree.fullVarDecl(@enumFromInt(var_node)) orelse continue;
+            const name_token = full.ast.mut_token + 1;
+            if (name_token >= token_tags.len or token_tags[name_token] != .identifier) continue;
+            const init = full.ast.init_node.unwrap() orelse continue;
+            const init_idx = @intFromEnum(init);
+            if (init_idx == 0 or init_idx >= tags.len) continue;
+
+            const name = tree.tokenSlice(name_token);
+            try out.append(allocator, .{ .name = name, .init_node = init_idx });
+        }
+    }
+
     fn isArrayType(tag: Ast.Node.Tag) bool {
         return tag == .array_type or tag == .array_type_sentinel;
     }
@@ -298,34 +345,62 @@ pub const ReturnLocalPointerRule = struct {
         main_tokens: []const Ast.TokenIndex,
         ret_expr: u32,
         local_name: []const u8,
+        local_inits: []const LocalValueInfo,
+        depth: u8,
     ) RuleError!bool {
         if (ret_expr >= tags.len) return false;
+        if (depth > 4) return false;
 
         const tag = tags[ret_expr];
 
         // Pattern 1: return local
         if (tag == .identifier) {
-            return isIdentifierLocal(tree, tags, main_tokens, ret_expr, local_name);
+            if (isIdentifierLocal(tree, tags, main_tokens, ret_expr, local_name)) {
+                return true;
+            }
+            const token = main_tokens[ret_expr];
+            const name = tree.tokenSlice(token);
+            if (resolveLocalInit(local_inits, name)) |init_node| {
+                if (init_node == ret_expr) return false;
+                return checkReturnDerivedFromLocal(
+                    tree,
+                    tags,
+                    datas,
+                    main_tokens,
+                    init_node,
+                    local_name,
+                    local_inits,
+                    depth + 1,
+                );
+            }
+            return false;
         }
 
         // Pattern 2: return &local
         if (tag == .address_of) {
             const operand = @intFromEnum(datas[ret_expr].node);
-            return isIdentifierLocal(tree, tags, main_tokens, operand, local_name);
+            if (isIdentifierLocal(tree, tags, main_tokens, operand, local_name)) {
+                return true;
+            }
+            if (operand < tags.len and tags[operand] == .array_access) {
+                const base = @intFromEnum(datas[operand].node_and_node[0]);
+                return isIdentifierLocal(tree, tags, main_tokens, base, local_name);
+            }
+            return false;
         }
 
         // Pattern 3: return local[0..] or return func(&local)[0..]
         if (tag == .slice or tag == .slice_open or tag == .slice_sentinel) {
             const slice = tree.fullSlice(@enumFromInt(ret_expr)) orelse return false;
             const sliced = @intFromEnum(slice.ast.sliced);
-            return checkReturnDerivedFromLocal(tree, tags, datas, main_tokens, sliced, local_name);
+            return checkReturnDerivedFromLocal(tree, tags, datas, main_tokens, sliced, local_name, local_inits, depth + 1);
         }
 
         // Pattern 4: return func(&local).field
         // Pattern 5: return func(&local).field.subfield (chain of field accesses)
         if (tag == .field_access) {
             const base = @intFromEnum(datas[ret_expr].node_and_token[0]);
-            return checkReturnDerivedFromLocal(tree, tags, datas, main_tokens, base, local_name);
+            return checkReturnDerivedFromLocal(tree, tags, datas, main_tokens, base, local_name, local_inits, depth + 1);
         }
 
         // Pattern 6: return func(&local)
@@ -335,12 +410,12 @@ pub const ReturnLocalPointerRule = struct {
 
         // Pattern 7: return switch (...) { ... => func(&local).field, ... }
         if (tag == .@"switch" or tag == .switch_comma) {
-            return checkSwitchReturnsLocalPointer(tree, tags, datas, main_tokens, ret_expr, local_name);
+            return checkSwitchReturnsLocalPointer(tree, tags, datas, main_tokens, ret_expr, local_name, local_inits, depth + 1);
         }
 
         // Pattern 8: return if (...) expr else expr
         if (tag == .@"if" or tag == .if_simple) {
-            return checkIfReturnsLocalPointer(tree, tags, datas, main_tokens, ret_expr, local_name);
+            return checkIfReturnsLocalPointer(tree, tags, datas, main_tokens, ret_expr, local_name, local_inits, depth + 1);
         }
 
         return false;
@@ -432,6 +507,8 @@ pub const ReturnLocalPointerRule = struct {
         main_tokens: []const Ast.TokenIndex,
         switch_node: u32,
         local_name: []const u8,
+        local_inits: []const LocalValueInfo,
+        depth: u8,
     ) RuleError!bool {
         const full = tree.switchFull(@enumFromInt(switch_node));
 
@@ -440,7 +517,16 @@ pub const ReturnLocalPointerRule = struct {
             const case = tree.fullSwitchCase(@enumFromInt(case_idx)) orelse continue;
             const target_expr = @intFromEnum(case.ast.target_expr);
 
-            if (try checkReturnDerivedFromLocal(tree, tags, datas, main_tokens, target_expr, local_name)) {
+            if (try checkReturnDerivedFromLocal(
+                tree,
+                tags,
+                datas,
+                main_tokens,
+                target_expr,
+                local_name,
+                local_inits,
+                depth + 1,
+            )) {
                 return true;
             }
         }
@@ -455,19 +541,46 @@ pub const ReturnLocalPointerRule = struct {
         main_tokens: []const Ast.TokenIndex,
         if_node: u32,
         local_name: []const u8,
+        local_inits: []const LocalValueInfo,
+        depth: u8,
     ) RuleError!bool {
         const full = tree.fullIf(@enumFromInt(if_node)) orelse return false;
         const then_expr = @intFromEnum(full.ast.then_expr);
-        if (try checkReturnDerivedFromLocal(tree, tags, datas, main_tokens, then_expr, local_name)) {
+        if (try checkReturnDerivedFromLocal(
+            tree,
+            tags,
+            datas,
+            main_tokens,
+            then_expr,
+            local_name,
+            local_inits,
+            depth + 1,
+        )) {
             return true;
         }
         if (full.ast.else_expr.unwrap()) |else_node| {
             const else_expr = @intFromEnum(else_node);
-            if (try checkReturnDerivedFromLocal(tree, tags, datas, main_tokens, else_expr, local_name)) {
+            if (try checkReturnDerivedFromLocal(
+                tree,
+                tags,
+                datas,
+                main_tokens,
+                else_expr,
+                local_name,
+                local_inits,
+                depth + 1,
+            )) {
                 return true;
             }
         }
         return false;
+    }
+
+    fn resolveLocalInit(local_inits: []const LocalValueInfo, name: []const u8) ?u32 {
+        for (local_inits) |info| {
+            if (std.mem.eql(u8, info.name, name)) return info.init_node;
+        }
+        return null;
     }
 };
 

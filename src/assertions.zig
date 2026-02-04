@@ -9,6 +9,7 @@ pub const AssertionKind = enum {
 pub const AssertionScope = struct {
     std_aliases: std.ArrayList([]const u8),
     testing_aliases: std.ArrayList([]const u8),
+    debug_aliases: std.ArrayList([]const u8),
     allow_bare: bool,
     usingnamespace_testing: bool,
 
@@ -17,6 +18,7 @@ pub const AssertionScope = struct {
         return .{
             .std_aliases = .empty,
             .testing_aliases = .empty,
+            .debug_aliases = .empty,
             .allow_bare = false,
             .usingnamespace_testing = false,
         };
@@ -25,6 +27,7 @@ pub const AssertionScope = struct {
     pub fn deinit(self: *AssertionScope, allocator: std.mem.Allocator) void {
         self.std_aliases.deinit(allocator);
         self.testing_aliases.deinit(allocator);
+        self.debug_aliases.deinit(allocator);
     }
 
     fn hasStdAlias(self: *const AssertionScope, name: []const u8) bool {
@@ -41,6 +44,13 @@ pub const AssertionScope = struct {
         return false;
     }
 
+    fn hasDebugAlias(self: *const AssertionScope, name: []const u8) bool {
+        for (self.debug_aliases.items) |alias| {
+            if (std.mem.eql(u8, alias, name)) return true;
+        }
+        return false;
+    }
+
     fn addStdAlias(self: *AssertionScope, allocator: std.mem.Allocator, name: []const u8) !void {
         if (self.hasStdAlias(name)) return;
         try self.std_aliases.append(allocator, name);
@@ -49,6 +59,11 @@ pub const AssertionScope = struct {
     fn addTestingAlias(self: *AssertionScope, allocator: std.mem.Allocator, name: []const u8) !void {
         if (self.hasTestingAlias(name)) return;
         try self.testing_aliases.append(allocator, name);
+    }
+
+    fn addDebugAlias(self: *AssertionScope, allocator: std.mem.Allocator, name: []const u8) !void {
+        if (self.hasDebugAlias(name)) return;
+        try self.debug_aliases.append(allocator, name);
     }
 };
 
@@ -140,6 +155,31 @@ pub fn resolveAssertionName(
     return null;
 }
 
+pub fn resolveDebugAssertionName(
+    tree: *const std.zig.Ast,
+    fn_expr: std.zig.Ast.Node.Index,
+    scope: *const AssertionScope,
+) ?[]const u8 {
+    const tags = tree.nodes.items(.tag);
+    const datas = tree.nodes.items(.data);
+    const fn_node = @intFromEnum(fn_expr);
+
+    if (fn_node >= tags.len) return null;
+    if (tags[fn_node] != .field_access) return null;
+
+    const field_data = datas[fn_node].node_and_token;
+    const field_token = field_data[1];
+    const field_name = tree.tokenSlice(field_token);
+    if (!std.mem.eql(u8, field_name, "assert")) return null;
+
+    const base_node = @intFromEnum(field_data[0]);
+    if (isDebugNamespace(tree, base_node, scope)) {
+        return field_name;
+    }
+
+    return null;
+}
+
 fn collectAliasesFromRoot(tree: *const std.zig.Ast, allocator: std.mem.Allocator, scope: *AssertionScope) !void {
     const tags = tree.nodes.items(.tag);
 
@@ -186,6 +226,7 @@ fn addAliasFromVarDecl(
             switch (kind) {
                 .std => try scope.addStdAlias(allocator, name),
                 .testing => try scope.addTestingAlias(allocator, name),
+                .debug => try scope.addDebugAlias(allocator, name),
             }
         }
     }
@@ -194,12 +235,14 @@ fn addAliasFromVarDecl(
 fn resolveAliasKind(tree: *const std.zig.Ast, expr_node: u32, scope: *const AssertionScope) ?AliasKind {
     if (isStdNamespace(tree, expr_node, scope)) return .std;
     if (isTestingNamespace(tree, expr_node, scope)) return .testing;
+    if (isDebugNamespace(tree, expr_node, scope)) return .debug;
     return null;
 }
 
 const AliasKind = enum {
     std,
     testing,
+    debug,
 };
 
 fn isVarDeclTag(tag: std.zig.Ast.Node.Tag) bool {
@@ -240,6 +283,31 @@ fn isTestingNamespace(tree: *const std.zig.Ast, node: u32, scope: *const Asserti
         const field_token = data[1];
         const field_name = tree.tokenSlice(field_token);
         if (!std.mem.eql(u8, field_name, "testing")) return false;
+
+        const base_node = @intFromEnum(data[0]);
+        return isStdNamespace(tree, base_node, scope);
+    }
+
+    return false;
+}
+
+fn isDebugNamespace(tree: *const std.zig.Ast, node: u32, scope: *const AssertionScope) bool {
+    const tags = tree.nodes.items(.tag);
+    const datas = tree.nodes.items(.data);
+
+    if (node >= tags.len) return false;
+
+    if (tags[node] == .identifier) {
+        const token = tree.nodes.items(.main_token)[node];
+        const name = tree.tokenSlice(token);
+        return scope.hasDebugAlias(name);
+    }
+
+    if (tags[node] == .field_access) {
+        const data = datas[node].node_and_token;
+        const field_token = data[1];
+        const field_name = tree.tokenSlice(field_token);
+        if (!std.mem.eql(u8, field_name, "debug")) return false;
 
         const base_node = @intFromEnum(data[0]);
         return isStdNamespace(tree, base_node, scope);

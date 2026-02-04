@@ -76,6 +76,9 @@ pub fn scanForUnsafeUnwraps(
         // continue/break/return, making subsequent code only reachable when non-null
         if (guards.isGuardedByEarlyExit(tree, ast_node, unwrapped_node, parent_map)) continue;
 
+        // Check if this is a switch that exits on null before the unwrap
+        if (guards.isGuardedBySwitchNullCase(tree, ast_node, unwrapped_node, parent_map)) continue;
+
         // Check if this is an assignment followed by immediate unwrap pattern
         // e.g., `x = foo() orelse return error; x.?`
         if (guards.isGuardedByPriorAssignment(tree, ast_node, unwrapped_node, parent_map)) continue;
