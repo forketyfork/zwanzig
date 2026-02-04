@@ -211,7 +211,10 @@ fn foo() !void {
 
 ### shadowed-variable
 
-Detects variable shadowing across scopes, including payloads.
+Detects variable shadowing across scopes, including payloads (if/for/while/switch/catch/errdefer).
+
+Notes:
+- Underscore-prefixed identifiers (e.g. `_x`, `_unused`) are ignored and may intentionally shadow.
 
 **Bad:**
 ```zig
