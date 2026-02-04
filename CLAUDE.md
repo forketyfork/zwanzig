@@ -43,6 +43,10 @@ All code must be formatted with `zig fmt`.
 
 Any changes or additions to the existing rules/checkers must be documented.
 
+## Releases
+
+When asked to release: create a PR for the version bump, wait for required checks to pass, then tag and publish the release from the merged commit.
+
 ## Development Environment
 
 Uses Nix flakes for reproducible dev environment (Zig 0.15.2). Enter with:
