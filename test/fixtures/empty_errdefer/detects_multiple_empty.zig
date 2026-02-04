@@ -1,0 +1,6 @@
+// EXPECT: line=3 rule=empty-errdefer
+// EXPECT: line=5 rule=empty-errdefer
+fn foo() !void {
+    errdefer {}
+    if (true) errdefer {}
+}
