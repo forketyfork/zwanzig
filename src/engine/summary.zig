@@ -5,6 +5,7 @@ const Constraint = @import("constraints.zig").Constraint;
 const ConstraintManager = @import("constraints.zig").ConstraintManager;
 const ProgramState = @import("state.zig").ProgramState;
 const AstNodeId = ids.AstNodeId;
+const VarId = ids.VarId;
 
 /// Function summary capturing the effects of a function call.
 /// Summaries store preconditions, postconditions, and error behavior to enable
@@ -87,18 +88,25 @@ pub const FunctionSummary = struct {
     pub fn isApplicable(self: *const FunctionSummary, state: *const ProgramState) bool {
         for (self.preconditions.items) |precond| {
             // Check if the precondition is satisfiable given the current environment
-            const var_id = switch (precond) {
+            const var_id: ?VarId = switch (precond) {
                 .int_compare => |ic| ic.var_id,
                 .null_check => |nc| nc.var_id,
                 .bool_check => |bc| bc.var_id,
                 .var_compare => |vc| vc.var1_id,
+                .literal_bool => |lb| {
+                    // Literal bool preconditions are immediately decidable
+                    if (!lb.value) return false;
+                    continue;
+                },
             };
 
-            if (state.getVar(var_id)) |val| {
-                // Check if the current value is compatible with the precondition
-                const refined = ConstraintManager.refineValue(val, precond);
-                if (refined == null) {
-                    return false; // Precondition not satisfiable
+            if (var_id) |vid| {
+                if (state.getVar(vid)) |val| {
+                    // Check if the current value is compatible with the precondition
+                    const refined = ConstraintManager.refineValue(val, precond);
+                    if (refined == null) {
+                        return false; // Precondition not satisfiable
+                    }
                 }
             }
         }

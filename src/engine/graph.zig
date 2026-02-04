@@ -45,6 +45,9 @@ pub const ExplodedNode = struct {
     /// Compute a combined hash for point and state (used for deduplication)
     pub fn computeKey(point: ProgramPoint, state: *ProgramState) u64 {
         var hasher = std.hash.Wyhash.init(0);
+        // Include CFG identity to prevent collisions across different CFGs
+        // during interprocedural analysis
+        hasher.update(std.mem.asBytes(&@intFromPtr(point.cfg)));
         const node_index = ids.cfgIndex(point.node_index);
         hasher.update(std.mem.asBytes(&node_index));
         hasher.update(std.mem.asBytes(&point.kind));

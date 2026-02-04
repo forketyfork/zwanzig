@@ -43,6 +43,11 @@ pub const Constraint = union(enum) {
         var_id: VarId,
         expected: bool, // true = var must be true, false = var must be false
     },
+    /// Literal boolean constraint: always satisfiable (true) or never satisfiable (false).
+    /// Used for literal `true`/`false` conditions to enable proper branch pruning.
+    literal_bool: struct {
+        value: bool, // true = always satisfiable, false = never satisfiable
+    },
 
     pub fn eql(self: Constraint, other: Constraint) bool {
         return switch (self) {
@@ -62,6 +67,10 @@ pub const Constraint = union(enum) {
                 .bool_check => |bc2| bc1.var_id == bc2.var_id and bc1.expected == bc2.expected,
                 else => false,
             },
+            .literal_bool => |lb1| switch (other) {
+                .literal_bool => |lb2| lb1.value == lb2.value,
+                else => false,
+            },
         };
     }
 
@@ -72,6 +81,7 @@ pub const Constraint = union(enum) {
             .null_check => 1,
             .var_compare => 2,
             .bool_check => 3,
+            .literal_bool => 4,
         };
         hasher.update(&[_]u8{tag_byte});
         switch (self) {
@@ -98,6 +108,9 @@ pub const Constraint = union(enum) {
                 hasher.update(std.mem.asBytes(&var_id));
                 hasher.update(&[_]u8{if (bc.expected) 1 else 0});
             },
+            .literal_bool => |lb| {
+                hasher.update(&[_]u8{if (lb.value) 1 else 0});
+            },
         }
         return hasher.final();
     }
@@ -122,6 +135,12 @@ pub const Constraint = union(enum) {
         return .{ .bool_check = .{ .var_id = var_id, .expected = expected } };
     }
 
+    /// Create a literal boolean constraint for compile-time known conditions.
+    /// Use this for literal `true`/`false` to enable proper branch pruning.
+    pub fn literalBool(value: bool) Constraint {
+        return .{ .literal_bool = .{ .value = value } };
+    }
+
     /// Get the negation of this constraint (for else branches).
     pub fn negate(self: Constraint) Constraint {
         return switch (self) {
@@ -142,6 +161,9 @@ pub const Constraint = union(enum) {
             .bool_check => |bc| .{ .bool_check = .{
                 .var_id = bc.var_id,
                 .expected = !bc.expected,
+            } },
+            .literal_bool => |lb| .{ .literal_bool = .{
+                .value = !lb.value,
             } },
         };
     }
@@ -296,6 +318,12 @@ pub const ConstraintManager = struct {
                 }
             },
             .var_compare => {},
+            .literal_bool => |lb| {
+                // literal_bool(false) is a contradiction by itself
+                if (!lb.value) {
+                    self.has_contradiction = true;
+                }
+            },
         }
     }
 
@@ -323,6 +351,10 @@ pub const ConstraintManager = struct {
             .var_compare => {
                 // Variable comparisons are conservatively satisfiable unless we have concrete values
                 return true;
+            },
+            .literal_bool => |lb| {
+                // Literal boolean constraints are definitively satisfiable or not
+                return lb.value;
             },
         }
     }
@@ -358,6 +390,15 @@ pub const ConstraintManager = struct {
                 }
             },
             .var_compare => return false,
+            .literal_bool => |lb1| {
+                switch (c2) {
+                    .literal_bool => |lb2| {
+                        // literal_bool(true) AND literal_bool(false) is contradictory
+                        return lb1.value != lb2.value;
+                    },
+                    else => return false,
+                }
+            },
         }
     }
 
@@ -456,6 +497,11 @@ pub const ConstraintManager = struct {
                 return refineValueWithBoolCheck(value, bc.expected);
             },
             .var_compare => return value, // No refinement for var-var comparisons yet
+            .literal_bool => |lb| {
+                // Literal bool constraints don't refine variable values;
+                // they only affect path satisfiability
+                return if (lb.value) value else null;
+            },
         }
     }
 };
@@ -970,4 +1016,97 @@ test "ConstraintManager subsumes ordering" {
 
     try testing.expect(general.subsumes(&specific));
     try testing.expect(!specific.subsumes(&general));
+}
+
+test "literal_bool constraint creation and equality" {
+    const testing = std.testing;
+
+    const c_true = Constraint.literalBool(true);
+    const c_true2 = Constraint.literalBool(true);
+    const c_false = Constraint.literalBool(false);
+
+    try testing.expect(c_true.eql(c_true2));
+    try testing.expect(!c_true.eql(c_false));
+}
+
+test "literal_bool constraint negation" {
+    const testing = std.testing;
+
+    const c_true = Constraint.literalBool(true);
+    const neg = c_true.negate();
+    try testing.expect(neg.eql(Constraint.literalBool(false)));
+
+    const c_false = Constraint.literalBool(false);
+    const neg2 = c_false.negate();
+    try testing.expect(neg2.eql(Constraint.literalBool(true)));
+}
+
+test "literal_bool satisfiability - true is always satisfiable" {
+    const testing = std.testing;
+    const allocator = testing.allocator;
+
+    var env = Environment.init(allocator);
+    defer env.deinit();
+
+    var cm = ConstraintManager.init(allocator);
+    defer cm.deinit();
+
+    // literal_bool(true) should always be satisfiable
+    try cm.addConstraint(Constraint.literalBool(true));
+    try testing.expect(cm.isSatisfiable(&env));
+}
+
+test "literal_bool satisfiability - false is never satisfiable" {
+    const testing = std.testing;
+    const allocator = testing.allocator;
+
+    var env = Environment.init(allocator);
+    defer env.deinit();
+
+    var cm = ConstraintManager.init(allocator);
+    defer cm.deinit();
+
+    // literal_bool(false) should never be satisfiable (it's a contradiction)
+    try cm.addConstraint(Constraint.literalBool(false));
+    try testing.expect(!cm.isSatisfiable(&env));
+}
+
+test "literal_bool causes contradiction when false" {
+    const testing = std.testing;
+    const allocator = testing.allocator;
+
+    var cm = ConstraintManager.init(allocator);
+    defer cm.deinit();
+
+    // Adding literal_bool(false) should mark the constraint manager as contradictory
+    try cm.addConstraint(Constraint.literalBool(false));
+    try testing.expect(cm.has_contradiction);
+
+    // literal_bool(true) should not cause contradiction
+    var cm2 = ConstraintManager.init(allocator);
+    defer cm2.deinit();
+
+    try cm2.addConstraint(Constraint.literalBool(true));
+    try testing.expect(!cm2.has_contradiction);
+}
+
+test "literal_bool refineValue behavior" {
+    const testing = std.testing;
+
+    // literal_bool(true) doesn't change the value
+    const unchanged = ConstraintManager.refineValue(.unknown, Constraint.literalBool(true));
+    try testing.expect(unchanged != null);
+    try testing.expect(unchanged.?.eql(.unknown));
+
+    // literal_bool(false) returns null (unsatisfiable path)
+    const pruned = ConstraintManager.refineValue(.unknown, Constraint.literalBool(false));
+    try testing.expect(pruned == null);
+
+    // Also works with concrete values
+    const concrete_unchanged = ConstraintManager.refineValue(.{ .concrete_int = 42 }, Constraint.literalBool(true));
+    try testing.expect(concrete_unchanged != null);
+    try testing.expect(concrete_unchanged.?.eql(.{ .concrete_int = 42 }));
+
+    const concrete_pruned = ConstraintManager.refineValue(.{ .concrete_int = 42 }, Constraint.literalBool(false));
+    try testing.expect(concrete_pruned == null);
 }

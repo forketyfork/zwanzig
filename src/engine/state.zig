@@ -383,16 +383,19 @@ pub const ProgramState = struct {
         self.invalidateCache();
 
         // Refine the relevant variable's value based on the constraint
-        const var_id = switch (constraint) {
+        const var_id: ?VarId = switch (constraint) {
             .int_compare => |ic| ic.var_id,
             .null_check => |nc| nc.var_id,
             .bool_check => |bc| bc.var_id,
             .var_compare => |vc| vc.var1_id,
+            .literal_bool => null, // No variable to refine for literal bool constraints
         };
 
-        if (self.env.get(var_id)) |current_val| {
-            if (ConstraintManager.refineValue(current_val, constraint)) |refined| {
-                try self.env.set(var_id, refined);
+        if (var_id) |vid| {
+            if (self.env.get(vid)) |current_val| {
+                if (ConstraintManager.refineValue(current_val, constraint)) |refined| {
+                    try self.env.set(vid, refined);
+                }
             }
         }
     }
