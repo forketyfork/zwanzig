@@ -341,7 +341,7 @@ fn doThing(good_param: ?i32) void {
 
 ### unreachable-code-engine
 
-Detects path-sensitive unreachable code where the condition is a compile-time constant. Complements `unreachable-code` by handling constant `true`/`false` conditions (including const boolean identifiers). Only reports when the condition is definitely constant.
+Detects path-sensitive unreachable code where the condition is a compile-time constant. Complements `unreachable-code` by handling constant `true`/`false` conditions (including const boolean identifiers and constant expressions like `(1 + 1) == 2`). Only reports when the condition is definitely constant.
 
 **Bad:**
 ```zig

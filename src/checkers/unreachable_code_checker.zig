@@ -125,72 +125,253 @@ pub const UnreachableCodeChecker = struct {
     }
 
     fn evaluateConditionValue(tree: *const std.zig.Ast, cond_node: u32) ?bool {
-        // First, try to evaluate as a literal true/false
-        if (value.evaluateBoolLiteral(tree, cond_node)) |literal| {
+        return evaluateConstBool(tree, cond_node, 0);
+    }
+
+    fn evaluateConstBool(tree: *const std.zig.Ast, node: u32, depth: u8) ?bool {
+        if (depth > 8) return null;
+
+        if (value.evaluateBoolLiteral(tree, node)) |literal| {
             return literal;
         }
 
-        // If it's an identifier, try to resolve it to a const declaration
         const tags = tree.nodes.items(.tag);
-        if (cond_node >= tags.len) return null;
-        if (tags[cond_node] != .identifier) return null;
+        if (node >= tags.len) return null;
+        const tag = tags[node];
+        const datas = tree.nodes.items(.data);
 
-        // Get the identifier name
-        const main_tokens = tree.nodes.items(.main_token);
-        const token_starts = tree.tokens.items(.start);
-        const token = main_tokens[cond_node];
-        const start = token_starts[token];
+        return switch (tag) {
+            .identifier => blk: {
+                const init_node = resolveConstInitNode(tree, node) orelse break :blk null;
+                break :blk evaluateConstBool(tree, init_node, depth + 1);
+            },
+            .grouped_expression => blk: {
+                const child = @intFromEnum(datas[node].node_and_token[0]);
+                if (child == 0) break :blk null;
+                break :blk evaluateConstBool(tree, child, depth + 1);
+            },
+            .bool_not => blk: {
+                const child = @intFromEnum(datas[node].node);
+                if (child == 0) break :blk null;
+                const child_val = evaluateConstBool(tree, child, depth + 1) orelse break :blk null;
+                break :blk !child_val;
+            },
+            .bool_and, .bool_or => blk: {
+                const pair = datas[node].node_and_node;
+                const lhs = @intFromEnum(pair[0]);
+                const rhs = @intFromEnum(pair[1]);
+                const lhs_val = evaluateConstBool(tree, lhs, depth + 1);
+                if (lhs_val) |val| {
+                    if (tag == .bool_and and !val) break :blk false;
+                    if (tag == .bool_or and val) break :blk true;
+                }
+                const rhs_val = evaluateConstBool(tree, rhs, depth + 1);
+                if (rhs_val) |val| {
+                    if (tag == .bool_and and !val) break :blk false;
+                    if (tag == .bool_or and val) break :blk true;
+                }
+                if (lhs_val == null or rhs_val == null) break :blk null;
+                if (tag == .bool_and) break :blk lhs_val.? and rhs_val.?;
+                break :blk lhs_val.? or rhs_val.?;
+            },
+            .equal_equal, .bang_equal => blk: {
+                const pair = datas[node].node_and_node;
+                const lhs = @intFromEnum(pair[0]);
+                const rhs = @intFromEnum(pair[1]);
 
-        var len: u32 = 0;
-        while (start + len < tree.source.len) {
-            const c = tree.source[start + len];
-            if (!std.ascii.isAlphanumeric(c) and c != '_') break;
-            len += 1;
+                if (evaluateConstInt(tree, lhs, depth + 1)) |lhs_int| {
+                    if (evaluateConstInt(tree, rhs, depth + 1)) |rhs_int| {
+                        const eq = lhs_int == rhs_int;
+                        break :blk if (tag == .equal_equal) eq else !eq;
+                    }
+                }
+
+                const lhs_bool = evaluateConstBool(tree, lhs, depth + 1) orelse break :blk null;
+                const rhs_bool = evaluateConstBool(tree, rhs, depth + 1) orelse break :blk null;
+                const eq = lhs_bool == rhs_bool;
+                break :blk if (tag == .equal_equal) eq else !eq;
+            },
+            .less_than, .less_or_equal, .greater_than, .greater_or_equal => blk: {
+                const pair = datas[node].node_and_node;
+                const lhs = @intFromEnum(pair[0]);
+                const rhs = @intFromEnum(pair[1]);
+                const lhs_int = evaluateConstInt(tree, lhs, depth + 1) orelse break :blk null;
+                const rhs_int = evaluateConstInt(tree, rhs, depth + 1) orelse break :blk null;
+                break :blk switch (tag) {
+                    .less_than => lhs_int < rhs_int,
+                    .less_or_equal => lhs_int <= rhs_int,
+                    .greater_than => lhs_int > rhs_int,
+                    .greater_or_equal => lhs_int >= rhs_int,
+                    else => null,
+                };
+            },
+            else => null,
+        };
+    }
+
+    fn evaluateConstInt(tree: *const std.zig.Ast, node: u32, depth: u8) ?i64 {
+        if (depth > 8) return null;
+
+        if (parseIntLiteral(tree, node)) |literal| {
+            return literal;
         }
-        const ident_name = tree.source[start .. start + len];
 
-        // Search for a const declaration with this name in preceding nodes.
-        // Walk backwards from the condition node to find the nearest declaration
-        // and stop at function boundaries to respect lexical scope.
-        var i: usize = cond_node;
+        const tags = tree.nodes.items(.tag);
+        if (node >= tags.len) return null;
+        const tag = tags[node];
+        const datas = tree.nodes.items(.data);
+
+        return switch (tag) {
+            .identifier => blk: {
+                const init_node = resolveConstInitNode(tree, node) orelse break :blk null;
+                break :blk evaluateConstInt(tree, init_node, depth + 1);
+            },
+            .grouped_expression => blk: {
+                const child = @intFromEnum(datas[node].node_and_token[0]);
+                if (child == 0) break :blk null;
+                break :blk evaluateConstInt(tree, child, depth + 1);
+            },
+            .negation => blk: {
+                const child = @intFromEnum(datas[node].node);
+                if (child == 0) break :blk null;
+                const child_val = evaluateConstInt(tree, child, depth + 1) orelse break :blk null;
+                if (child_val == std.math.minInt(i64)) break :blk null;
+                break :blk -child_val;
+            },
+            .add, .sub, .mul, .div, .mod => blk: {
+                const pair = datas[node].node_and_node;
+                const lhs = @intFromEnum(pair[0]);
+                const rhs = @intFromEnum(pair[1]);
+                const lhs_val = evaluateConstInt(tree, lhs, depth + 1) orelse break :blk null;
+                const rhs_val = evaluateConstInt(tree, rhs, depth + 1) orelse break :blk null;
+
+                break :blk switch (tag) {
+                    .add => blk_add: {
+                        const sum = @addWithOverflow(lhs_val, rhs_val);
+                        if (sum[1] != 0) break :blk_add null;
+                        break :blk_add sum[0];
+                    },
+                    .sub => blk_sub: {
+                        const diff = @subWithOverflow(lhs_val, rhs_val);
+                        if (diff[1] != 0) break :blk_sub null;
+                        break :blk_sub diff[0];
+                    },
+                    .mul => blk_mul: {
+                        const prod = @mulWithOverflow(lhs_val, rhs_val);
+                        if (prod[1] != 0) break :blk_mul null;
+                        break :blk_mul prod[0];
+                    },
+                    .div => if (rhs_val == 0) null else @divTrunc(lhs_val, rhs_val),
+                    .mod => if (rhs_val == 0) null else @mod(lhs_val, rhs_val),
+                    else => null,
+                };
+            },
+            else => null,
+        };
+    }
+
+    fn resolveConstInitNode(tree: *const std.zig.Ast, ident_node: u32) ?u32 {
+        const tags = tree.nodes.items(.tag);
+        if (ident_node >= tags.len) return null;
+        if (tags[ident_node] != .identifier) return null;
+
+        const main_tokens = tree.nodes.items(.main_token);
+        const token_tags = tree.tokens.items(.tag);
+        const ident_token = main_tokens[ident_node];
+        if (ident_token >= token_tags.len) return null;
+        if (token_tags[ident_token] != .identifier) return null;
+        const ident_name = tree.tokenSlice(ident_token);
+
+        var i: usize = ident_node;
         while (i > 0) {
             i -= 1;
             const node_tag = tags[i];
-
-            // Stop at function boundary to respect lexical scope
             if (node_tag == .fn_decl) break;
-
-            // Look for simple_var_decl (const x = ...) or local_var_decl
             if (node_tag != .simple_var_decl and node_tag != .local_var_decl) continue;
 
             const var_decl = tree.fullVarDecl(@enumFromInt(@as(u32, @intCast(i)))) orelse continue;
-
-            // Must be a const (not var)
             const decl_token = tree.tokens.items(.tag)[var_decl.ast.mut_token];
             if (decl_token != .keyword_const) continue;
 
-            // Get the declaration name
-            const decl_name_token = var_decl.ast.mut_token + 1;
-            if (decl_name_token >= tree.tokens.items(.start).len) continue;
-            const decl_start = tree.tokens.items(.start)[decl_name_token];
-
-            var decl_len: u32 = 0;
-            while (decl_start + decl_len < tree.source.len) {
-                const c = tree.source[decl_start + decl_len];
-                if (!std.ascii.isAlphanumeric(c) and c != '_') break;
-                decl_len += 1;
-            }
-            const decl_name = tree.source[decl_start .. decl_start + decl_len];
-
-            // Check if names match
+            const name_token = var_decl.ast.mut_token + 1;
+            if (name_token >= tree.tokens.items(.start).len) continue;
+            const decl_name = tree.tokenSlice(name_token);
             if (!std.mem.eql(u8, ident_name, decl_name)) continue;
 
-            // Found the declaration, now evaluate its initializer
             const init_node = var_decl.ast.init_node.unwrap() orelse continue;
-            return value.evaluateBoolLiteral(tree, @intFromEnum(init_node));
+            return @intFromEnum(init_node);
         }
 
         return null;
+    }
+
+    fn parseIntLiteral(tree: *const std.zig.Ast, node: u32) ?i64 {
+        const tags = tree.nodes.items(.tag);
+        if (node >= tags.len) return null;
+        if (tags[node] != .number_literal) return null;
+
+        const main_tokens = tree.nodes.items(.main_token);
+        const token_starts = tree.tokens.items(.start);
+        const token = main_tokens[node];
+        if (token >= token_starts.len) return null;
+
+        const start = token_starts[token];
+        var end = start;
+        while (end < tree.source.len) {
+            const c = tree.source[end];
+            if (!std.ascii.isDigit(c) and c != '_' and c != 'x' and c != 'X' and
+                c != 'b' and c != 'B' and c != 'o' and c != 'O' and
+                !(c >= 'a' and c <= 'f') and !(c >= 'A' and c <= 'F'))
+            {
+                break;
+            }
+            end += 1;
+        }
+
+        const num_str = tree.source[start..end];
+        var clean_buf: [64]u8 = undefined;
+        var clean_len: usize = 0;
+        for (num_str) |c| {
+            if (c == '_') continue;
+            if (clean_len >= clean_buf.len) return null;
+            clean_buf[clean_len] = c;
+            clean_len += 1;
+        }
+        if (clean_len == 0) return null;
+
+        const clean_str = clean_buf[0..clean_len];
+        var digits = clean_str;
+        var base: i64 = 10;
+        if (clean_len >= 2 and clean_buf[0] == '0') {
+            if (clean_buf[1] == 'x' or clean_buf[1] == 'X') {
+                base = 16;
+                digits = clean_str[2..];
+            } else if (clean_buf[1] == 'b' or clean_buf[1] == 'B') {
+                base = 2;
+                digits = clean_str[2..];
+            } else if (clean_buf[1] == 'o' or clean_buf[1] == 'O') {
+                base = 8;
+                digits = clean_str[2..];
+            }
+        }
+        if (digits.len == 0) return null;
+
+        var result: i64 = 0;
+        for (digits) |c| {
+            const digit: i64 = switch (c) {
+                '0'...'9' => @intCast(c - '0'),
+                'a'...'f' => @intCast(10 + (c - 'a')),
+                'A'...'F' => @intCast(10 + (c - 'A')),
+                else => return null,
+            };
+            if (digit >= base) return null;
+            const mul = @mulWithOverflow(result, base);
+            if (mul[1] != 0) return null;
+            const sum = @addWithOverflow(mul[0], digit);
+            if (sum[1] != 0) return null;
+            result = sum[0];
+        }
+        return result;
     }
 
     fn getNodeRange(src: *Source, node: u32) !?SourceRange {
