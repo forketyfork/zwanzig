@@ -614,3 +614,5 @@ Config:
 
 Notes:
 - `try std.Thread.spawn(...)` ignores the `try_error` edge when checking join guarantees (no thread is created on the error path).
+- Joining must be guaranteed on all paths; a join in only some branches still reports an escape.
+- Capturing allocator-backed or static data does not trigger this rule.
