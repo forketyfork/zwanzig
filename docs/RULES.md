@@ -22,7 +22,7 @@ const mem = std.mem;  // Use the already imported std
 
 ### todo
 
-Finds `// TODO` comments.
+Finds TODO comments in line, doc (`///`, `//!`), and block (`/* */`) comments. Matching is case-insensitive (`TODO`, `todo`, etc.).
 
 **Example:**
 ```zig
@@ -32,7 +32,7 @@ fn processData(data: []const u8) void {
 }
 ```
 
-Produces a hint with the TODO's message.
+Produces a hint with the TODO's message. If no message is provided (e.g. `// TODO:`), the rule reports a default message.
 
 ### file-as-struct
 
@@ -556,6 +556,10 @@ fn baz() i32 {
 Detects allocator/resource misuse: double-free, free-without-alloc, close-without-open, use-after-free/close, and leaks.
 
 **Error-path leak policy:** Leak checks run only on normal return paths. When a function returns an error (detected by literal error values or type-based analysis), leak reports are suppressed. This avoids false positives in code that cleans up via `errdefer`.
+
+**Tracking scope:** The rule only tracks resources created by known alloc/open APIs (including built-in models for common std allocator and file/posix patterns). Closing a value that was not opened by a tracked API is reported as "close without tracked open". This includes manually constructed handles (for example, `std.fs.File{ .handle = fd }`) or values provided by external code, unless you model ownership with `resource_models`.
+
+**Diagnostics per path:** When multiple control-flow paths violate the rule, multiple diagnostics can be emitted for the same source line.
 
 Resources stored in aggregates are treated as escaping with the aggregate.
 

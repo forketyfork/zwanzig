@@ -27,6 +27,8 @@ pub fn mixin(comptime _Engine: type) type {
                 else => null,
             } orelse return;
 
+            try checkUseAfterFreeInExpr(self, state, @intFromEnum(full_call.ast.fn_expr), current_cfg);
+
             for (full_call.ast.params) |param| {
                 try checkUseAfterFreeInExpr(self, state, @intFromEnum(param), current_cfg);
             }
@@ -63,6 +65,15 @@ pub fn mixin(comptime _Engine: type) type {
                 .field_access => {
                     const data = datas[expr_node].node_and_token;
                     try checkUseAfterFreeInExpr(self, state, @intFromEnum(data[0]), current_cfg);
+                },
+                .address_of, .deref, .@"try" => {
+                    const child = datas[expr_node].node;
+                    try checkUseAfterFreeInExpr(self, state, @intFromEnum(child), current_cfg);
+                },
+                .@"catch" => {
+                    const pair = datas[expr_node].node_and_node;
+                    try checkUseAfterFreeInExpr(self, state, @intFromEnum(pair[0]), current_cfg);
+                    try checkUseAfterFreeInExpr(self, state, @intFromEnum(pair[1]), current_cfg);
                 },
                 .call, .call_comma, .call_one, .call_one_comma => {
                     try checkUseAfterFreeInCall(self, state, expr_node, current_cfg);
