@@ -311,27 +311,23 @@ pub const UnreachableCodeChecker = struct {
         if (tags[node] != .number_literal) return null;
 
         const main_tokens = tree.nodes.items(.main_token);
-        const token_starts = tree.tokens.items(.start);
         const token = main_tokens[node];
-        if (token >= token_starts.len) return null;
+        const token_str = tree.tokenSlice(token);
+        if (token_str.len == 0) return null;
 
-        const start = token_starts[token];
-        var end = start;
-        while (end < tree.source.len) {
-            const c = tree.source[end];
+        for (token_str) |c| {
+            if (c == '.' or c == 'e' or c == 'E' or c == 'p' or c == 'P') return null;
             if (!std.ascii.isDigit(c) and c != '_' and c != 'x' and c != 'X' and
                 c != 'b' and c != 'B' and c != 'o' and c != 'O' and
                 !(c >= 'a' and c <= 'f') and !(c >= 'A' and c <= 'F'))
             {
-                break;
+                return null;
             }
-            end += 1;
         }
 
-        const num_str = tree.source[start..end];
         var clean_buf: [64]u8 = undefined;
         var clean_len: usize = 0;
-        for (num_str) |c| {
+        for (token_str) |c| {
             if (c == '_') continue;
             if (clean_len >= clean_buf.len) return null;
             clean_buf[clean_len] = c;
