@@ -43,6 +43,10 @@ All code must be formatted with `zig fmt`.
 
 Any changes or additions to the existing rules/checkers must be documented.
 
+## Releases
+
+`main` is protected; release version bumps must go through a PR and wait for required checks (build and CodeQL) before tagging and publishing.
+
 ## Development Environment
 
 Uses Nix flakes for reproducible dev environment (Zig 0.15.2). Enter with:
