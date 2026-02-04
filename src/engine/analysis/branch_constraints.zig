@@ -33,8 +33,9 @@ pub fn mixin(comptime _Engine: type) type {
                 // First check if the condition is a literal boolean
                 if (_Engine.literals.evaluateLiteral(self, cond_node)) |literal_val| {
                     if (literal_val.toBool()) |bool_val| {
-                        const var_key = ids.varId(cond_node);
-                        return Constraint.boolCheck(var_key, bool_val);
+                        // Use literalBool for compile-time known conditions to enable
+                        // proper branch pruning (e.g., if (false) should be pruned)
+                        return Constraint.literalBool(bool_val);
                     }
                 }
 

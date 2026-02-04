@@ -218,9 +218,15 @@ pub const Analyzer = struct {
 
     pub fn mergeResult(self: *Analyzer, result: *AnalysisResult) !void {
         self.analysis_stats.merge(result.stats);
+        // Reserve capacity upfront so append can't fail mid-way.
+        // This prevents use-after-free on error: if ensureUnusedCapacity fails,
+        // we haven't moved any diagnostics yet, so errdefer in analyzeFile
+        // can safely free result's diagnostics.
+        try self.diagnostics.ensureUnusedCapacity(self.allocator, result.diagnostics.items.len);
         for (result.diagnostics.items) |diag| {
-            try self.diagnostics.append(self.allocator, diag);
+            self.diagnostics.appendAssumeCapacity(diag);
         }
+        // Only free the backing array, not the diagnostics (now owned by self)
         result.diagnostics.deinit(self.allocator);
         result.diagnostics = .empty;
     }

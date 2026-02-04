@@ -211,7 +211,8 @@ pub const Cache = struct {
         };
 
         if (!entry.key.eql(key)) {
-            return CacheError.CacheCorrupted;
+            // Key mismatch indicates corruption; treat as cache miss
+            return null;
         }
 
         const data = try self.allocator.alloc(u8, entry.data_len);
@@ -219,8 +220,9 @@ pub const Cache = struct {
 
         const bytes_read = try file.readAll(data);
         if (bytes_read != entry.data_len) {
+            // Incomplete read indicates corruption; treat as cache miss
             self.allocator.free(data);
-            return CacheError.CacheCorrupted;
+            return null;
         }
 
         return data;
