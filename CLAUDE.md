@@ -45,7 +45,7 @@ Any changes or additions to the existing rules/checkers must be documented.
 
 ## Releases
 
-`main` is protected; release version bumps must go through a PR and wait for required checks (build and CodeQL) before tagging and publishing.
+When asked to release: create a PR for the version bump, wait for required checks to pass, then tag and publish the release from the merged commit.
 
 ## Development Environment
 
