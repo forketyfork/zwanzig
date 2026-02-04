@@ -268,6 +268,39 @@ Detected functions:
 - `allocWithOptions` with non-null sentinel parameter
 - `readToEndAllocOptions` with non-null sentinel parameter
 
+### return-local-ptr
+
+Detects functions that return slices or pointers derived from local stack buffers. This catches use-after-return bugs where the returned data points to memory that becomes invalid when the function returns. The rule only reports when the function’s return type is a pointer/slice (including optional or error-union wrappers).
+
+The rule uses heuristics to detect the pattern:
+1. A local array variable is declared (e.g., `var buf: [N]T = undefined;`)
+2. Its address is passed to a function call (`&buf`)
+3. The result of that call (or a field of it) is returned
+4. Or the local buffer itself is returned as a pointer/slice (e.g., `return &buf` or `return buf[0..]`)
+
+**Bad:**
+```zig
+fn getMembers(tree: *const Ast, node_idx: u32) ?[]const Node.Index {
+    var buf: [2]Node.Index = undefined;  // Local buffer on stack
+    // containerDeclTwo fills buf and returns struct with .members pointing to buf
+    return tree.containerDeclTwo(&buf, node_idx).ast.members;  // Dangling pointer!
+}
+```
+
+**Good:**
+```zig
+fn getMembers(tree: *const Ast, node_idx: u32, buf: *[2]Node.Index) ?[]const Node.Index {
+    // Buffer passed from caller, stays alive after return
+    return tree.containerDeclTwo(buf, node_idx).ast.members;
+}
+
+// Caller:
+var buf: [2]Node.Index = undefined;
+const members = getMembers(tree, node_idx, &buf);
+```
+
+This rule complements `stack-escape-engine` by catching patterns where the escape happens through an intermediate function call that the dataflow analysis can't track.
+
 ### identifier-style
 
 Enforces Zig naming conventions:
