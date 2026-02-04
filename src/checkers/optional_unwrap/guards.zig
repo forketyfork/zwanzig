@@ -165,6 +165,40 @@ pub fn isGuardedByEarlyExit(
     return scanBlockForEarlyExit(tree, block, unwrap_node, unwrapped_var, tags, datas, main_tokens, token_starts);
 }
 
+pub fn isGuardedBySwitchNullCase(
+    tree: *const std.zig.Ast,
+    unwrap_node: u32,
+    unwrapped_var: u32,
+    parent_map: []const u32,
+) bool {
+    const tags = tree.nodes.items(.tag);
+    const datas = tree.nodes.items(.data);
+    const main_tokens = tree.nodes.items(.main_token);
+    const token_starts = tree.tokens.items(.start);
+
+    // Find the containing block (could be loop body or function body)
+    var node = unwrap_node;
+    var block_node: ?u32 = null;
+    var depth: u32 = 0;
+
+    while (node < parent_map.len and depth < 64) : (depth += 1) {
+        const parent = parent_map[node];
+        if (parent == 0 or parent >= tags.len) break;
+
+        if (tags[parent] == .block or tags[parent] == .block_two or
+            tags[parent] == .block_semicolon or tags[parent] == .block_two_semicolon)
+        {
+            block_node = parent;
+            break;
+        }
+        node = parent;
+    }
+
+    const block = block_node orelse return false;
+
+    return scanBlockForSwitchNullCase(tree, block, unwrap_node, unwrapped_var, tags, datas, main_tokens, token_starts);
+}
+
 fn scanBlockForEarlyExit(
     tree: *const std.zig.Ast,
     block: u32,
@@ -211,6 +245,77 @@ fn scanBlockForEarlyExit(
         }
     }
 
+    return false;
+}
+
+fn scanBlockForSwitchNullCase(
+    tree: *const std.zig.Ast,
+    block: u32,
+    unwrap_node: u32,
+    unwrapped_var: u32,
+    tags: []const std.zig.Ast.Node.Tag,
+    datas: []const std.zig.Ast.Node.Data,
+    main_tokens: []const u32,
+    token_starts: []const u32,
+) bool {
+    if (block >= tags.len) return false;
+
+    if (unwrap_node >= main_tokens.len) return false;
+    const unwrap_pos = token_starts[main_tokens[unwrap_node]];
+
+    var stmts_buf: [ast_walk.max_block_statements]u32 = undefined;
+    const stmt_count = ast_walk.getBlockStatements(tree, block, &stmts_buf) orelse return false;
+
+    for (stmts_buf[0..stmt_count]) |stmt| {
+        if (stmt >= tags.len) continue;
+        if (stmt >= main_tokens.len) continue;
+
+        const stmt_pos = token_starts[main_tokens[stmt]];
+        if (stmt_pos >= unwrap_pos) continue;
+
+        if (tags[stmt] != .@"switch" and tags[stmt] != .switch_comma) continue;
+
+        const full_switch = tree.switchFull(@enumFromInt(stmt));
+        const cond = @intFromEnum(full_switch.ast.condition);
+        if (!sameVariable(tree, cond, unwrapped_var)) continue;
+
+        if (switchHasNullCaseEarlyExit(tree, stmt, tags, datas)) {
+            return true;
+        }
+    }
+
+    return false;
+}
+
+fn switchHasNullCaseEarlyExit(
+    tree: *const std.zig.Ast,
+    switch_node: u32,
+    tags: []const std.zig.Ast.Node.Tag,
+    datas: []const std.zig.Ast.Node.Data,
+) bool {
+    const full_switch = tree.switchFull(@enumFromInt(switch_node));
+    for (full_switch.ast.cases) |case_node| {
+        const full_case = tree.fullSwitchCase(case_node) orelse continue;
+        if (!caseHasNullValue(tree, full_case)) continue;
+
+        const target_expr = @intFromEnum(full_case.ast.target_expr);
+        if (isEarlyExitExpr(tree, target_expr, tags, datas)) {
+            return true;
+        }
+    }
+
+    return false;
+}
+
+fn caseHasNullValue(
+    tree: *const std.zig.Ast,
+    full_case: std.zig.Ast.full.SwitchCase,
+) bool {
+    for (full_case.ast.values) |value| {
+        if (isNullIdentifier(tree, @intFromEnum(value))) {
+            return true;
+        }
+    }
     return false;
 }
 

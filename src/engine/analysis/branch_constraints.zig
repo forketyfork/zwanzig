@@ -215,8 +215,12 @@ pub fn mixin(comptime _Engine: type) type {
             } orelse return null;
 
             const scope = getAssertionScope(self, current_cfg) orelse return null;
-            const assertion_name = assertions.resolveAssertionName(tree, full_call.ast.fn_expr, scope) orelse return null;
-            const assertion_kind = assertions.constraintKindForName(assertion_name) orelse return null;
+            var assertion_name = assertions.resolveAssertionName(tree, full_call.ast.fn_expr, scope);
+            if (assertion_name == null) {
+                assertion_name = assertions.resolveDebugAssertionName(tree, full_call.ast.fn_expr, scope);
+            }
+            const resolved_name = assertion_name orelse return null;
+            const assertion_kind = assertions.constraintKindForName(resolved_name) orelse return null;
 
             // Get the first argument (the condition being asserted)
             const args = full_call.ast.params;

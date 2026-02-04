@@ -446,6 +446,21 @@ if (opt) |value| {
 }
 ```
 
+**Debug assertion guard:**
+```zig
+std.debug.assert(opt != null);
+const value = opt.?;  // Safe: assert guarantees non-null
+```
+
+**Switch null-case guard:**
+```zig
+switch (opt) {
+    null => return null,
+    else => |value| _ = value,
+}
+const value = opt.?;  // Safe: null path returned
+```
+
 **Comptime type expressions:**
 ```zig
 // Safe: evaluated at compile time, fails as compile error not runtime panic
