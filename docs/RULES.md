@@ -87,6 +87,7 @@ pub fn helper() void {
 
 Detects unused container-level `const`, `var`, and `fn` declarations that aren't exported. The check is conservative:
 - Exported (`pub`) declarations are ignored (they may be used externally)
+- `export` and `extern` declarations are ignored (they may be used by other compilation units)
 - Underscore-prefixed names (e.g., `_unused`) are ignored (explicit opt-out)
 - Special names like `main` and `panic` are ignored (entry points)
 
