@@ -135,7 +135,7 @@ fn add(value: i32) i32 {
 
 ### unreachable-code
 
-Detects code after an unconditional terminator (`return`) or after fully terminating branches (`if`, `switch`, `while`).
+Detects code after an unconditional terminator (`return`, `unreachable`) or after fully terminating branches (`if`, `switch`, `while`).
 
 **Bad:**
 ```zig
