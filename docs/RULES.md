@@ -6,7 +6,7 @@ Zwanzig has AST/token rules (legacy `Rule` interface) and checker-based passes (
 
 ### dupe-import
 
-Flags duplicate `@import` statements, usually from copy-paste mistakes or forgotten refactoring.
+Flags duplicate `@import` statements that repeat the same full import path (module string plus any chained field access), usually from copy-paste mistakes or forgotten refactoring.
 
 **Bad:**
 ```zig
