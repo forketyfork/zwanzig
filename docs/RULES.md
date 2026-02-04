@@ -308,7 +308,9 @@ Enforces Zig naming conventions:
 - Types: PascalCase
 - Functions: camelCase
 - Variables/constants/parameters/payloads: snake_case (lowercase); SCREAMING_SNAKE_CASE only when mirroring established external conventions (e.g., `std.posix.ENOENT`)
-- When type info is available, type aliases and function type aliases are treated as types and should use PascalCase; heuristics also treat C-style `*_t` aliases as types
+- Namespaces/modules declared as `const` structs may use lowercase (e.g., `std.mem`)
+- Quoted identifiers (e.g., `@"weird-name"`) are exempt from these checks
+- When type info is available, type aliases and function type aliases are treated as types and should use PascalCase; heuristics also treat C-style `*_t` aliases as types (lowercase `*_t` names are allowed when mirroring external conventions like `fd_t`)
 
 **Bad:**
 ```zig
