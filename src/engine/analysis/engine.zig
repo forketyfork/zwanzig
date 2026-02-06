@@ -398,7 +398,7 @@ pub const AnalysisEngine = struct {
         // For call nodes, use fullCall to extract the callee
         var call_buf: [1]std.zig.Ast.Node.Index = undefined;
         const full_call = switch (tag) {
-            .call, .call_one, .call_one_comma => tree.fullCall(&call_buf, @enumFromInt(call_ast_node)),
+            .call, .call_comma, .call_one, .call_one_comma => tree.fullCall(&call_buf, @enumFromInt(call_ast_node)),
             else => return null,
         } orelse return null;
 
