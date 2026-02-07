@@ -8,6 +8,7 @@ const EdgeKind = cfg_mod.EdgeKind;
 const CfgBuilder = cfg_mod.CfgBuilder;
 const cached_artifacts_mod = @import("../../cached_artifacts.zig");
 const ast_walk = @import("../../ast_walk.zig");
+const call_utils = @import("../../analysis/call_utils.zig");
 const Source = @import("../../source.zig").Source;
 const BuildMetadata = @import("../../build_metadata.zig").BuildMetadata;
 const assertions = @import("../../assertions.zig");
@@ -398,7 +399,7 @@ pub const AnalysisEngine = struct {
         // For call nodes, use fullCall to extract the callee
         var call_buf: [1]std.zig.Ast.Node.Index = undefined;
         const full_call = switch (tag) {
-            .call, .call_one, .call_one_comma => tree.fullCall(&call_buf, @enumFromInt(call_ast_node)),
+            .call, .call_comma, .call_one, .call_one_comma => tree.fullCall(&call_buf, @enumFromInt(call_ast_node)),
             else => return null,
         } orelse return null;
 
@@ -975,7 +976,7 @@ pub const AnalysisEngine = struct {
                                                     }
                                                 } else if (self.type_context) |type_ctx| {
                                                     if (error_info.init_node) |init_node| {
-                                                        if (initNodeIsCallExpr(tree, init_node)) {
+                                                        if (init_node < tags.len and call_utils.isCallNode(tags[init_node])) {
                                                             if (type_ctx.getExpressionTypeStrict(init_node)) |ti| {
                                                                 if (ti.kind == .error_union) {
                                                                     new_state.setErrorState(.error_active);
@@ -1140,15 +1141,6 @@ pub const AnalysisEngine = struct {
             .@"try",
             .@"catch",
             => true,
-            else => false,
-        };
-    }
-
-    fn initNodeIsCallExpr(tree: *const std.zig.Ast, init_node: u32) bool {
-        const tags = tree.nodes.items(.tag);
-        if (init_node >= tags.len) return false;
-        return switch (tags[init_node]) {
-            .call, .call_comma, .call_one, .call_one_comma => true,
             else => false,
         };
     }

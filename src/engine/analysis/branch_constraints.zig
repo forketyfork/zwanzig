@@ -1,5 +1,6 @@
 const std = @import("std");
 const assertions = @import("../../assertions.zig");
+const call_utils = @import("../../analysis/call_utils.zig");
 const ids = @import("../../ids.zig");
 const Cfg = @import("../../cfg.zig").Cfg;
 const CfgNode = @import("../../cfg.zig").CfgNode;
@@ -314,9 +315,7 @@ pub fn mixin(comptime _Engine: type) type {
 
             // Check if the operand is a call expression
             const operand_tag = tags[try_operand];
-            if (operand_tag != .call and operand_tag != .call_comma and
-                operand_tag != .call_one and operand_tag != .call_one_comma)
-            {
+            if (!call_utils.isCallNode(operand_tag)) {
                 return null;
             }
 

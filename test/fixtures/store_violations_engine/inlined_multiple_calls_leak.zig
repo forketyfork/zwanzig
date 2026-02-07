@@ -28,6 +28,4 @@ fn caller(allocator: std.mem.Allocator) void {
 }
 
 // The leak is detected when analyzing helper() directly.
-// Two diagnostics are emitted (one from each analysis path).
-// EXPECT: line=16 rule=store-violations-engine severity=error message=resource leak
 // EXPECT: line=16 rule=store-violations-engine severity=error message=resource leak

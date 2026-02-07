@@ -461,7 +461,7 @@ pub const StackEscapeEngineChecker = struct {
         const token_tags = tree.tokens.items(.tag);
 
         if (call_node >= tags.len) return null;
-        if (!isCallNode(tags[call_node])) return null;
+        if (!call_utils.isCallNode(tags[call_node])) return null;
 
         var call_buf: [1]std.zig.Ast.Node.Index = undefined;
         const full_call = tree.fullCall(&call_buf, @enumFromInt(call_node)) orelse return null;
@@ -905,7 +905,7 @@ pub const StackEscapeEngineChecker = struct {
         const token_tags = tree.tokens.items(.tag);
 
         if (call_node >= tags.len) return null;
-        if (!isCallNode(tags[call_node])) return null;
+        if (!call_utils.isCallNode(tags[call_node])) return null;
 
         var call_buf: [1]std.zig.Ast.Node.Index = undefined;
         const full_call = tree.fullCall(&call_buf, @enumFromInt(call_node)) orelse return null;
@@ -977,10 +977,6 @@ pub const StackEscapeEngineChecker = struct {
             .grouped_expression, .unwrap_optional => unwrapCallNode(tree, @intFromEnum(datas[expr_node].node_and_token[0])),
             else => null,
         };
-    }
-
-    fn isCallNode(tag: std.zig.Ast.Node.Tag) bool {
-        return tag == .call or tag == .call_comma or tag == .call_one or tag == .call_one_comma;
     }
 
     fn originOfExpr(ctx: *AnalysisContext, state: *const OriginState, expr_node: u32, depth: u32) Origin {
@@ -1357,7 +1353,7 @@ pub const StackEscapeEngineChecker = struct {
     fn getCallCalleeNode(tree: *const std.zig.Ast, call_node: u32) ?u32 {
         const tags = tree.nodes.items(.tag);
         if (call_node >= tags.len) return null;
-        if (!isCallNode(tags[call_node])) return null;
+        if (!call_utils.isCallNode(tags[call_node])) return null;
         var call_buf: [1]std.zig.Ast.Node.Index = undefined;
         const full_call = tree.fullCall(&call_buf, @enumFromInt(call_node)) orelse return null;
         return @intFromEnum(full_call.ast.fn_expr);
