@@ -14,4 +14,3 @@ fn caller(allocator: std.mem.Allocator) void {
 }
 
 // EXPECT: line=8 rule=store-violations-engine severity=error message=resource leak
-// EXPECT: line=8 rule=store-violations-engine severity=error message=resource leak

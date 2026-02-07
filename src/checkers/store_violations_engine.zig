@@ -23,6 +23,8 @@ pub const StoreViolationsEngineChecker = struct {
         .checkAstFn = checkAst,
     };
 
+    const ReportedKey = struct { u32, store_mod.StoreViolationKind };
+
     fn checkAst(
         src: *Source,
         allocator: std.mem.Allocator,
@@ -32,9 +34,12 @@ pub const StoreViolationsEngineChecker = struct {
         const tree = src.ast() catch return;
         const tags = tree.nodes.items(.tag);
 
+        var reported: std.AutoHashMap(ReportedKey, void) = .init(allocator);
+        defer reported.deinit();
+
         for (0..tags.len) |i| {
             if (tags[i] == .fn_decl) {
-                try analyzeFunction(src, allocator, ids.astId(@intCast(i)), diagnostics, context);
+                try analyzeFunction(src, allocator, ids.astId(@intCast(i)), diagnostics, context, &reported);
             }
         }
     }
@@ -45,6 +50,7 @@ pub const StoreViolationsEngineChecker = struct {
         fn_node: ids.AstNodeId,
         diagnostics: *std.ArrayList(Diagnostic),
         context: checker_mod.CheckerContext,
+        reported: *std.AutoHashMap(ReportedKey, void),
     ) CheckerError!void {
         var cfg_handle = (context.getOrBuildCfg(allocator, src, fn_node) catch return) orelse return;
         defer cfg_handle.deinit();
@@ -96,23 +102,15 @@ pub const StoreViolationsEngineChecker = struct {
 
         if (!run_ok) return;
 
-        var reported: std.ArrayList(StoreViolation) = .empty;
-        defer reported.deinit(allocator);
-
         for (engine.getGraph().nodes.items) |node| {
             for (node.state.getStoreViolations()) |violation| {
-                if (isReported(reported.items, violation)) continue;
-                try reported.append(allocator, violation);
+                const token = if (violation.call_token) |t| t else ids.varIndex(violation.region);
+                const key: ReportedKey = .{ token, violation.kind };
+                if (reported.contains(key)) continue;
+                try reported.put(key, {});
                 try emitViolationDiagnostic(src, allocator, diagnostics, violation);
             }
         }
-    }
-
-    fn isReported(reported: []const StoreViolation, violation: StoreViolation) bool {
-        for (reported) |existing| {
-            if (existing.eql(violation)) return true;
-        }
-        return false;
     }
 
     fn emitViolationDiagnostic(
