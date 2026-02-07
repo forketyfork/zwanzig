@@ -1,5 +1,6 @@
 const std = @import("std");
 const ast_walk = @import("../../ast_walk.zig");
+const call_utils = @import("../../analysis/call_utils.zig");
 const ids = @import("../../ids.zig");
 
 pub fn isGuardedByLazyInit(
@@ -666,9 +667,7 @@ fn isMethodCallOnSelf(
 ) bool {
     if (call_node >= tags.len) return false;
 
-    if (tags[call_node] != .call and tags[call_node] != .call_comma and
-        tags[call_node] != .call_one and tags[call_node] != .call_one_comma)
-    {
+    if (!call_utils.isCallNode(tags[call_node])) {
         return false;
     }
 
@@ -696,9 +695,7 @@ fn getMethodNameFromCall(
 ) ?[]const u8 {
     if (call_node >= tags.len) return null;
 
-    if (tags[call_node] != .call and tags[call_node] != .call_comma and
-        tags[call_node] != .call_one and tags[call_node] != .call_one_comma)
-    {
+    if (!call_utils.isCallNode(tags[call_node])) {
         return null;
     }
 

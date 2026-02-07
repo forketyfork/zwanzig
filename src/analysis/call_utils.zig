@@ -1,6 +1,10 @@
 const std = @import("std");
 const TypeContext = @import("../type_context.zig").TypeContext;
 
+pub fn isCallNode(tag: std.zig.Ast.Node.Tag) bool {
+    return tag == .call or tag == .call_comma or tag == .call_one or tag == .call_one_comma;
+}
+
 pub fn getReceiverTypeName(type_ctx: ?*TypeContext, tree: *const std.zig.Ast, base_node: u32) ?[]const u8 {
     if (type_ctx == null) return null;
     const tags = tree.nodes.items(.tag);

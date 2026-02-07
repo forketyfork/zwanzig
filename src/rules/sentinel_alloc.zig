@@ -6,6 +6,7 @@ const Diagnostic = @import("../diagnostic.zig").Diagnostic;
 const RuleError = @import("../rule.zig").RuleError;
 const TypeContext = @import("../type_context.zig").TypeContext;
 const ast_walk = @import("../ast_walk.zig");
+const call_utils = @import("../analysis/call_utils.zig");
 const ZirBridge = @import("../zir_bridge.zig").ZirBridge;
 const TypeInfo = @import("../zir_bridge.zig").TypeInfo;
 
@@ -82,7 +83,7 @@ pub const SentinelAllocRule = struct {
             const tag = tags[i];
 
             // Look for function calls
-            if (tag != .call and tag != .call_one and tag != .call_comma and tag != .call_one_comma) continue;
+            if (!call_utils.isCallNode(tag)) continue;
 
             // Get the full call information
             var buf: [1]Ast.Node.Index = undefined;

@@ -4,6 +4,7 @@ const Source = @import("../source.zig").Source;
 const Diagnostic = @import("../diagnostic.zig").Diagnostic;
 const RuleError = @import("../rule.zig").RuleError;
 const ast_walk = @import("../ast_walk.zig");
+const call_utils = @import("../analysis/call_utils.zig");
 
 const Ast = std.zig.Ast;
 
@@ -404,7 +405,7 @@ pub const ReturnLocalPointerRule = struct {
         }
 
         // Pattern 6: return func(&local)
-        if (isCallNode(tag)) {
+        if (call_utils.isCallNode(tag)) {
             return checkCallTakesAddressOfLocal(tree, tags, datas, main_tokens, ret_expr, local_name);
         }
 
@@ -419,10 +420,6 @@ pub const ReturnLocalPointerRule = struct {
         }
 
         return false;
-    }
-
-    fn isCallNode(tag: Ast.Node.Tag) bool {
-        return tag == .call or tag == .call_comma or tag == .call_one or tag == .call_one_comma;
     }
 
     fn isIdentifierLocal(
