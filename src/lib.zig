@@ -30,4 +30,5 @@ pub const checkers = struct {
     pub const store_violations_engine = @import("checkers/store_violations_engine.zig");
     pub const optional_unwrap_engine = @import("checkers/optional_unwrap_engine.zig");
     pub const stack_escape_engine = @import("checkers/stack_escape_engine.zig");
+    pub const divide_by_zero_engine = @import("checkers/divide_by_zero_engine.zig");
 };

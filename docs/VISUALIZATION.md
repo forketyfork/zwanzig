@@ -44,7 +44,7 @@ The `Cfg` struct provides `dumpDot(allocator)` for quick stderr output.
 
 Engine-based checkers build exploded graphs showing all reachable (CFG node, state) pairs. Three visualization options are available.
 
-> These visualizations only show data from engine-based checkers (`store-violations-engine`, `empty-catch-engine`, `swallowed-error`, `optional-unwrap`). AST-based rules won't appear in path traces.
+> These visualizations only show data from engine-based checkers (`store-violations-engine`, `empty-catch-engine`, `swallowed-error`, `optional-unwrap`, `divide-by-zero-engine`). AST-based rules won't appear in path traces.
 
 ### Exploded graph
 

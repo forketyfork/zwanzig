@@ -496,6 +496,44 @@ if (should_process) {
 }
 ```
 
+### divide-by-zero-engine
+
+Detects integer division/modulo expressions where the denominator can be zero on at least one reachable path.
+
+The checker is path-sensitive and tracks:
+- constant literals
+- variable assignments of literal/range-like values
+- branch constraints such as `x == 0`, `x != 0`, `x > 0`, `x <= -1`
+- mixed-path outcomes (reports "possible" when some paths are safe and some are unsafe)
+
+Supported operations:
+- binary operators: `/` and `%`
+- builtins: `@divTrunc`, `@divFloor`, `@divExact`, `@mod`, `@rem`
+
+**Bad:**
+```zig
+fn badLiteral() i32 {
+    return @divTrunc(10, 0); // division by zero
+}
+
+fn badPathSensitive(x: i32) i32 {
+    if (x == 0) {
+        return @mod(10, x); // modulo by zero on this branch
+    }
+    return 0;
+}
+```
+
+**Good:**
+```zig
+fn goodGuarded(x: i32) i32 {
+    if (x != 0) {
+        return @divTrunc(10, x); // guarded non-zero denominator
+    }
+    return 0;
+}
+```
+
 ### empty-catch-engine
 
 Detects empty `catch {}` blocks.

@@ -427,6 +427,14 @@ pub const AnalysisEngine = struct {
         return var_resolution.resolveVarIdFromExpr(self, expr_node, current_cfg);
     }
 
+    pub fn resolveDeclInfoFromIdentifier(
+        self: *AnalysisEngine,
+        identifier_node: u32,
+        current_cfg: *const Cfg,
+    ) ?VarResolver.DeclInfo {
+        return var_resolution.resolveDeclInfoFromIdentifier(self, identifier_node, current_cfg);
+    }
+
     fn processNode(self: *AnalysisEngine, node_index: u32, edge_kind: EdgeKind, pending_constraint: ?Constraint, current_cfg: *const Cfg) EngineError!void {
         _ = edge_kind;
 
