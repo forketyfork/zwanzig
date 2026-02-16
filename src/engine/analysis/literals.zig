@@ -27,6 +27,31 @@ pub fn mixin(comptime _Engine: type) type {
                     }
                     return null;
                 },
+                .grouped_expression, .unwrap_optional => {
+                    const child = @intFromEnum(tree.nodes.items(.data)[node].node_and_token[0]);
+                    if (child == 0) return null;
+                    return evaluateLiteral(self, child);
+                },
+                .negation, .negation_wrap => {
+                    const child = @intFromEnum(tree.nodes.items(.data)[node].node);
+                    if (child == 0) return null;
+                    const child_value = evaluateLiteral(self, child) orelse return null;
+                    return switch (child_value) {
+                        .concrete_int => |v| blk: {
+                            if (v == std.math.minInt(i64)) break :blk null;
+                            break :blk .{ .concrete_int = -v };
+                        },
+                        else => null,
+                    };
+                },
+                .builtin_call, .builtin_call_comma, .builtin_call_two, .builtin_call_two_comma => {
+                    const builtin_name = builtinCallName(tree, tags, token_tags, node) orelse return null;
+                    if (!std.mem.eql(u8, builtin_name, "@as")) return null;
+                    var params_buf: [2]std.zig.Ast.Node.Index = undefined;
+                    const params = tree.builtinCallParams(&params_buf, @enumFromInt(node)) orelse return null;
+                    if (params.len < 2) return null;
+                    return evaluateLiteral(self, @intFromEnum(params[1]));
+                },
                 .number_literal => {
                     // Parse integer literal
                     const token = main_tokens[node];
