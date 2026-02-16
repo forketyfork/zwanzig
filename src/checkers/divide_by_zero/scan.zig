@@ -147,6 +147,7 @@ fn assessWithCfg(
 ) SiteOutcome {
     const graph = engine.getGraph();
 
+    var reached_paths: usize = 0;
     var saw_definite_zero = false;
     var saw_maybe_zero = false;
     var saw_definite_non_zero = false;
@@ -157,6 +158,7 @@ fn assessWithCfg(
         if (exploded_node.point.kind != .pre) continue;
         if (exploded_node.point.node_index != cfg_node_idx) continue;
 
+        reached_paths += 1;
         const risk = evaluator.riskWithState(tree, denominator_node, &exploded_node.state, engine, cfg);
         switch (risk) {
             .definitely_zero => {
@@ -175,6 +177,9 @@ fn assessWithCfg(
         }
     }
 
+    if (reached_paths == 0) {
+        return .none;
+    }
     if (informative_paths == 0) {
         return assessWithoutCfg(tree, denominator_node);
     }

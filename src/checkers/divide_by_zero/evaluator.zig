@@ -217,6 +217,9 @@ fn evalExpr(
             const params = tree.builtinCallParams(&buf, @enumFromInt(expr_node)) orelse break :blk null;
             if (std.mem.eql(u8, builtin_name, "@as")) {
                 if (params.len < 2) break :blk null;
+                if (isLikelyFloatTypeExpr(tree, @intFromEnum(params[0]))) {
+                    break :blk null;
+                }
                 break :blk evalExpr(tree, @intFromEnum(params[1]), state, engine, cfg, depth + 1);
             }
             break :blk null;
@@ -232,7 +235,7 @@ fn negateValue(value: AbstractValue) ?AbstractValue {
             break :blk .{ .concrete_int = -v };
         },
         .int_range => |r| blk: {
-            if (r.min == std.math.minInt(i64)) break :blk null;
+            if (r.min == std.math.minInt(i64) or r.max == std.math.minInt(i64)) break :blk null;
             break :blk .{ .int_range = .{ .min = -r.max, .max = -r.min } };
         },
         else => null,
@@ -476,9 +479,12 @@ fn isLikelyFloatTypeExpr(tree: *const std.zig.Ast, node: u32) bool {
         },
         .optional_type,
         .address_of,
-        .grouped_expression,
         => blk: {
             const child = @intFromEnum(tree.nodes.items(.data)[node].node);
+            break :blk isLikelyFloatTypeExpr(tree, child);
+        },
+        .grouped_expression => blk: {
+            const child = @intFromEnum(tree.nodes.items(.data)[node].node_and_token[0]);
             break :blk isLikelyFloatTypeExpr(tree, child);
         },
         else => false,
