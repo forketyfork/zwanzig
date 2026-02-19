@@ -13,5 +13,4 @@ test-analyzer-cache/
 .DS_Store
 .stepcat/
 .architect/
-.tmp/
 .idea/
