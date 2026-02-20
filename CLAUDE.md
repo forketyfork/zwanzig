@@ -54,6 +54,10 @@ Uses Nix flakes for reproducible dev environment (Zig 0.15.2). Enter with:
 nix develop
 ```
 
+## Infrastructure
+
+This project uses GitHub both as a code host, CI and issue tracker. Use the managing-github skill for related operations.
+
 ## Architecture
 
 ### Data Flow
