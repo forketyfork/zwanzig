@@ -1,5 +1,4 @@
 const std = @import("std");
-const log = std.log.scoped(.slice_bounds_engine);
 const checker_mod = @import("../checker.zig");
 const Checker = checker_mod.Checker;
 const CheckerError = checker_mod.CheckerError;
@@ -8,7 +7,6 @@ const Source = @import("../source.zig").Source;
 const ids = @import("../ids.zig");
 const engine_mod = @import("../engine.zig");
 const AnalysisEngine = engine_mod.AnalysisEngine;
-const AbstractValue = @import("../engine/value.zig").AbstractValue;
 const scan = @import("slice_bounds/scan.zig");
 
 pub const SliceBoundsEngineChecker = struct {

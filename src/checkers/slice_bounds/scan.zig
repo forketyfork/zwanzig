@@ -9,14 +9,9 @@ const cfg_mod = @import("../../cfg.zig");
 const Cfg = cfg_mod.Cfg;
 const engine_mod = @import("../../engine.zig");
 const AnalysisEngine = engine_mod.AnalysisEngine;
-const AbstractValue = @import("../../engine/value.zig").AbstractValue;
 const evaluator = @import("evaluator.zig");
 
-const BoundsSite = struct {
-    ast_node: u32,
-    array_or_slice_node: u32,
-    index_node: u32,
-};
+const BoundsSite = evaluator.BoundsSite;
 
 const BoundsOutcome = enum {
     safe,
@@ -162,8 +157,8 @@ fn assessWithCfg(
 fn assessWithoutCfg(tree: *const std.zig.Ast, site: BoundsSite) BoundsOutcome {
     return switch (evaluator.assessBoundsRiskWithoutState(tree, site)) {
         .definitely_oob => .definitely_oob,
-        .possibly_oob, .unknown => .possibly_oob,
-        .safe => .safe,
+        .possibly_oob => .possibly_oob,
+        .unknown, .safe => .safe,
     };
 }
 

@@ -1,6 +1,6 @@
 const std = @import("std");
 const AbstractValue = @import("../../engine/value.zig").AbstractValue;
-const State = @import("../../engine/state.zig").State;
+const ProgramState = @import("../../engine/state.zig").ProgramState;
 const ids = @import("../../ids.zig");
 const Cfg = @import("../../cfg.zig").Cfg;
 const AnalysisEngine = @import("../../engine.zig").AnalysisEngine;
@@ -21,7 +21,7 @@ pub const BoundsSite = struct {
 pub fn assessBoundsRiskWithState(
     tree: *const std.zig.Ast,
     site: BoundsSite,
-    state: *const State,
+    state: *const ProgramState,
     engine: *AnalysisEngine,
     cfg: *const Cfg,
 ) BoundsRisk {
@@ -108,7 +108,7 @@ fn compareBounds(index_value: AbstractValue, length_value: AbstractValue) Bounds
     return .unknown;
 }
 
-fn evaluateExpr(tree: *const std.zig.Ast, node: u32, state: *const State) AbstractValue {
+fn evaluateExpr(tree: *const std.zig.Ast, node: u32, state: *const ProgramState) AbstractValue {
     const tags = tree.nodes.items(.tag);
     const datas = tree.nodes.items(.data);
 
@@ -127,7 +127,7 @@ fn evaluateExpr(tree: *const std.zig.Ast, node: u32, state: *const State) Abstra
         .identifier => {
             const token = tree.nodes.items(.main_token)[node];
             const var_id = ids.varId(token);
-            return state.getValue(var_id);
+            return state.getVar(var_id) orelse .unknown;
         },
         .add, .sub => {
             const pair = datas[node].node_and_node;
@@ -158,7 +158,7 @@ fn evaluateExprWithoutState(tree: *const std.zig.Ast, node: u32) AbstractValue {
     }
 }
 
-fn evaluateLength(tree: *const std.zig.Ast, node: u32, state: *const State) AbstractValue {
+fn evaluateLength(tree: *const std.zig.Ast, node: u32, state: *const ProgramState) AbstractValue {
     _ = state;
     return evaluateLengthWithoutState(tree, node);
 }

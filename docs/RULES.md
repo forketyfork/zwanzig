@@ -659,3 +659,52 @@ Notes:
 - `try std.Thread.spawn(...)` ignores the `try_error` edge when checking join guarantees (no thread is created on the error path).
 - Joining must be guaranteed on all paths; a join in only some branches still reports an escape.
 - Capturing allocator-backed or static data does not trigger this rule.
+
+### slice-bounds-engine
+
+Detects array and slice out-of-bounds access using path-sensitive analysis with abstract values.
+
+The checker tracks index values and array/slice lengths through the dataflow engine. It reports:
+
+- **Definite OOB**: index is provably outside the valid range on all reaching paths
+- **Possible OOB**: index may be outside the valid range on some paths
+
+Supported sources of length information:
+- Array literals (e.g., `[_]u8{ 1, 2, 3 }` — length 3)
+- String literals (e.g., `"hello"` — length 5)
+
+Index values are tracked as concrete integers or ranges via the `AbstractValue` system.
+
+**Bad:**
+```zig
+fn definiteOob() void {
+    const arr = [_]u8{ 1, 2, 3 };
+    _ = arr[5]; // index 5 >= length 3
+}
+
+fn loopOob() void {
+    const arr = [_]u8{ 1, 2, 3 };
+    var i: usize = 0;
+    while (i < 10) : (i += 1) {
+        _ = arr[i]; // i range [0..10], length 3
+    }
+}
+```
+
+**Good:**
+```zig
+fn safeAccess() void {
+    const arr = [_]u8{ 1, 2, 3 };
+    _ = arr[2]; // index 2 < length 3
+
+    var i: usize = 0;
+    while (i < 3) : (i += 1) {
+        _ = arr[i]; // i range [0..3], safe
+    }
+}
+```
+
+Limitations:
+- Does not track dynamic `slice.len` from runtime operations
+- No interprocedural bounds tracking
+- Handles basic `+`/`-` arithmetic on indices only
