@@ -18,6 +18,7 @@ const UnreachableCodeChecker = @import("../checkers/unreachable_code_checker.zig
 const StoreViolationsEngineChecker = @import("../checkers/store_violations_engine.zig").StoreViolationsEngineChecker;
 const StackEscapeEngineChecker = @import("../checkers/stack_escape_engine.zig").StackEscapeEngineChecker;
 const DivideByZeroEngineChecker = @import("../checkers/divide_by_zero_engine.zig").DivideByZeroEngineChecker;
+const SliceBoundsEngineChecker = @import("../checkers/slice_bounds_engine.zig").SliceBoundsEngineChecker;
 
 const Analyzer = analyzer_mod.Analyzer;
 
@@ -43,4 +44,5 @@ pub fn registerDefaults(analyzer: *Analyzer) !void {
     try analyzer.registerChecker(&StoreViolationsEngineChecker.checker);
     try analyzer.registerChecker(&StackEscapeEngineChecker.checker);
     try analyzer.registerChecker(&DivideByZeroEngineChecker.checker);
+    try analyzer.registerChecker(&SliceBoundsEngineChecker.checker);
 }
