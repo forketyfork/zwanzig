@@ -55,11 +55,12 @@ fn compareBounds(index_value: AbstractValue, length_value: AbstractValue) Bounds
         const range = index_value.int_range;
         const len = length_value.concrete_int;
 
-        // If minimum index is negative or maximum index is >= length, definitely OOB
-        if (range.min < 0 or range.min >= len) {
+        // If the entire range is beyond bounds, definitely OOB
+        if (range.max < 0 or range.min >= len) {
             return .definitely_oob;
         }
-        if (range.max >= len) {
+        // If the range partially overlaps invalid indices, possibly OOB
+        if (range.min < 0 or range.max >= len) {
             return .possibly_oob;
         }
         return .safe;
