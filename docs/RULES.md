@@ -682,12 +682,13 @@ fn definiteOob() void {
     _ = arr[5]; // index 5 >= length 3
 }
 
-fn loopOob() void {
+fn possibleOob(flag: bool) void {
     const arr = [_]u8{ 1, 2, 3 };
-    var i: usize = 0;
-    while (i < 10) : (i += 1) {
-        _ = arr[i]; // i range [0..10], length 3
+    var idx: i32 = 1;
+    if (flag) {
+        idx = 5;
     }
+    _ = arr[@intCast(idx)]; // idx may be 1 or 5
 }
 ```
 
@@ -696,11 +697,7 @@ fn loopOob() void {
 fn safeAccess() void {
     const arr = [_]u8{ 1, 2, 3 };
     _ = arr[2]; // index 2 < length 3
-
-    var i: usize = 0;
-    while (i < 3) : (i += 1) {
-        _ = arr[i]; // i range [0..3], safe
-    }
+    _ = arr[1];
 }
 ```
 
@@ -708,3 +705,4 @@ Limitations:
 - Does not track dynamic `slice.len` from runtime operations
 - No interprocedural bounds tracking
 - Handles basic `+`/`-` arithmetic on indices only
+- Loop-derived index ranges may be too imprecise to report in all cases

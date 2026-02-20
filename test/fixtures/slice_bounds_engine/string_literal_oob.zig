@@ -1,8 +1,7 @@
-// This test checks detection of out-of-bounds on string literals
+// EXPECT: rule=slice-bounds-engine severity=error message=definitely
 const std = @import("std");
 
 fn testStringOOB() void {
     const str = "hello";
-    // EXPECT: slice-bounds-engine: Array/slice index is definitely out of bounds
     _ = str[10];
 }

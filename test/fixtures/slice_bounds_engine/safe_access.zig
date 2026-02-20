@@ -1,4 +1,4 @@
-// This test checks that safe accesses are not flagged
+// EXPECT: none
 const std = @import("std");
 
 fn testSafeAccess() void {

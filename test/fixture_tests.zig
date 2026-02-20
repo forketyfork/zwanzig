@@ -22,6 +22,7 @@ const UnreachableCodeChecker = src.checkers.unreachable_code_checker.Unreachable
 const StoreViolationsEngineChecker = src.checkers.store_violations_engine.StoreViolationsEngineChecker;
 const StackEscapeEngineChecker = src.checkers.stack_escape_engine.StackEscapeEngineChecker;
 const DivideByZeroEngineChecker = src.checkers.divide_by_zero_engine.DivideByZeroEngineChecker;
+const SliceBoundsEngineChecker = src.checkers.slice_bounds_engine.SliceBoundsEngineChecker;
 
 test "dupe_import fixtures" {
     try runFixturesInDir(std.testing.allocator, &DupeImportRule.rule, "test/fixtures/dupe_import");
@@ -89,4 +90,8 @@ test "stack_escape_engine fixtures" {
 
 test "divide_by_zero_engine fixtures" {
     try runCheckerFixturesInDir(std.testing.allocator, &DivideByZeroEngineChecker.checker, "test/fixtures/divide_by_zero_engine");
+}
+
+test "slice_bounds_engine fixtures" {
+    try runCheckerFixturesInDir(std.testing.allocator, &SliceBoundsEngineChecker.checker, "test/fixtures/slice_bounds_engine");
 }

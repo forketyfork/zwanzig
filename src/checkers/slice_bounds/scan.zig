@@ -163,13 +163,38 @@ fn assessWithoutCfg(tree: *const std.zig.Ast, site: BoundsSite) BoundsOutcome {
 }
 
 fn findCfgNodeForAst(cfg: *const Cfg, ast_node: u32, tree: *const std.zig.Ast) ?ids.CfgNodeId {
-    _ = tree;
-    for (cfg.nodes.items) |node| {
+    const main_tokens = tree.nodes.items(.main_token);
+    const token_starts = tree.tokens.items(.start);
+
+    if (ast_node >= main_tokens.len) return null;
+
+    for (cfg.nodes.items, 0..) |node, idx| {
         if (node.ir_node.ast_node) |node_ast| {
-            if (node_ast == ast_node) return node.index;
+            if (node_ast == ast_node) return ids.cfgId(@intCast(idx));
         }
     }
-    return null;
+
+    const target_token = main_tokens[ast_node];
+    if (target_token >= token_starts.len) return null;
+    const target_pos = token_starts[target_token];
+
+    var best_match: ?ids.CfgNodeId = null;
+    var best_start: u32 = 0;
+
+    for (cfg.nodes.items, 0..) |node, idx| {
+        if (node.ir_node.ast_node) |node_ast| {
+            if (node_ast >= main_tokens.len) continue;
+            const cfg_token = main_tokens[node_ast];
+            if (cfg_token >= token_starts.len) continue;
+            const cfg_pos = token_starts[cfg_token];
+            if (cfg_pos <= target_pos and cfg_pos >= best_start) {
+                best_start = cfg_pos;
+                best_match = ids.cfgId(@intCast(idx));
+            }
+        }
+    }
+
+    return best_match;
 }
 
 fn emitDiagnostic(
