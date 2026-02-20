@@ -59,7 +59,7 @@ Without arguments, zwanzig scans the current directory for `.zig` files. It skip
 Add zwanzig to your project:
 
 ```bash
-zig fetch --save https://github.com/forketyfork/zwanzig/archive/refs/tags/v0.9.0.tar.gz
+zig fetch --save https://github.com/forketyfork/zwanzig/archive/refs/tags/v0.10.0.tar.gz
 ```
 
 Then wire a lint step in your `build.zig`:
