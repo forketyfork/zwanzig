@@ -1,4 +1,4 @@
-// EXPECT: none
+// EXPECT: line=13 rule=deinit-lifecycle severity=hint message=fallible reinitialization
 const Obj = struct {
     fn deinit(_: *Obj) void {}
 };
