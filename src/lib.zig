@@ -23,6 +23,7 @@ pub const rules = struct {
     pub const sentinel_alloc = @import("rules/sentinel_alloc.zig");
     pub const unused_parameter = @import("rules/unused_parameter.zig");
     pub const return_local_pointer = @import("rules/return_local_pointer.zig");
+    pub const deinit_lifecycle = @import("rules/deinit_lifecycle.zig");
 };
 
 pub const checkers = struct {

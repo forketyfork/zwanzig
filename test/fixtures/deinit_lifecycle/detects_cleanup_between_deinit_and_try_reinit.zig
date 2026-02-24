@@ -1,0 +1,17 @@
+// EXPECT: line=14 rule=deinit-lifecycle severity=hint message=fallible reinitialization
+const Obj = struct {
+    fn deinit(_: *Obj) void {}
+    fn reset(_: *Obj) void {}
+};
+
+fn makeObj() !Obj {
+    return Obj{};
+}
+
+fn run() !void {
+    var value = Obj{};
+    defer value.deinit();
+    value.deinit();
+    value.reset();
+    value = try makeObj();
+}
