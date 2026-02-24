@@ -17,6 +17,7 @@ const IdentifierStyleRule = src.rules.identifier_style.IdentifierStyleRule;
 const SentinelAllocRule = src.rules.sentinel_alloc.SentinelAllocRule;
 const UnusedParameterRule = src.rules.unused_parameter.UnusedParameterRule;
 const ReturnLocalPointerRule = src.rules.return_local_pointer.ReturnLocalPointerRule;
+const DeinitLifecycleRule = src.rules.deinit_lifecycle.DeinitLifecycleRule;
 const OptionalUnwrapEngineChecker = src.checkers.optional_unwrap_engine.OptionalUnwrapEngineChecker;
 const UnreachableCodeChecker = src.checkers.unreachable_code_checker.UnreachableCodeChecker;
 const StoreViolationsEngineChecker = src.checkers.store_violations_engine.StoreViolationsEngineChecker;
@@ -70,6 +71,10 @@ test "unused_parameter fixtures" {
 
 test "return_local_ptr fixtures" {
     try runFixturesInDir(std.testing.allocator, &ReturnLocalPointerRule.rule, "test/fixtures/return_local_ptr");
+}
+
+test "deinit_lifecycle fixtures" {
+    try runFixturesInDir(std.testing.allocator, &DeinitLifecycleRule.rule, "test/fixtures/deinit_lifecycle");
 }
 
 test "optional_unwrap fixtures" {

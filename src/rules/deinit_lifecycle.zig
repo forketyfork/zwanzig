@@ -1,0 +1,443 @@
+const std = @import("std");
+const Rule = @import("../rule.zig").Rule;
+const Source = @import("../source.zig").Source;
+const Diagnostic = @import("../diagnostic.zig").Diagnostic;
+const RuleError = @import("../rule.zig").RuleError;
+const ast_walk = @import("../ast_walk.zig");
+const call_utils = @import("../analysis/call_utils.zig");
+
+const Ast = std.zig.Ast;
+
+pub const DeinitLifecycleRule = struct {
+    pub const rule: Rule = .{
+        .name = "deinit-lifecycle",
+        .default_severity = .warning,
+        .checkFn = check,
+    };
+
+    const DeferredCleanup = struct {
+        receiver: []const u8,
+        method: []const u8,
+        has_defer: bool = false,
+        has_errdefer: bool = false,
+        defer_stmt: ?u32 = null,
+        errdefer_stmt: ?u32 = null,
+    };
+
+    const MethodCall = struct {
+        receiver: []const u8,
+        method: []const u8,
+    };
+
+    const cleanup_methods = [_][]const u8{
+        "deinit",
+        "close",
+        "destroy",
+        "release",
+        "free",
+        "reset",
+        "clear",
+        "clearAndFree",
+        "cancel",
+        "stop",
+        "join",
+    };
+
+    fn check(src: *Source, allocator: std.mem.Allocator, diagnostics: *std.ArrayList(Diagnostic)) RuleError!void {
+        const tree = try src.ast();
+        const tags = tree.nodes.items(.tag);
+        const datas = tree.nodes.items(.data);
+
+        var scanner = Scanner{
+            .src = src,
+            .tree = tree,
+            .tags = tags,
+            .datas = datas,
+            .allocator = allocator,
+            .diagnostics = diagnostics,
+            .active_deinit_receivers = .empty,
+        };
+        defer scanner.active_deinit_receivers.deinit(allocator);
+
+        for (tags, 0..) |tag, i| {
+            switch (tag) {
+                .fn_decl => {
+                    const body = @intFromEnum(datas[i].node_and_node[1]);
+                    if (body != 0) {
+                        try scanner.scanNode(@intCast(body));
+                    }
+                },
+                .test_decl => {
+                    const body = @intFromEnum(datas[i].opt_token_and_node[1]);
+                    if (body != 0) {
+                        try scanner.scanNode(@intCast(body));
+                    }
+                },
+                else => {},
+            }
+        }
+    }
+
+    const Scanner = struct {
+        src: *Source,
+        tree: *const Ast,
+        tags: []const Ast.Node.Tag,
+        datas: []const Ast.Node.Data,
+        allocator: std.mem.Allocator,
+        diagnostics: *std.ArrayList(Diagnostic),
+        active_deinit_receivers: std.ArrayList([]const u8),
+
+        fn scanNode(self: *Scanner, node: u32) RuleError!void {
+            if (node == 0 or node >= self.tags.len) return;
+
+            switch (self.tags[node]) {
+                .fn_decl, .test_decl => return,
+                .block, .block_semicolon, .block_two, .block_two_semicolon => try self.scanBlock(node),
+                else => {
+                    const child = struct {
+                        fn visit(_: *const Ast, child_node: u32, scanner: *Scanner) RuleError!void {
+                            try scanner.scanNode(child_node);
+                        }
+                    };
+                    try ast_walk.walkChildren(Scanner, self.tree, node, self, child.visit);
+                },
+            }
+        }
+
+        fn scanBlock(self: *Scanner, block_node: u32) RuleError!void {
+            var scratch: [2]u32 = undefined;
+            const statements = self.blockStatements(block_node, &scratch);
+            if (statements.len == 0) return;
+
+            var deferred_cleanups: std.ArrayList(DeferredCleanup) = .empty;
+            defer deferred_cleanups.deinit(self.allocator);
+
+            for (statements) |stmt| {
+                const is_defer = switch (self.tags[stmt]) {
+                    .@"defer" => true,
+                    .@"errdefer" => false,
+                    else => continue,
+                };
+
+                if (self.extractDeferredMethodCall(stmt)) |call| {
+                    try self.recordDeferredCleanup(
+                        &deferred_cleanups,
+                        call.receiver,
+                        call.method,
+                        stmt,
+                        is_defer,
+                    );
+                }
+            }
+
+            try self.reportDuplicateDeferredCleanup(deferred_cleanups.items);
+
+            const active_base = self.active_deinit_receivers.items.len;
+            defer self.active_deinit_receivers.shrinkRetainingCapacity(active_base);
+
+            for (deferred_cleanups.items) |cleanup| {
+                if (!std.mem.eql(u8, cleanup.method, "deinit")) continue;
+                if (!self.hasActiveReceiver(cleanup.receiver)) {
+                    try self.active_deinit_receivers.append(self.allocator, cleanup.receiver);
+                }
+            }
+
+            for (statements, 0..) |stmt, idx| {
+                if (self.extractDirectDeinitCall(stmt)) |receiver| {
+                    if (self.hasActiveReceiver(receiver) and self.findTryReinitAfterCleanupOnly(statements[idx + 1 ..], receiver) != null) {
+                        try self.emitDeinitBeforeTryReinit(stmt, receiver);
+                    }
+                }
+
+                try self.scanNode(stmt);
+            }
+        }
+
+        fn blockStatements(self: *const Scanner, block_node: u32, scratch: *[2]u32) []const u32 {
+            switch (self.tags[block_node]) {
+                .block, .block_semicolon => {
+                    const range = self.datas[block_node].extra_range;
+                    const start = @intFromEnum(range.start);
+                    const end = @intFromEnum(range.end);
+                    return self.tree.extra_data[start..end];
+                },
+                .block_two, .block_two_semicolon => {
+                    const nodes = self.datas[block_node].opt_node_and_opt_node;
+                    var count: usize = 0;
+                    if (nodes[0].unwrap()) |n| {
+                        scratch[count] = @intFromEnum(n);
+                        count += 1;
+                    }
+                    if (nodes[1].unwrap()) |n| {
+                        scratch[count] = @intFromEnum(n);
+                        count += 1;
+                    }
+                    return scratch[0..count];
+                },
+                else => return &.{},
+            }
+        }
+
+        fn extractDeferredMethodCall(self: *const Scanner, stmt: u32) ?MethodCall {
+            const body: u32 = switch (self.tags[stmt]) {
+                .@"defer" => @intFromEnum(self.datas[stmt].node),
+                .@"errdefer" => @intFromEnum(self.datas[stmt].opt_token_and_node[1]),
+                else => return null,
+            };
+            if (body == 0 or body >= self.tags.len) return null;
+
+            if (self.extractMethodCall(body)) |call| return call;
+
+            if (self.tags[body] == .block or self.tags[body] == .block_semicolon or
+                self.tags[body] == .block_two or self.tags[body] == .block_two_semicolon)
+            {
+                var scratch: [2]u32 = undefined;
+                const statements = self.blockStatements(body, &scratch);
+                if (statements.len == 1) {
+                    return self.extractMethodCall(statements[0]);
+                }
+            }
+
+            return null;
+        }
+
+        fn extractDirectDeinitCall(self: *const Scanner, stmt: u32) ?[]const u8 {
+            const call = self.extractMethodCall(stmt) orelse return null;
+            if (!std.mem.eql(u8, call.method, "deinit")) return null;
+            return call.receiver;
+        }
+
+        fn extractMethodCall(self: *const Scanner, expr_node: u32) ?MethodCall {
+            if (expr_node >= self.tags.len) return null;
+            if (!call_utils.isCallNode(self.tags[expr_node])) return null;
+
+            var call_buf: [1]Ast.Node.Index = undefined;
+            const full_call = self.tree.fullCall(&call_buf, @enumFromInt(expr_node)) orelse return null;
+            const callee = @intFromEnum(full_call.ast.fn_expr);
+            if (callee == 0 or callee >= self.tags.len or self.tags[callee] != .field_access) return null;
+
+            const token_tags = self.tree.tokens.items(.tag);
+            const field_access = self.datas[callee].node_and_token;
+            const receiver_node = @intFromEnum(field_access[0]);
+            const method_token = field_access[1];
+
+            if (method_token >= token_tags.len or token_tags[method_token] != .identifier) return null;
+            if (receiver_node == 0 or receiver_node >= self.tags.len or self.tags[receiver_node] != .identifier) return null;
+
+            const receiver_token = self.tree.nodes.items(.main_token)[receiver_node];
+            if (receiver_token >= token_tags.len or token_tags[receiver_token] != .identifier) return null;
+
+            return .{
+                .receiver = self.tree.tokenSlice(receiver_token),
+                .method = self.tree.tokenSlice(method_token),
+            };
+        }
+
+        fn recordDeferredCleanup(
+            self: *Scanner,
+            cleanups: *std.ArrayList(DeferredCleanup),
+            receiver: []const u8,
+            method: []const u8,
+            stmt: u32,
+            is_defer: bool,
+        ) RuleError!void {
+            for (cleanups.items) |*cleanup| {
+                if (std.mem.eql(u8, cleanup.receiver, receiver) and std.mem.eql(u8, cleanup.method, method)) {
+                    if (is_defer) {
+                        cleanup.has_defer = true;
+                        if (cleanup.defer_stmt == null) cleanup.defer_stmt = stmt;
+                    } else {
+                        cleanup.has_errdefer = true;
+                        if (cleanup.errdefer_stmt == null) cleanup.errdefer_stmt = stmt;
+                    }
+                    return;
+                }
+            }
+
+            var cleanup = DeferredCleanup{
+                .receiver = receiver,
+                .method = method,
+            };
+            if (is_defer) {
+                cleanup.has_defer = true;
+                cleanup.defer_stmt = stmt;
+            } else {
+                cleanup.has_errdefer = true;
+                cleanup.errdefer_stmt = stmt;
+            }
+            try cleanups.append(self.allocator, cleanup);
+        }
+
+        fn reportDuplicateDeferredCleanup(self: *Scanner, cleanups: []const DeferredCleanup) RuleError!void {
+            for (cleanups) |cleanup| {
+                if (!(cleanup.has_defer and cleanup.has_errdefer)) continue;
+                const report_stmt = cleanup.errdefer_stmt orelse cleanup.defer_stmt orelse continue;
+                try self.emitDuplicateDeferredCleanup(report_stmt, cleanup.receiver, cleanup.method);
+            }
+        }
+
+        fn hasActiveReceiver(self: *const Scanner, receiver: []const u8) bool {
+            for (self.active_deinit_receivers.items) |active| {
+                if (std.mem.eql(u8, active, receiver)) return true;
+            }
+            return false;
+        }
+
+        fn findTryReinitAfterCleanupOnly(self: *const Scanner, statements: []const u32, receiver: []const u8) ?u32 {
+            for (statements) |stmt| {
+                if (self.assignmentToReceiverIsTry(stmt, receiver)) |is_try| {
+                    return if (is_try) stmt else null;
+                }
+                if (self.isAllowedLifecycleStep(stmt, receiver)) continue;
+                return null;
+            }
+            return null;
+        }
+
+        fn assignmentToReceiverIsTry(self: *const Scanner, stmt: u32, receiver: []const u8) ?bool {
+            if (stmt >= self.tags.len or !isAssignTag(self.tags[stmt])) return null;
+
+            const pair = self.datas[stmt].node_and_node;
+            const lhs = @intFromEnum(pair[0]);
+            const rhs = @intFromEnum(pair[1]);
+            if (lhs == 0 or lhs >= self.tags.len or self.tags[lhs] != .identifier) return null;
+
+            const token_tags = self.tree.tokens.items(.tag);
+            const lhs_token = self.tree.nodes.items(.main_token)[lhs];
+            if (lhs_token >= token_tags.len or token_tags[lhs_token] != .identifier) return null;
+            if (!std.mem.eql(u8, self.tree.tokenSlice(lhs_token), receiver)) return null;
+
+            if (rhs == 0 or rhs >= self.tags.len) return false;
+            return self.tags[rhs] == .@"try";
+        }
+
+        fn isCleanupCallForReceiver(self: *const Scanner, stmt: u32, receiver: []const u8) bool {
+            const call = self.extractMethodCall(stmt) orelse return false;
+            if (!std.mem.eql(u8, call.receiver, receiver)) return false;
+            return isCleanupMethod(call.method);
+        }
+
+        fn isAllowedLifecycleStep(self: *const Scanner, stmt: u32, receiver: []const u8) bool {
+            if (self.isCleanupCallForReceiver(stmt, receiver)) return true;
+
+            if (self.extractMethodCall(stmt)) |call| {
+                if (std.mem.eql(u8, call.receiver, receiver)) return false;
+                return self.hasActiveReceiver(call.receiver) and isCleanupMethod(call.method);
+            }
+
+            if (self.extractAssignedReceiverTry(stmt)) |assign| {
+                if (std.mem.eql(u8, assign.receiver, receiver)) return false;
+                return assign.is_try and self.hasActiveReceiver(assign.receiver);
+            }
+
+            return false;
+        }
+
+        const AssignmentInfo = struct {
+            receiver: []const u8,
+            is_try: bool,
+        };
+
+        fn extractAssignedReceiverTry(self: *const Scanner, stmt: u32) ?AssignmentInfo {
+            if (stmt >= self.tags.len or !isAssignTag(self.tags[stmt])) return null;
+
+            const pair = self.datas[stmt].node_and_node;
+            const lhs = @intFromEnum(pair[0]);
+            const rhs = @intFromEnum(pair[1]);
+            if (lhs == 0 or lhs >= self.tags.len or self.tags[lhs] != .identifier) return null;
+
+            const token_tags = self.tree.tokens.items(.tag);
+            const lhs_token = self.tree.nodes.items(.main_token)[lhs];
+            if (lhs_token >= token_tags.len or token_tags[lhs_token] != .identifier) return null;
+            if (rhs == 0 or rhs >= self.tags.len) return null;
+
+            return .{
+                .receiver = self.tree.tokenSlice(lhs_token),
+                .is_try = self.tags[rhs] == .@"try",
+            };
+        }
+
+        fn emitDuplicateDeferredCleanup(
+            self: *Scanner,
+            stmt: u32,
+            receiver: []const u8,
+            method: []const u8,
+        ) RuleError!void {
+            const loc = try self.src.tokenLocation(self.tree.nodes.items(.main_token)[stmt]);
+            const message = try std.fmt.allocPrint(
+                self.allocator,
+                "'{s}.{s}' is registered in both defer and errdefer within the same scope; this can run cleanup twice on error unwind",
+                .{ receiver, method },
+            );
+            defer self.allocator.free(message);
+
+            const diag = try Diagnostic.initAtLocation(
+                self.allocator,
+                self.src.getFilePath(),
+                rule.name,
+                .warning,
+                message,
+                loc.line,
+                loc.column,
+            );
+            try self.diagnostics.append(self.allocator, diag);
+        }
+
+        fn emitDeinitBeforeTryReinit(
+            self: *Scanner,
+            stmt: u32,
+            receiver: []const u8,
+        ) RuleError!void {
+            const loc = try self.src.tokenLocation(self.tree.nodes.items(.main_token)[stmt]);
+            const message = try std.fmt.allocPrint(
+                self.allocator,
+                "'{s}.deinit()' appears before a fallible reinitialization while deferred cleanup is active; error unwind may deinitialize '{s}' twice",
+                .{ receiver, receiver },
+            );
+            defer self.allocator.free(message);
+
+            const diag = try Diagnostic.initAtLocation(
+                self.allocator,
+                self.src.getFilePath(),
+                rule.name,
+                .hint,
+                message,
+                loc.line,
+                loc.column,
+            );
+            try self.diagnostics.append(self.allocator, diag);
+        }
+    };
+
+    fn isCleanupMethod(method: []const u8) bool {
+        for (cleanup_methods) |known_method| {
+            if (std.mem.eql(u8, method, known_method)) return true;
+        }
+        return false;
+    }
+
+    fn isAssignTag(tag: Ast.Node.Tag) bool {
+        return switch (tag) {
+            .assign,
+            .assign_mul,
+            .assign_div,
+            .assign_mod,
+            .assign_add,
+            .assign_sub,
+            .assign_shl,
+            .assign_shl_sat,
+            .assign_shr,
+            .assign_bit_and,
+            .assign_bit_xor,
+            .assign_bit_or,
+            .assign_mul_wrap,
+            .assign_add_wrap,
+            .assign_sub_wrap,
+            .assign_mul_sat,
+            .assign_add_sat,
+            .assign_sub_sat,
+            => true,
+            else => false,
+        };
+    }
+};

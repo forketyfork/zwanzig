@@ -305,6 +305,59 @@ const members = getMembers(tree, node_idx, &buf);
 
 This rule complements `stack-escape-engine` by catching patterns where the escape happens through an intermediate function call that the dataflow analysis can't track.
 
+### deinit-lifecycle
+
+Detects two lifecycle patterns that often produce double-cleanup bugs during error unwind:
+
+- **Warning:** the same cleanup call (for example, `x.deinit()`) is registered in both `defer` and `errdefer` within the same block.
+- **Hint:** a cleanup call such as `x.deinit()` or `x.close()` is followed later in the same block by `x = try ...`, while a deferred cleanup for the same method is active. Any intervening statements are allowed, as long as the receiver is not assigned a new value first.
+
+The hint does not trigger when:
+
+- The reinitialization is infallible (`x = make()`), since no error unwind can occur.
+- The receiver is assigned a non-`try` value before the `try` assignment, resetting it to a valid state.
+- The active deferred cleanup uses a different method than the direct call (`defer x.close()` with `x.deinit()` does not match).
+
+**Bad (warning):**
+```zig
+fn run() !void {
+    var value = Obj{};
+    errdefer value.deinit();
+    defer value.deinit(); // same cleanup also in errdefer
+}
+```
+
+**Potentially risky (hint), applies to any cleanup method:**
+```zig
+fn run() !void {
+    var stream = Stream{};
+    defer stream.close();
+    stream.close();
+    stream = try reopen(); // if reopen() fails, defer calls close() on already-closed stream
+}
+```
+
+**Allowed — infallible reinit:**
+```zig
+fn run() !void {
+    var value = Obj{};
+    defer value.deinit();
+    value.deinit();
+    value = makeObj(); // no try, no error unwind possible
+}
+```
+
+**Allowed — non-try assignment before try:**
+```zig
+fn run() !void {
+    var value = Obj{};
+    defer value.deinit();
+    value.deinit();
+    value = makeObj();        // resets receiver to a valid state
+    value = try makeObjFallible(); // no double-deinit risk now
+}
+```
+
 ### identifier-style
 
 Enforces Zig naming conventions:

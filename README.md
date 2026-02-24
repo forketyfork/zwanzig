@@ -56,6 +56,7 @@ AST/token rules:
 - shadowed-variable: name reuse across scopes
 - sentinel-alloc: sentinel-terminated allocations losing sentinel type
 - identifier-style: naming conventions for types/functions/values
+- deinit-lifecycle: risky cleanup/reinit lifecycle patterns around `defer`/`errdefer`
 
 Engine-backed checkers:
 
