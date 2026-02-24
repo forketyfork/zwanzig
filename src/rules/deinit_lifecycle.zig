@@ -125,6 +125,7 @@ pub const DeinitLifecycleRule = struct {
                 };
 
                 if (self.extractDeferredMethodCall(stmt)) |call| {
+                    if (!isCleanupMethod(call.method)) continue;
                     try self.recordDeferredCleanup(
                         &deferred_cleanups,
                         call.receiver,
@@ -140,16 +141,21 @@ pub const DeinitLifecycleRule = struct {
             const active_base = self.active_cleanup_receivers.items.len;
             defer self.active_cleanup_receivers.shrinkRetainingCapacity(active_base);
 
-            for (deferred_cleanups.items) |cleanup| {
-                if (!self.hasActiveCleanup(cleanup.receiver, cleanup.method)) {
-                    try self.active_cleanup_receivers.append(self.allocator, .{
-                        .receiver = cleanup.receiver,
-                        .method = cleanup.method,
-                    });
-                }
-            }
-
             for (statements, 0..) |stmt, idx| {
+                switch (self.tags[stmt]) {
+                    .@"defer", .@"errdefer" => {
+                        if (self.extractDeferredMethodCall(stmt)) |call| {
+                            if (isCleanupMethod(call.method) and !self.hasActiveCleanup(call.receiver, call.method)) {
+                                try self.active_cleanup_receivers.append(self.allocator, .{
+                                    .receiver = call.receiver,
+                                    .method = call.method,
+                                });
+                            }
+                        }
+                    },
+                    else => {},
+                }
+
                 if (self.extractDirectCleanupCall(stmt)) |call| {
                     if (self.hasActiveCleanup(call.receiver, call.method) and
                         self.findTryReinit(statements[idx + 1 ..], call.receiver) != null)
