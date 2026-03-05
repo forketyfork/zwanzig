@@ -2,7 +2,7 @@
 
 ## Getting started
 
-You'll need Zig 0.11.0 or later and Git.
+You'll need Zig 0.15.2 and Git.
 
 ```bash
 git clone https://github.com/forketyfork/zwanzig.git

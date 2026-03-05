@@ -131,7 +131,7 @@ zig build run -- test/fixtures/store_violations_engine/fixture_name.zig
 - Zig standard formatting via `zig fmt`
 - Tests colocated with implementation in the same file
 - Rules in `src/rules/` directory, one file per rule
-- **ArrayList initialization**: In Zig 0.15, use `.empty` to initialize ArrayLists (e.g., `var list: std.ArrayList(T) = .empty;`). The allocator is passed to methods like `append(allocator, item)` and `deinit(allocator)`. Do NOT use the old `.init(allocator)` pattern.
+- **ArrayList initialization**: In Zig 0.15.2, use `.empty` to initialize ArrayLists (e.g., `var list: std.ArrayList(T) = .empty;`). The allocator is passed to methods like `append(allocator, item)` and `deinit(allocator)`. Do NOT use the old `.init(allocator)` pattern.
 
 ## Temporary Files
 

@@ -1433,7 +1433,7 @@ pub const StackEscapeEngineChecker = struct {
                 var buf: [2]std.zig.Ast.Node.Index = undefined;
                 const params = tree.builtinCallParams(&buf, @enumFromInt(expr_node)) orelse return null;
                 if (params.len == 0) return null;
-                // @ptrCast is a single-argument builtin in Zig 0.15; the type comes from context.
+                // @ptrCast is a single-argument builtin in Zig 0.15.2; the type comes from context.
                 const value_index: usize = if (std.mem.eql(u8, name, "@as")) 1 else 0;
                 if (value_index >= params.len) return null;
                 return resolveParamNameFromExpr(tree, @intFromEnum(params[value_index]));
