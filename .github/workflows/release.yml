@@ -68,6 +68,6 @@ jobs:
           Compress-Archive -Path dist/* -DestinationPath "zwanzig-${{ github.ref_name }}-${{ matrix.asset_suffix }}.${{ matrix.archive_ext }}"
 
       - name: Upload release assets
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
           files: zwanzig-${{ github.ref_name }}-${{ matrix.asset_suffix }}.${{ matrix.archive_ext }}
