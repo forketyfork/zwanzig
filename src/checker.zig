@@ -23,17 +23,11 @@ pub const CachedArtifacts = cached_artifacts_mod.CachedArtifacts;
 
 pub const AnalysisStats = struct {
     total_runs: u64 = 0,
-    runs_with_drops: u64 = 0,
-    dropped_states: u64 = 0,
     widened_nodes: u64 = 0,
     widening_converged: u64 = 0,
 
-    pub fn recordRun(self: *AnalysisStats, dropped_states: u32) void {
+    pub fn recordRun(self: *AnalysisStats) void {
         self.total_runs += 1;
-        if (dropped_states > 0) {
-            self.runs_with_drops += 1;
-            self.dropped_states += dropped_states;
-        }
     }
 
     pub fn recordWidening(self: *AnalysisStats, widened: u32, converged: u32) void {
@@ -43,8 +37,6 @@ pub const AnalysisStats = struct {
 
     pub fn merge(self: *AnalysisStats, other: AnalysisStats) void {
         self.total_runs += other.total_runs;
-        self.runs_with_drops += other.runs_with_drops;
-        self.dropped_states += other.dropped_states;
         self.widened_nodes += other.widened_nodes;
         self.widening_converged += other.widening_converged;
     }

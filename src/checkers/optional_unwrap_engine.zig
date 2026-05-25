@@ -87,7 +87,7 @@ pub const OptionalUnwrapEngineChecker = struct {
             error.AnalysisLimitExceeded => run_ok = false,
         };
         if (context.analysis_stats) |stats| {
-            stats.recordRun(engine.getGraph().getDroppedStateCount());
+            stats.recordRun();
             stats.recordWidening(engine.getGraph().getWidenedNodeCount(), engine.getGraph().getWideningConvergedCount());
         }
 

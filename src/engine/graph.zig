@@ -10,7 +10,8 @@ const ProgramState = state_mod.ProgramState;
 const WideningKey = state_mod.WideningKey;
 
 /// Default maximum number of unique states per program point.
-/// Beyond this, new states at the same point are dropped (widening approximation).
+/// Beyond this, new states at the same point are widened into an existing node
+/// with the same calling context (widening approximation).
 const default_max_states_per_point: u32 = 50;
 
 /// A node in the exploded graph, keyed by (ProgramPoint, ProgramState).
@@ -73,10 +74,8 @@ pub const ExplodedGraph = struct {
     point_state_counts: std.AutoHashMap(u64, u32),
     /// Node indices per program point (for subsumption and cap widening)
     point_nodes: std.AutoHashMap(u64, std.ArrayList(u32)),
-    /// Maximum number of unique states per program point before dropping
+    /// Maximum number of unique states per program point before cap widening
     max_states_per_point: u32,
-    /// Count of states dropped due to per-point limit
-    dropped_state_count: u32,
     /// Stored states at widening points (keyed by WideningKey)
     widening_states: std.HashMap(WideningKey, ProgramState, WideningKey.HashContext, std.hash_map.default_max_load_percentage),
     /// Visit count at widening points for delayed widening (keyed by WideningKey)
@@ -95,7 +94,6 @@ pub const ExplodedGraph = struct {
             .point_state_counts = std.AutoHashMap(u64, u32).init(allocator),
             .point_nodes = std.AutoHashMap(u64, std.ArrayList(u32)).init(allocator),
             .max_states_per_point = default_max_states_per_point,
-            .dropped_state_count = 0,
             .widening_states = std.HashMap(WideningKey, ProgramState, WideningKey.HashContext, std.hash_map.default_max_load_percentage).init(allocator),
             .widening_visits = std.HashMap(WideningKey, u32, WideningKey.HashContext, std.hash_map.default_max_load_percentage).init(allocator),
             .widened_nodes = 0,
@@ -134,7 +132,7 @@ pub const ExplodedGraph = struct {
 
     /// Result of getOrCreateNode operation.
     pub const GetOrCreateResult = struct {
-        /// Index of the node (maxInt(u32) if dropped)
+        /// Index of the node
         index: u32,
         /// Whether this is a newly created node
         is_new: bool,
@@ -449,10 +447,6 @@ pub const ExplodedGraph = struct {
         return self.nodes.items.len;
     }
 
-    pub fn getDroppedStateCount(self: *const ExplodedGraph) u32 {
-        return self.dropped_state_count;
-    }
-
     pub fn setMaxStatesPerPoint(self: *ExplodedGraph, max: u32) void {
         self.max_states_per_point = max;
     }
@@ -712,7 +706,6 @@ test "ExplodedGraph widening stats tracking" {
 
     try testing.expectEqual(@as(u32, 0), graph.getWidenedNodeCount());
     try testing.expectEqual(@as(u32, 0), graph.getWideningConvergedCount());
-    try testing.expectEqual(@as(u32, 0), graph.getDroppedStateCount());
 }
 
 test "ExplodedGraph widen-on-cap updates existing node" {
@@ -749,7 +742,6 @@ test "ExplodedGraph widen-on-cap updates existing node" {
     try testing.expect(!result.is_new);
     try testing.expect(result.widening_applied);
     try testing.expect(result.state_updated);
-    try testing.expectEqual(@as(u32, 0), graph.getDroppedStateCount());
 
     const node = graph.getNode(result.index) orelse return error.TestUnexpectedResult;
     const val = node.state.getVar(ids.varId(1)) orelse return error.TestUnexpectedResult;
@@ -788,7 +780,6 @@ test "ExplodedGraph widen-on-cap respects context" {
     try testing.expect(result2.is_new);
     try testing.expect(!result2.widening_applied);
     try testing.expectEqual(@as(usize, 2), graph.nodeCount());
-    try testing.expectEqual(@as(u32, 0), graph.getDroppedStateCount());
 
     if (result2.caller_should_deinit) {
         state2.deinit();

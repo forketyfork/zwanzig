@@ -84,7 +84,7 @@ pub const SwallowedErrorChecker = struct {
             error.AnalysisLimitExceeded => engine_ok = false,
         };
         if (context.analysis_stats) |stats| {
-            stats.recordRun(engine.getGraph().getDroppedStateCount());
+            stats.recordRun();
             stats.recordWidening(engine.getGraph().getWidenedNodeCount(), engine.getGraph().getWideningConvergedCount());
         }
 
