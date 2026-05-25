@@ -305,6 +305,48 @@ const members = getMembers(tree, node_idx, &buf);
 
 This rule complements `stack-escape-engine` by catching patterns where the escape happens through an intermediate function call that the dataflow analysis can't track.
 
+### defer-frees-escapee
+
+Detects a `defer` whose release call frees a local resource that has already escaped into a container declared in a strictly outer scope. When the inner block ends, the deferred free fires unconditionally while the outer container still holds a reference to the freed memory, so the next access through the container is a use-after-free.
+
+The rule fires when:
+1. A `defer` statement appears in a nested (non-function-body) block.
+2. The defer body matches `<receiver>.free(X)` or `<receiver>.destroy(X)` with `X` a single identifier.
+3. `X` is declared by a `var`/`const` inside the same nested block.
+4. Within the same block, an `append`/`appendSlice`/`appendAssumeCapacity`/`appendSliceAssumeCapacity`/`insert`/`insertSlice` call is made on a receiver whose root identifier is *not* declared in this block, and that call's argument tree mentions `X`.
+
+**Bad:**
+```zig
+if (indent > 0) {
+    const spaces = try allocator.alloc(u8, indent);
+    defer allocator.free(spaces); // fires when this if-block exits
+    try run_inputs.append(allocator, .{ .text = spaces });
+}
+// run_inputs.items now holds a dangling slice
+```
+
+**Good (use a static buffer or move the lifetime out):**
+```zig
+const indent_padding: [24]u8 = [_]u8{' '} ** 24;
+// ...
+if (indent > 0) {
+    try run_inputs.append(allocator, .{ .text = indent_padding[0..indent] });
+}
+```
+
+**Good (move the defer to match the container's lifetime):**
+```zig
+var spaces_opt: ?[]u8 = null;
+defer if (spaces_opt) |s| allocator.free(s);
+if (indent > 0) {
+    const spaces = try allocator.alloc(u8, indent);
+    spaces_opt = spaces;
+    try run_inputs.append(allocator, .{ .text = spaces });
+}
+```
+
+`errdefer` is intentionally not flagged: the standard `errdefer free(x)` followed by `try container.append(x)` ownership-transfer idiom is correct, since errdefer does not fire on the success path. `put`-family methods (HashMap, Cache, …) are also excluded for v1 because many non-container APIs use the same name but consume their data during the call. A future engine-backed checker that consults type information can lift both restrictions.
+
 ### deinit-lifecycle
 
 Detects two lifecycle patterns that often produce double-cleanup bugs during error unwind:

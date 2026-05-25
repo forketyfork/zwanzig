@@ -11,6 +11,7 @@ const IdentifierStyleRule = @import("../rules/identifier_style.zig").IdentifierS
 const SentinelAllocRule = @import("../rules/sentinel_alloc.zig").SentinelAllocRule;
 const UnusedParameterRule = @import("../rules/unused_parameter.zig").UnusedParameterRule;
 const ReturnLocalPointerRule = @import("../rules/return_local_pointer.zig").ReturnLocalPointerRule;
+const DeferFreesEscapeeRule = @import("../rules/defer_frees_escapee.zig").DeferFreesEscapeeRule;
 const DeinitLifecycleRule = @import("../rules/deinit_lifecycle.zig").DeinitLifecycleRule;
 const EmptyCatchEngineChecker = @import("../checkers/empty_catch_engine.zig").EmptyCatchEngineChecker;
 const OptionalUnwrapEngineChecker = @import("../checkers/optional_unwrap_engine.zig").OptionalUnwrapEngineChecker;
@@ -36,6 +37,7 @@ pub fn registerDefaults(analyzer: *Analyzer) !void {
     try analyzer.registerRule(&SentinelAllocRule.rule);
     try analyzer.registerRule(&UnusedParameterRule.rule);
     try analyzer.registerRule(&ReturnLocalPointerRule.rule);
+    try analyzer.registerRule(&DeferFreesEscapeeRule.rule);
     try analyzer.registerRule(&DeinitLifecycleRule.rule);
 
     // Engine-based checkers
