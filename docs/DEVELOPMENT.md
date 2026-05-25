@@ -1,5 +1,13 @@
 # Development notes
 
+## macOS SDK workaround
+
+On macOS 26.x hosts the active `MacOSX.sdk/usr/lib/libSystem.tbd` only advertises `arm64e-macos`, so Zig 0.15.2 cannot link the build runner and emits a long list of undefined libSystem symbols (`__availability_version_check`, `_realpath$DARWIN_EXTSN`, etc.). Upstream tracker: <https://codeberg.org/ziglang/zig/issues/31756>.
+
+`flake.nix`'s Darwin `shellHook` sources `scripts/setup-macos-sdk-workaround.sh`, which detects the broken stub and, when needed, materializes a fake `DEVELOPER_DIR` under `.tmp/macos-sdk-workaround` that points at `MacOSX15.4.sdk` (the most recent SDK that still lists `arm64-macos`). A narrow `xcrun --sdk macosx --show-sdk-path` shim is prepended to `PATH` so Zig's internal SDK lookup picks up the same path. The hook is a no-op when the active SDK already advertises `arm64-macos`, when `MacOSX15.4.sdk` is missing, or on non-Darwin systems.
+
+Remove the script and the corresponding `flake.nix` lines once Zwanzig moves off Zig 0.15.2 or upstream resolves the arm64e-only stub regression.
+
 ## Architecture
 
 Main components:
