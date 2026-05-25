@@ -27,17 +27,24 @@ const Ast = std.zig.Ast;
 ///
 /// The rule is intentionally heuristic: it focuses on the common shape where
 /// `defer <receiver>.free(X)` (or `destroy`) appears in a nested block
-/// alongside a container method call (`append`, `put`, `insert`, ...) whose
-/// receiver is not declared in the same block and whose arguments mention
-/// `X`. It will miss escapes that go through helper functions, but it is
-/// precise enough to flag the architect crash that motivated it without
-/// firing on the wider `defer X.deinit(allocator)` idiom.
+/// alongside an `append`/`appendSlice`/`appendAssumeCapacity`/
+/// `appendSliceAssumeCapacity`/`insert`/`insertSlice` call whose receiver is
+/// not declared in the same block and whose arguments mention `X`. It will
+/// miss escapes that go through helper functions, but it is precise enough
+/// to flag the architect crash that motivated it without firing on the
+/// wider `defer X.deinit(allocator)` idiom.
+///
+/// `put`-family methods (`put`, `putAssumeCapacity`, `putNoClobber`) are
+/// excluded on purpose because many non-container APIs (caches, writers, IO
+/// sinks) expose the same name but consume their data during the call. Lifting
+/// this restriction needs type information and belongs in a future engine-
+/// backed extension of `store-violations-engine`.
 ///
 /// `errdefer` is intentionally not covered yet: the standard
 /// "errdefer-free-then-try-append" ownership-transfer idiom is correct
 /// (errdefer does not fire on the success path), and a sound `errdefer`
 /// version of this rule needs to also see whether any error-returning
-/// statement runs *after* the escape — which is left for a follow-up.
+/// statement runs after the escape, which is left for a follow-up.
 pub const DeferFreesEscapeeRule = struct {
     pub const rule: Rule = .{
         .name = "defer-frees-escapee",
@@ -56,6 +63,15 @@ pub const DeferFreesEscapeeRule = struct {
         "appendSlice",
         "appendSliceAssumeCapacity",
         "insert",
+        "insertSlice",
+    };
+
+    /// Subset of `storage_methods` whose direct slice argument is iterated
+    /// and copied (not retained). We require the freed name to appear nested
+    /// inside the slice expression rather than being the whole argument.
+    const slice_store_methods = [_][]const u8{
+        "appendSlice",
+        "appendSliceAssumeCapacity",
         "insertSlice",
     };
 
@@ -165,7 +181,7 @@ pub const DeferFreesEscapeeRule = struct {
 
         var local_names: std.ArrayList([]const u8) = .empty;
         defer local_names.deinit(allocator);
-        try collectLocalNames(allocator, tree, token_tags, block_node, &local_names);
+        try collectLocalNames(allocator, tree, tags, datas, token_tags, block_node, &local_names);
 
         for (stmts) |stmt| {
             if (stmt >= tags.len) continue;
@@ -288,40 +304,32 @@ pub const DeferFreesEscapeeRule = struct {
         return tree.tokenSlice(arg_token);
     }
 
+    /// Collect names declared as direct statements of `block_node`. We
+    /// deliberately skip nested blocks: a var declared inside an inner block
+    /// shadows nothing in `block_node`'s scope, and treating it as local
+    /// would suppress diagnostics for references to outer variables of the
+    /// same name.
     fn collectLocalNames(
         allocator: std.mem.Allocator,
         tree: *const Ast,
+        tags: []const Ast.Node.Tag,
+        datas: []const Ast.Node.Data,
         token_tags: []const std.zig.Token.Tag,
         block_node: u32,
         out: *std.ArrayList([]const u8),
     ) RuleError!void {
-        const Collector = struct {
-            allocator: std.mem.Allocator,
-            tree: *const Ast,
-            token_tags: []const std.zig.Token.Tag,
-            out: *std.ArrayList([]const u8),
-            stop: bool = false,
-
-            pub fn visit(self: *@This(), inner_tree: *const Ast, node: u32, tag: Ast.Node.Tag) RuleError!void {
-                _ = inner_tree;
-                if (tag != .local_var_decl and tag != .simple_var_decl and tag != .aligned_var_decl) return;
-                const full = self.tree.fullVarDecl(@enumFromInt(node)) orelse return;
-                const name_token = full.ast.mut_token + 1;
-                if (name_token >= self.token_tags.len) return;
-                if (self.token_tags[name_token] != .identifier) return;
-                const name = self.tree.tokenSlice(name_token);
-                try self.out.append(self.allocator, name);
-            }
-        };
-
-        var collector = Collector{
-            .allocator = allocator,
-            .tree = tree,
-            .token_tags = token_tags,
-            .out = out,
-        };
-
-        try walkSkippingNestedFns(Collector, tree, block_node, &collector);
+        var scratch_buf: [2]u32 = undefined;
+        const stmts = blockStatements(tree, tags, datas, block_node, &scratch_buf);
+        for (stmts) |stmt| {
+            if (stmt >= tags.len) continue;
+            const tag = tags[stmt];
+            if (tag != .local_var_decl and tag != .simple_var_decl and tag != .aligned_var_decl) continue;
+            const full = tree.fullVarDecl(@enumFromInt(stmt)) orelse continue;
+            const name_token = full.ast.mut_token + 1;
+            if (name_token >= token_tags.len) continue;
+            if (token_tags[name_token] != .identifier) continue;
+            try out.append(allocator, tree.tokenSlice(name_token));
+        }
     }
 
     fn walkSkippingNestedFns(
@@ -403,12 +411,28 @@ pub const DeferFreesEscapeeRule = struct {
                 if (nameMatches(self.local_names, receiver_root)) return;
                 if (std.mem.eql(u8, receiver_root, self.freed_name)) return;
 
+                const method_is_slice_store = nameIn(&slice_store_methods, method_name);
+
                 for (full.ast.params) |param| {
+                    const param_idx = @intFromEnum(param);
+                    // For *Slice methods the slice argument itself is iterated
+                    // and copied element-by-element, so a bare `appendSlice(out, X)`
+                    // does not retain `X`. Only flag *Slice methods when `X`
+                    // appears nested inside a struct/array literal element.
+                    if (method_is_slice_store and identifierMatches(
+                        self.tree,
+                        self.tags,
+                        self.main_tokens,
+                        self.token_tags,
+                        param_idx,
+                        self.freed_name,
+                    )) continue;
+
                     if (try exprMentionsIdentifier(
                         self.tree,
                         self.main_tokens,
                         self.token_tags,
-                        @intFromEnum(param),
+                        param_idx,
                         self.freed_name,
                     )) {
                         self.result = .{
@@ -461,6 +485,24 @@ pub const DeferFreesEscapeeRule = struct {
                 else => return null,
             }
         }
+    }
+
+    /// True when `expr_node` is exactly the identifier `target_name` (no
+    /// wrapping like field access, struct literal, etc.).
+    fn identifierMatches(
+        tree: *const Ast,
+        tags: []const Ast.Node.Tag,
+        main_tokens: []const Ast.TokenIndex,
+        token_tags: []const std.zig.Token.Tag,
+        node: u32,
+        target_name: []const u8,
+    ) bool {
+        if (node >= tags.len) return false;
+        if (tags[node] != .identifier) return false;
+        const token = main_tokens[node];
+        if (token >= token_tags.len) return false;
+        if (token_tags[token] != .identifier) return false;
+        return std.mem.eql(u8, tree.tokenSlice(token), target_name);
     }
 
     fn exprMentionsIdentifier(
@@ -624,6 +666,59 @@ test "ignores errdefer ownership-transfer idiom" {
 
     try DeferFreesEscapeeRule.rule.check(&src, allocator, &diagnostics);
     try std.testing.expectEqual(@as(usize, 0), diagnostics.items.len);
+}
+
+test "ignores appendSlice that copies elements out of a temporary slice" {
+    // `try out.appendSlice(allocator, tmp)` iterates tmp and copies each
+    // element into `out`. The slice argument is consumed during the call;
+    // freeing tmp afterwards is safe.
+    const allocator = std.testing.allocator;
+    const source_text =
+        \\fn ok(allocator: std.mem.Allocator, out: *std.ArrayList(u8)) !void {
+        \\    if (true) {
+        \\        const tmp = try allocator.alloc(u8, 4);
+        \\        defer allocator.free(tmp);
+        \\        try out.appendSlice(allocator, tmp);
+        \\    }
+        \\}
+    ;
+    var src = Source.initForTest("test.zig", source_text);
+    var diagnostics: std.ArrayList(Diagnostic) = .empty;
+    defer diagnostics.deinit(allocator);
+    defer for (diagnostics.items) |d| d.deinit(allocator);
+
+    try DeferFreesEscapeeRule.rule.check(&src, allocator, &diagnostics);
+    try std.testing.expectEqual(@as(usize, 0), diagnostics.items.len);
+}
+
+test "flags reference to outer name when an inner block shadows it" {
+    // The outer `outer` is the real escape target. The inner block also
+    // declares a local named `outer`, but that should not suppress the
+    // diagnostic for the append on the outer one.
+    const allocator = std.testing.allocator;
+    const source_text =
+        \\fn render(allocator: std.mem.Allocator) !void {
+        \\    var outer: std.ArrayList(Item) = .empty;
+        \\    defer outer.deinit(allocator);
+        \\    if (true) {
+        \\        if (false) {
+        \\            var outer: std.ArrayList(Item) = .empty;
+        \\            outer.deinit(allocator);
+        \\        }
+        \\        const spaces = try allocator.alloc(u8, 2);
+        \\        defer allocator.free(spaces);
+        \\        try outer.append(allocator, .{ .text = spaces });
+        \\    }
+        \\}
+    ;
+    var src = Source.initForTest("test.zig", source_text);
+    var diagnostics: std.ArrayList(Diagnostic) = .empty;
+    defer diagnostics.deinit(allocator);
+    defer for (diagnostics.items) |d| d.deinit(allocator);
+
+    try DeferFreesEscapeeRule.rule.check(&src, allocator, &diagnostics);
+    try std.testing.expectEqual(@as(usize, 1), diagnostics.items.len);
+    try std.testing.expect(std.mem.containsAtLeast(u8, diagnostics.items[0].message, 1, "outer"));
 }
 
 test "flags escape through insertSlice into outer list" {
