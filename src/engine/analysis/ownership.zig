@@ -1,5 +1,6 @@
 const std = @import("std");
 const ids = @import("../../ids.zig");
+const ast_walk = @import("../../ast_walk.zig");
 const Cfg = @import("../../cfg.zig").Cfg;
 const ProgramState = @import("../state.zig").ProgramState;
 const EngineError = @import("../base.zig").EngineError;
@@ -198,10 +199,31 @@ pub fn mixin(comptime _Engine: type) type {
                 std.mem.eql(u8, fn_name, "appendSlice") or
                 std.mem.eql(u8, fn_name, "appendSliceAssumeCapacity") or
                 std.mem.eql(u8, fn_name, "insert") or
+                std.mem.eql(u8, fn_name, "insertSlice") or
                 std.mem.eql(u8, fn_name, "insertAssumeCapacity"))
             {
                 if (full_call.ast.params.len == 0) return;
                 const item_node = @intFromEnum(full_call.ast.params[full_call.ast.params.len - 1]);
+                // Receiver is the base of the `<receiver>.append(...)` field access.
+                // Must run before markEscapedInExpr because the latter clears the
+                // deferred-free tracking we rely on here.
+                if (tags[callee_node] == .field_access) {
+                    const receiver_node = @intFromEnum(datas[callee_node].node_and_token[0]);
+                    // *Slice methods (appendSlice / appendSliceAssumeCapacity /
+                    // insertSlice) iterate the argument and copy each element. A
+                    // bare slice arg (`appendSlice(out, tmp)`) is consumed in the
+                    // call; freeing `tmp` afterwards is safe. Only the nested case
+                    // (`appendSlice(out, &.{tmp})` etc.) retains a reference, so
+                    // skip the escape check when the whole item arg is a single
+                    // identifier matching a pending defer-free.
+                    const is_slice_store = std.mem.eql(u8, fn_name, "appendSlice") or
+                        std.mem.eql(u8, fn_name, "appendSliceAssumeCapacity") or
+                        std.mem.eql(u8, fn_name, "insertSlice");
+                    const skip_escape_check = is_slice_store and tags[item_node] == .identifier;
+                    if (!skip_escape_check) {
+                        checkDeferFreesEscapeeIntoContainer(self, state, call_node, receiver_node, item_node, current_cfg) catch return;
+                    }
+                }
                 markEscapedInExpr(self, state, item_node, current_cfg) catch return;
                 return;
             }
@@ -235,6 +257,171 @@ pub fn mixin(comptime _Engine: type) type {
                     markEscapedInExpr(self, state, param_node, current_cfg) catch return;
                 }
             }
+        }
+
+        /// Detect the "defer frees an escapee" pattern: a resource with a queued
+        /// deferred-free is appended into a container whose declaration outlives
+        /// the defer's enclosing block. When the block exits the defer fires and
+        /// the container is left holding a dangling slice — a future use-after-free.
+        ///
+        /// `receiver_node` is the LHS of the `<receiver>.append(...)` field
+        /// access; `item_expr_node` is the value being appended.
+        pub fn checkDeferFreesEscapeeIntoContainer(
+            self: *_Engine,
+            state: *ProgramState,
+            call_node: u32,
+            receiver_node: u32,
+            item_expr_node: u32,
+            current_cfg: *const Cfg,
+        ) EngineError!void {
+            const src = self.source orelse return;
+            const tree = src.ast() catch return;
+            const parent_map = try self.getParentMap(tree);
+            const tags = tree.nodes.items(.tag);
+
+            const call_token = _Engine.ownership.resolveCallToken(self, call_node);
+
+            var seen: std.AutoHashMap(ids.VarId, void) = .init(self.allocator);
+            defer seen.deinit();
+
+            try collectEscapeeViolations(
+                self,
+                state,
+                tree,
+                tags,
+                parent_map,
+                receiver_node,
+                item_expr_node,
+                call_token,
+                current_cfg,
+                &seen,
+            );
+        }
+
+        fn collectEscapeeViolations(
+            self: *_Engine,
+            state: *ProgramState,
+            tree: *const std.zig.Ast,
+            tags: []const std.zig.Ast.Node.Tag,
+            parent_map: []const u32,
+            receiver_node: u32,
+            expr_node: u32,
+            call_token: ?u32,
+            current_cfg: *const Cfg,
+            seen: *std.AutoHashMap(ids.VarId, void),
+        ) EngineError!void {
+            const datas = tree.nodes.items(.data);
+            if (expr_node >= tags.len) return;
+
+            switch (tags[expr_node]) {
+                .identifier => {
+                    const var_id = _Engine.var_resolution.resolveVarIdFromIdentifier(self, expr_node, current_cfg) orelse return;
+                    if (seen.contains(var_id)) return;
+                    try seen.put(var_id, {});
+                    const defer_scope = state.store.pendingDeferredFreeScope(var_id) orelse return;
+                    // Same-block locals are safe (defers fire in reverse declaration
+                    // order, so the container is destroyed before the resource).
+                    // Parameters, top-level decls, and any container declared outside
+                    // the defer's scope are not. The bare-slice carve-out for the
+                    // appendSlice / insertSlice family already excludes the byte-slice
+                    // copy idiom upstream, so the remaining append/insert call shapes
+                    // store by reference and a dangling escape is a real UAF.
+                    if (containerOutlivesDeferScope(self, tree, tags, parent_map, receiver_node, defer_scope, current_cfg)) {
+                        try state.store.recordDeferFreesEscapee(var_id, call_token);
+                        state.invalidateCache();
+                    }
+                },
+                .grouped_expression, .unwrap_optional => {
+                    const data = datas[expr_node].node_and_token;
+                    try collectEscapeeViolations(self, state, tree, tags, parent_map, receiver_node, @intFromEnum(data[0]), call_token, current_cfg, seen);
+                },
+                .slice, .slice_open, .slice_sentinel => {
+                    const slice = tree.fullSlice(@enumFromInt(expr_node)) orelse return;
+                    try collectEscapeeViolations(self, state, tree, tags, parent_map, receiver_node, @intFromEnum(slice.ast.sliced), call_token, current_cfg, seen);
+                },
+                .array_access => {
+                    const pair = datas[expr_node].node_and_node;
+                    try collectEscapeeViolations(self, state, tree, tags, parent_map, receiver_node, @intFromEnum(pair[0]), call_token, current_cfg, seen);
+                },
+                .field_access => {
+                    const data = datas[expr_node].node_and_token;
+                    try collectEscapeeViolations(self, state, tree, tags, parent_map, receiver_node, @intFromEnum(data[0]), call_token, current_cfg, seen);
+                },
+                .address_of, .deref, .@"try" => {
+                    const child = datas[expr_node].node;
+                    try collectEscapeeViolations(self, state, tree, tags, parent_map, receiver_node, @intFromEnum(child), call_token, current_cfg, seen);
+                },
+                .@"catch" => {
+                    const pair = datas[expr_node].node_and_node;
+                    try collectEscapeeViolations(self, state, tree, tags, parent_map, receiver_node, @intFromEnum(pair[0]), call_token, current_cfg, seen);
+                    try collectEscapeeViolations(self, state, tree, tags, parent_map, receiver_node, @intFromEnum(pair[1]), call_token, current_cfg, seen);
+                },
+                .struct_init, .struct_init_comma, .struct_init_one, .struct_init_one_comma, .struct_init_dot, .struct_init_dot_comma, .struct_init_dot_two, .struct_init_dot_two_comma => {
+                    var buf: [2]std.zig.Ast.Node.Index = undefined;
+                    const struct_init = tree.fullStructInit(&buf, @enumFromInt(expr_node)) orelse return;
+                    for (struct_init.ast.fields) |field| {
+                        try collectEscapeeViolations(self, state, tree, tags, parent_map, receiver_node, @intFromEnum(field), call_token, current_cfg, seen);
+                    }
+                },
+                .container_field, .container_field_init, .container_field_align => {
+                    const field = tree.fullContainerField(@enumFromInt(expr_node)) orelse return;
+                    if (field.ast.value_expr.unwrap()) |value_expr| {
+                        try collectEscapeeViolations(self, state, tree, tags, parent_map, receiver_node, @intFromEnum(value_expr), call_token, current_cfg, seen);
+                    } else if (field.ast.tuple_like) {
+                        if (field.ast.type_expr.unwrap()) |value_expr| {
+                            try collectEscapeeViolations(self, state, tree, tags, parent_map, receiver_node, @intFromEnum(value_expr), call_token, current_cfg, seen);
+                        }
+                    }
+                },
+                .array_init, .array_init_comma, .array_init_one, .array_init_one_comma, .array_init_dot, .array_init_dot_comma, .array_init_dot_two, .array_init_dot_two_comma => {
+                    var buf: [2]std.zig.Ast.Node.Index = undefined;
+                    const array_init = tree.fullArrayInit(&buf, @enumFromInt(expr_node)) orelse return;
+                    for (array_init.ast.elements) |elem| {
+                        try collectEscapeeViolations(self, state, tree, tags, parent_map, receiver_node, @intFromEnum(elem), call_token, current_cfg, seen);
+                    }
+                },
+                else => {},
+            }
+        }
+
+        /// The container outlives the defer scope when its declaration is not
+        /// inside the block whose exit will fire the defer. Parameters and
+        /// top-level decls outlive by construction. If we can't pin the
+        /// receiver to an identifier (e.g. `getList().append(...)`), stay
+        /// conservative and don't fire.
+        fn containerOutlivesDeferScope(
+            self: *_Engine,
+            tree: *const std.zig.Ast,
+            tags: []const std.zig.Ast.Node.Tag,
+            parent_map: []const u32,
+            receiver_node: u32,
+            defer_scope: u32,
+            current_cfg: *const Cfg,
+        ) bool {
+            const root_ident_node = findRootIdentifierNode(tags, tree.nodes.items(.data), receiver_node) orelse return false;
+            const decl_info = _Engine.var_resolution.resolveDeclInfoFromIdentifier(self, root_ident_node, current_cfg) orelse return true;
+            if (decl_info.is_top_level) return true;
+            return !ast_walk.isAncestor(defer_scope, decl_info.decl_node, parent_map);
+        }
+
+        fn findRootIdentifierNode(
+            tags: []const std.zig.Ast.Node.Tag,
+            datas: []const std.zig.Ast.Node.Data,
+            expr_node: u32,
+        ) ?u32 {
+            var current = expr_node;
+            var depth: u32 = 0;
+            while (depth < 64) : (depth += 1) {
+                if (current >= tags.len) return null;
+                switch (tags[current]) {
+                    .identifier => return current,
+                    .field_access => current = @intFromEnum(datas[current].node_and_token[0]),
+                    .grouped_expression, .unwrap_optional => current = @intFromEnum(datas[current].node_and_token[0]),
+                    .address_of, .deref, .@"try" => current = @intFromEnum(datas[current].node),
+                    else => return null,
+                }
+            }
+            return null;
         }
 
         /// Record ownership when passing resources to functions that take a pointer as first argument.

@@ -645,7 +645,7 @@ fn baz() i32 {
 
 ### store-violations-engine
 
-Detects allocator/resource misuse: double-free, free-without-alloc, close-without-open, use-after-free/close, and leaks.
+Detects allocator/resource misuse: double-free, free-without-alloc, close-without-open, use-after-free/close, leaks, and **defer-frees-escapee** (a resource freed by `defer` that has already escaped into an outer container).
 
 **Error-path leak policy:** Leak checks run only on normal return paths. When a function returns an error (detected by literal error values or type-based analysis), leak reports are suppressed. This avoids false positives in code that cleans up via `errdefer`.
 
@@ -657,12 +657,39 @@ Resources stored in aggregates are treated as escaping with the aggregate.
 
 **Resource modeling:** Built-in allocator detection includes `alloc`/`free`, `dupe`, and `create`/`destroy`. Configurable `resource_models` can add project-specific APIs. `kind: "free_owned"` models APIs like `deinit` that free resources owned by a value without freeing the value itself.
 
-**Bad:**
+**Defer-frees-escapee detection:** When a value with a pending `defer <allocator>.free(x)` is passed into `append`/`appendSlice`/`appendAssumeCapacity`/`appendSliceAssumeCapacity`/`insert`/`insertSlice` on a container whose declaration outlives the defer's lexical scope, the engine reports a future use-after-free. "Outlives" covers function parameters, top-level decls, `self.field` chains, and any local container declared above the defer's block. The check applies uniformly to defers in any block — `if`, `while`, `for`, `switch` arms, plain `{ ... }`, and the function body itself — because the safety question is always the same: does the container survive past the moment the defer fires? Same-block local containers are not flagged: defers fire in reverse declaration order, so the container is destroyed before the resource. A bare slice argument to `appendSlice`/`appendSliceAssumeCapacity`/`insertSlice` (e.g. `try out.appendSlice(allocator, tmp)`) is treated as the byte-copy idiom and not flagged; only nested references (e.g. `&.{tmp}`) trigger the diagnostic for those methods. `errdefer` is not flagged because the canonical `errdefer free(x); try list.append(x)` ownership-transfer idiom is correct on the success path. The `put`/`putAssumeCapacity` family is not flagged because many non-container APIs (caches, writers, IO sinks) share the same names but consume their input during the call; a future type-aware extension can lift these restrictions.
+
+**Bad — double free:**
 ```zig
 fn foo(allocator: std.mem.Allocator) !void {
     var ptr = try allocator.alloc(u8, 1);
     allocator.free(ptr);
     allocator.free(ptr); // double-free
+}
+```
+
+**Bad — defer frees escapee:**
+```zig
+fn render(allocator: std.mem.Allocator, run_inputs: *std.ArrayList(Item)) !void {
+    if (indent > 0) {
+        const spaces = try allocator.alloc(u8, indent);
+        defer allocator.free(spaces); // fires when this if-block exits
+        try run_inputs.append(allocator, .{ .text = spaces });
+    }
+    // run_inputs now holds a dangling slice
+}
+```
+
+**Good (lift the lifetime up to match the container):**
+```zig
+fn render(allocator: std.mem.Allocator, run_inputs: *std.ArrayList(Item)) !void {
+    var spaces_opt: ?[]u8 = null;
+    defer if (spaces_opt) |s| allocator.free(s);
+    if (indent > 0) {
+        const spaces = try allocator.alloc(u8, indent);
+        spaces_opt = spaces;
+        try run_inputs.append(allocator, .{ .text = spaces });
+    }
 }
 ```
 
