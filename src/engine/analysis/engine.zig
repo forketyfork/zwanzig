@@ -206,7 +206,7 @@ pub const AnalysisEngine = struct {
         self.max_worklist_steps = steps;
     }
 
-    /// Set the maximum number of states per program point before dropping.
+    /// Set the maximum number of states per program point before cap widening.
     pub fn setMaxStatesPerPoint(self: *AnalysisEngine, max: u32) void {
         self.graph.setMaxStatesPerPoint(max);
     }
@@ -1952,9 +1952,6 @@ test "AnalysisEngine widening simple loop converges without drops" {
     try testing.expect(graph.nodeCount() > 0);
     try testing.expect(graph.nodeCount() <= 20);
 
-    // No states should be dropped
-    try testing.expectEqual(@as(u32, 0), graph.getDroppedStateCount());
-
     // Verify widening infrastructure was used (visit tracking)
     // The header should be tracked for widening even if convergence happened via dedup
     try testing.expect(graph.getTrackedWideningPointCount() >= 1);
@@ -2084,10 +2081,6 @@ test "AnalysisEngine widening branching loop preserves constraints conservativel
 
     // Analysis should complete without issues
     try testing.expect(graph.nodeCount() > 0);
-
-    // Should have explored multiple paths through the loop
-    // With branching, states at the header may be widened
-    try testing.expect(graph.getDroppedStateCount() == 0 or graph.getWidenedNodeCount() > 0);
 }
 
 test "AnalysisEngine widening error path in loop remains sound" {
@@ -2193,9 +2186,6 @@ test "AnalysisEngine widening convergence stops exploration" {
     // (deduplication prevents infinite exploration)
     try testing.expect(graph.nodeCount() > 0);
     try testing.expect(graph.nodeCount() <= 20);
-
-    // No states should be dropped (deduplication is sufficient)
-    try testing.expectEqual(@as(u32, 0), graph.getDroppedStateCount());
 }
 
 test "AnalysisEngine widening regression test with real loop code" {
@@ -2248,10 +2238,7 @@ test "AnalysisEngine widening regression test with real loop code" {
 
         const graph = engine.getGraph();
 
-        // Analysis should complete successfully
+        // Analysis should complete successfully - widening prevents state explosion
         try testing.expect(graph.nodeCount() > 0);
-
-        // Widening should prevent state explosion - no states dropped
-        try testing.expectEqual(@as(u32, 0), graph.getDroppedStateCount());
     }
 }

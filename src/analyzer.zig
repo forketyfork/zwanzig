@@ -156,12 +156,6 @@ pub const Analyzer = struct {
                 self.analysis_stats.total_runs,
             });
         }
-        if (self.analysis_stats.runs_with_drops == 0) return;
-        log.warn("dropped {d} state(s) due to per-point limit across {d} engine run(s) (total runs {d})", .{
-            self.analysis_stats.dropped_states,
-            self.analysis_stats.runs_with_drops,
-            self.analysis_stats.total_runs,
-        });
     }
 
     pub fn isRuleEnabled(self: *const Analyzer, rule_name: []const u8) bool {
