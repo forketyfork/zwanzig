@@ -429,6 +429,8 @@ pub const ExplodedGraph = struct {
     /// Add an edge between two exploded graph nodes.
     /// Edges are deduplicated: a given (from, to) pair is recorded at most once,
     /// so repeated calls after state updates don't accumulate duplicates.
+    /// On allocation failure neither list is mutated, so the successors/predecessors
+    /// lockstep invariant is preserved.
     pub fn addEdge(self: *ExplodedGraph, from_index: u32, to_index: u32) EngineError!void {
         if (from_index >= self.nodes.items.len or to_index >= self.nodes.items.len) {
             return;
@@ -439,8 +441,11 @@ pub const ExplodedGraph = struct {
             if (existing == to_index) return;
         }
 
-        try successors.append(self.allocator, to_index);
-        try self.nodes.items[to_index].predecessors.append(self.allocator, from_index);
+        try successors.ensureUnusedCapacity(self.allocator, 1);
+        try self.nodes.items[to_index].predecessors.ensureUnusedCapacity(self.allocator, 1);
+
+        successors.appendAssumeCapacity(to_index);
+        self.nodes.items[to_index].predecessors.appendAssumeCapacity(from_index);
     }
 
     /// Get a node by index
