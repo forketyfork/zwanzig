@@ -537,6 +537,20 @@ test "store_violations_engine ignores appendSlice copy idiom" {
     try std.testing.expectEqual(@as(usize, 0), try countEscapeeDiagnostics(std.testing.allocator, code));
 }
 
+test "store_violations_engine ignores appendSlice copy from slice expression" {
+    const code: [:0]const u8 =
+        \\const std = @import("std");
+        \\fn ok(allocator: std.mem.Allocator, out: *std.ArrayList(u8)) !void {
+        \\    if (true) {
+        \\        const content = try allocator.alloc(u8, 4);
+        \\        defer allocator.free(content);
+        \\        try out.appendSlice(allocator, content[1..3]);
+        \\    }
+        \\}
+    ;
+    try std.testing.expectEqual(@as(usize, 0), try countEscapeeDiagnostics(std.testing.allocator, code));
+}
+
 test "store_violations_engine flags defer-free of slice escaped from switch arm" {
     // The architect-crash shape: a switch arm wraps the alloc + defer + append
     // pattern. Before switch CFG support landed, the engine never visited arm
