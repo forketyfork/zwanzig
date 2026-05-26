@@ -160,6 +160,9 @@ fn parseCliArgs(allocator: std.mem.Allocator, args: []const []const u8) CliArgs 
 
     return args_mod.parseArgs(allocator, args) catch |err| {
         const stderr = std.fs.File.stderr().deprecatedWriter();
+        // zwanzig-disable: empty-catch-engine
+        // We are on an error-exit path; failing to write to stderr (e.g. closed
+        // pipe) must not mask the original error or crash the process.
         switch (err) {
             CliError.MutuallyExclusiveFlags => {
                 stderr.writeAll("Error: --do and --skip are mutually exclusive\n") catch {};
@@ -180,6 +183,7 @@ fn parseCliArgs(allocator: std.mem.Allocator, args: []const []const u8) CliArgs 
                 stderr.writeAll("Error: Invalid numeric value for limit\n") catch {};
             },
         }
+        // zwanzig-enable: empty-catch-engine
         std.process.exit(1);
     };
 }
@@ -187,6 +191,7 @@ fn parseCliArgs(allocator: std.mem.Allocator, args: []const []const u8) CliArgs 
 fn loadMergedConfig(allocator: std.mem.Allocator, cli_args: CliArgs) MergedConfig {
     return merge_mod.mergeConfig(allocator, cli_args) catch |err| {
         const stderr = std.fs.File.stderr().deprecatedWriter();
+        // zwanzig-disable: empty-catch-engine
         switch (err) {
             config.ConfigError.InvalidJson => {
                 stderr.writeAll("Error: Invalid JSON in config file\n") catch {};
@@ -204,6 +209,7 @@ fn loadMergedConfig(allocator: std.mem.Allocator, cli_args: CliArgs) MergedConfi
                 stderr.writeAll("Error: Out of memory\n") catch {};
             },
         }
+        // zwanzig-enable: empty-catch-engine
         std.process.exit(1);
     };
 }
@@ -211,6 +217,7 @@ fn loadMergedConfig(allocator: std.mem.Allocator, cli_args: CliArgs) MergedConfi
 fn discoverInputFiles(allocator: std.mem.Allocator, cli_args: CliArgs) []const []const u8 {
     return file_discovery.discoverFiles(allocator, cli_args.paths) catch |err| {
         const stderr = std.fs.File.stderr().deprecatedWriter();
+        // zwanzig-disable: empty-catch-engine
         switch (err) {
             file_discovery.FileDiscoveryError.FileNotFound => {
                 stderr.writeAll("Error: File or directory not found\n") catch {};
@@ -222,6 +229,7 @@ fn discoverInputFiles(allocator: std.mem.Allocator, cli_args: CliArgs) []const [
                 stderr.writeAll("Error: Failed to discover files\n") catch {};
             },
         }
+        // zwanzig-enable: empty-catch-engine
         std.process.exit(1);
     };
 }

@@ -127,6 +127,7 @@ pub const StoreViolationsEngineChecker = struct {
             .use_after_free => "use after free",
             .use_after_close => "use after close",
             .resource_leak => "resource leak: allocation or open not released",
+            .defer_frees_escapee => "resource is freed by defer but already escaped into an outer container — use-after-free",
         };
 
         const token = violation.call_token orelse ids.varIndex(violation.region);
@@ -374,4 +375,214 @@ test "store_violations_engine detects config-driven fqn model with field access 
     try testing.expectEqual(@as(usize, 1), diagnostics.items.len);
     try testing.expectEqualStrings("store-violations-engine", diagnostics.items[0].rule_id);
     try testing.expect(std.mem.indexOf(u8, diagnostics.items[0].message, "resource leak") != null);
+}
+
+/// Helper: run the engine checker and return the number of `defer_frees_escapee`-style
+/// diagnostics. Counting the keyword keeps the assertion stable even if other
+/// engine checks pick up unrelated issues in a fixture.
+fn countEscapeeDiagnostics(allocator: std.mem.Allocator, code: [:0]const u8) !usize {
+    var source = Source.init(allocator, "test.zig", code);
+    defer source.deinit();
+    var type_ctx = TypeContext.init(allocator, &source);
+    defer type_ctx.deinit();
+
+    var diagnostics: std.ArrayList(Diagnostic) = .empty;
+    defer {
+        for (diagnostics.items) |*diag| diag.deinit(allocator);
+        diagnostics.deinit(allocator);
+    }
+
+    try StoreViolationsEngineChecker.checker.checkAst(&source, allocator, &diagnostics, .{
+        .build_metadata = null,
+        .type_context = &type_ctx,
+    });
+
+    var count: usize = 0;
+    for (diagnostics.items) |diag| {
+        if (std.mem.indexOf(u8, diag.message, "escaped into an outer container") != null) {
+            count += 1;
+        }
+    }
+    return count;
+}
+
+test "store_violations_engine flags defer-free of slice escaped into outer ArrayList" {
+    const code: [:0]const u8 =
+        \\const std = @import("std");
+        \\const Item = struct { text: []const u8 };
+        \\fn render(allocator: std.mem.Allocator) !void {
+        \\    var run_inputs: std.ArrayList(Item) = .empty;
+        \\    defer run_inputs.deinit(allocator);
+        \\    if (true) {
+        \\        const spaces = try allocator.alloc(u8, 2);
+        \\        defer allocator.free(spaces);
+        \\        try run_inputs.append(allocator, .{ .text = spaces });
+        \\    }
+        \\}
+    ;
+    try std.testing.expectEqual(@as(usize, 1), try countEscapeeDiagnostics(std.testing.allocator, code));
+}
+
+test "store_violations_engine ignores defer at function-body scope" {
+    // Same-scope defers fire in reverse order, so the container is destroyed
+    // before the resource. No UAF, no diagnostic.
+    const code: [:0]const u8 =
+        \\const std = @import("std");
+        \\const Item = struct { text: []const u8 };
+        \\fn ok(allocator: std.mem.Allocator) !void {
+        \\    var run_inputs: std.ArrayList(Item) = .empty;
+        \\    defer run_inputs.deinit(allocator);
+        \\    const spaces = try allocator.alloc(u8, 2);
+        \\    defer allocator.free(spaces);
+        \\    try run_inputs.append(allocator, .{ .text = spaces });
+        \\}
+    ;
+    try std.testing.expectEqual(@as(usize, 0), try countEscapeeDiagnostics(std.testing.allocator, code));
+}
+
+test "store_violations_engine ignores escape into container declared in same block" {
+    const code: [:0]const u8 =
+        \\const std = @import("std");
+        \\const Item = struct { text: []const u8 };
+        \\fn ok(allocator: std.mem.Allocator) !void {
+        \\    if (true) {
+        \\        var inner: std.ArrayList(Item) = .empty;
+        \\        defer inner.deinit(allocator);
+        \\        const spaces = try allocator.alloc(u8, 2);
+        \\        defer allocator.free(spaces);
+        \\        try inner.append(allocator, .{ .text = spaces });
+        \\    }
+        \\}
+    ;
+    try std.testing.expectEqual(@as(usize, 0), try countEscapeeDiagnostics(std.testing.allocator, code));
+}
+
+test "store_violations_engine ignores errdefer ownership-transfer idiom" {
+    // errdefer fires only on the error path; on success the container owns the
+    // resource. This is the canonical transfer-on-success pattern.
+    const code: [:0]const u8 =
+        \\const std = @import("std");
+        \\fn load(allocator: std.mem.Allocator, src: []const u8, list: *std.ArrayList([]u8)) !void {
+        \\    while (true) {
+        \\        const path_copy = try allocator.dupe(u8, src);
+        \\        errdefer allocator.free(path_copy);
+        \\        try list.append(allocator, path_copy);
+        \\    }
+        \\}
+    ;
+    try std.testing.expectEqual(@as(usize, 0), try countEscapeeDiagnostics(std.testing.allocator, code));
+}
+
+test "store_violations_engine flags escape through insertSlice into outer list" {
+    const code: [:0]const u8 =
+        \\const std = @import("std");
+        \\fn render(allocator: std.mem.Allocator, list: *std.ArrayList([]const u8)) !void {
+        \\    if (true) {
+        \\        const value = try allocator.alloc(u8, 2);
+        \\        defer allocator.free(value);
+        \\        try list.insertSlice(allocator, 0, &.{value});
+        \\    }
+        \\}
+    ;
+    try std.testing.expectEqual(@as(usize, 1), try countEscapeeDiagnostics(std.testing.allocator, code));
+}
+
+test "store_violations_engine ignores defer free of var never appended" {
+    const code: [:0]const u8 =
+        \\const std = @import("std");
+        \\const Item = struct { text: []const u8 };
+        \\fn ok(allocator: std.mem.Allocator) !void {
+        \\    var run_inputs: std.ArrayList(Item) = .empty;
+        \\    defer run_inputs.deinit(allocator);
+        \\    if (true) {
+        \\        const spaces = try allocator.alloc(u8, 2);
+        \\        defer allocator.free(spaces);
+        \\        _ = spaces[0];
+        \\    }
+        \\}
+    ;
+    try std.testing.expectEqual(@as(usize, 0), try countEscapeeDiagnostics(std.testing.allocator, code));
+}
+
+test "store_violations_engine ignores appendSlice copy idiom" {
+    // appendSlice / appendSliceAssumeCapacity / insertSlice iterate the slice
+    // argument and copy each element. A bare slice arg (`appendSlice(out, tmp)`)
+    // is consumed during the call; freeing tmp afterwards is safe. Only nested
+    // references (e.g. `&.{tmp}`) retain a pointer to the freed memory.
+    const code: [:0]const u8 =
+        \\const std = @import("std");
+        \\fn ok(allocator: std.mem.Allocator, out: *std.ArrayList(u8)) !void {
+        \\    if (true) {
+        \\        const tmp = try allocator.alloc(u8, 4);
+        \\        defer allocator.free(tmp);
+        \\        try out.appendSlice(allocator, tmp);
+        \\    }
+        \\}
+    ;
+    try std.testing.expectEqual(@as(usize, 0), try countEscapeeDiagnostics(std.testing.allocator, code));
+}
+
+test "store_violations_engine flags defer-free of slice escaped from switch arm" {
+    // The architect-crash shape: a switch arm wraps the alloc + defer + append
+    // pattern. Before switch CFG support landed, the engine never visited arm
+    // bodies; this test guards that the engine now sees the escape.
+    const code: [:0]const u8 =
+        \\const std = @import("std");
+        \\const Item = struct { text: []const u8 };
+        \\const Kind = enum { heading, paragraph };
+        \\fn render(allocator: std.mem.Allocator, kind: Kind, indent_spaces: usize) !void {
+        \\    var run_inputs: std.ArrayList(Item) = .empty;
+        \\    defer run_inputs.deinit(allocator);
+        \\    switch (kind) {
+        \\        .heading, .paragraph => {
+        \\            if (indent_spaces > 0) {
+        \\                const spaces = try allocator.alloc(u8, indent_spaces);
+        \\                defer allocator.free(spaces);
+        \\                try run_inputs.append(allocator, .{ .text = spaces });
+        \\            }
+        \\        },
+        \\    }
+        \\}
+    ;
+    try std.testing.expectEqual(@as(usize, 1), try countEscapeeDiagnostics(std.testing.allocator, code));
+}
+
+test "store_violations_engine detects double_free inside switch arm" {
+    const allocator = std.testing.allocator;
+    const code: [:0]const u8 =
+        \\const std = @import("std");
+        \\const Kind = enum { a, b };
+        \\fn run(allocator: std.mem.Allocator, k: Kind) !void {
+        \\    switch (k) {
+        \\        .a => {
+        \\            const p = try allocator.alloc(u8, 4);
+        \\            allocator.free(p);
+        \\            allocator.free(p);
+        \\        },
+        \\        .b => {},
+        \\    }
+        \\}
+    ;
+
+    var source = Source.init(allocator, "test.zig", code);
+    defer source.deinit();
+    var type_ctx = TypeContext.init(allocator, &source);
+    defer type_ctx.deinit();
+
+    var diagnostics: std.ArrayList(Diagnostic) = .empty;
+    defer {
+        for (diagnostics.items) |*diag| diag.deinit(allocator);
+        diagnostics.deinit(allocator);
+    }
+
+    try StoreViolationsEngineChecker.checker.checkAst(&source, allocator, &diagnostics, .{
+        .build_metadata = null,
+        .type_context = &type_ctx,
+    });
+
+    var double_free_count: usize = 0;
+    for (diagnostics.items) |diag| {
+        if (std.mem.indexOf(u8, diag.message, "double-free") != null) double_free_count += 1;
+    }
+    try std.testing.expectEqual(@as(usize, 1), double_free_count);
 }

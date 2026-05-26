@@ -4,6 +4,7 @@ const dot = @import("dot.zig");
 const builder_control_flow = @import("builder/control_flow.zig");
 const builder_error_flow = @import("builder/error_flow.zig");
 const builder_statements = @import("builder/statements.zig");
+const builder_switch_flow = @import("builder/switch_flow.zig");
 const builder_type_annotation = @import("builder/type_annotation.zig");
 const Source = @import("../source.zig").Source;
 const ids = @import("../ids.zig");
@@ -33,6 +34,7 @@ pub const CfgBuilder = struct {
     pub const statements = builder_statements.mixin(@This());
     pub const control_flow = builder_control_flow.mixin(@This());
     pub const error_flow = builder_error_flow.mixin(@This());
+    pub const switch_flow = builder_switch_flow.mixin(@This());
 
     pub const ProcessResult = struct {
         last: ?CfgNodeId,
@@ -193,6 +195,7 @@ pub const CfgBuilder = struct {
             .@"errdefer" => try error_flow.processErrdefer(self, cfg, source, ast_node, prev_node),
             .@"try" => try error_flow.processTry(self, cfg, source, ast_node, prev_node),
             .@"catch" => try error_flow.processCatch(self, cfg, source, ast_node, prev_node),
+            .@"switch", .switch_comma => try switch_flow.processSwitch(self, cfg, source, ast_node, prev_node),
             else => try statements.processGenericExpr(self, cfg, source, ast_node, prev_node),
         };
     }
@@ -1934,4 +1937,210 @@ test "CfgBuilder hasTypeContext" {
     // Set type context after init
     builder1.setTypeContext(&type_ctx);
     try testing.expect(builder1.hasTypeContext());
+}
+
+fn countCallsToName(cfg: *const Cfg, tree: *const std.zig.Ast, target: []const u8) usize {
+    const tags = tree.nodes.items(.tag);
+    const main_tokens = tree.nodes.items(.main_token);
+    const token_starts = tree.tokens.items(.start);
+    const src_bytes = tree.source;
+
+    var count: usize = 0;
+    var call_buf: [1]std.zig.Ast.Node.Index = undefined;
+    for (cfg.nodes.items) |node| {
+        if (node.ir_node.tag != .call) continue;
+        const ast_idx = node.ir_node.ast_node orelse continue;
+        if (ast_idx >= tags.len) continue;
+        const full_call = tree.fullCall(&call_buf, @enumFromInt(ast_idx)) orelse continue;
+        const callee_node = @intFromEnum(full_call.ast.fn_expr);
+        if (callee_node >= main_tokens.len) continue;
+        const tok = main_tokens[callee_node];
+        if (tok >= token_starts.len) continue;
+        const start = token_starts[tok];
+        var end = start;
+        while (end < src_bytes.len and (std.ascii.isAlphanumeric(src_bytes[end]) or src_bytes[end] == '_')) {
+            end += 1;
+        }
+        if (std.mem.eql(u8, src_bytes[start..end], target)) count += 1;
+    }
+    return count;
+}
+
+test "CfgBuilder simple switch statement visits arm bodies" {
+    const testing = std.testing;
+    const allocator = testing.allocator;
+
+    const code: [:0]const u8 =
+        \\fn a() void {}
+        \\fn b() void {}
+        \\fn c() void {}
+        \\fn foo(k: u8) void {
+        \\    switch (k) {
+        \\        0 => a(),
+        \\        1 => b(),
+        \\        else => c(),
+        \\    }
+        \\}
+    ;
+
+    var source = Source.init(allocator, "test.zig", code);
+    defer source.deinit();
+
+    var builder = CfgBuilder.init(allocator);
+    const tree = try source.ast();
+    const root_decls = tree.rootDecls();
+    const foo_node = ids.astId(@intFromEnum(root_decls[3]));
+    const maybe_cfg = try builder.buildFromFn(&source, foo_node);
+    try testing.expect(maybe_cfg != null);
+    var cfg = maybe_cfg.?;
+    defer cfg.deinit();
+
+    var branch_count: usize = 0;
+    var nop_count: usize = 0;
+    var call_count: usize = 0;
+    for (cfg.nodes.items) |node| {
+        switch (node.ir_node.tag) {
+            .branch => branch_count += 1,
+            .nop => nop_count += 1,
+            .call => call_count += 1,
+            else => {},
+        }
+    }
+    try testing.expectEqual(@as(usize, 1), branch_count);
+    try testing.expect(nop_count >= 1);
+    try testing.expectEqual(@as(usize, 3), call_count);
+
+    try testing.expectEqual(@as(usize, 1), countCallsToName(&cfg, tree, "a"));
+    try testing.expectEqual(@as(usize, 1), countCallsToName(&cfg, tree, "b"));
+    try testing.expectEqual(@as(usize, 1), countCallsToName(&cfg, tree, "c"));
+}
+
+test "CfgBuilder switch with all-terminating arms" {
+    const testing = std.testing;
+    const allocator = testing.allocator;
+
+    const code: [:0]const u8 =
+        \\fn foo(k: u8) u32 {
+        \\    switch (k) {
+        \\        0 => return 1,
+        \\        1 => return 2,
+        \\        else => return 3,
+        \\    }
+        \\}
+    ;
+
+    var source = Source.init(allocator, "test.zig", code);
+    defer source.deinit();
+
+    var builder = CfgBuilder.init(allocator);
+    const tree = try source.ast();
+    const root_decls = tree.rootDecls();
+    const fn_node = ids.astId(@intFromEnum(root_decls[0]));
+    const maybe_cfg = try builder.buildFromFn(&source, fn_node);
+    try testing.expect(maybe_cfg != null);
+    var cfg = maybe_cfg.?;
+    defer cfg.deinit();
+
+    var ret_count: usize = 0;
+    for (cfg.nodes.items) |node| {
+        if (node.ir_node.tag == .ret) ret_count += 1;
+    }
+    try testing.expectEqual(@as(usize, 3), ret_count);
+}
+
+test "CfgBuilder switch with payload capture visits body" {
+    const testing = std.testing;
+    const allocator = testing.allocator;
+
+    const code: [:0]const u8 =
+        \\fn consume(x: u32) void { _ = x; }
+        \\const U = union(enum) { foo: u32, bar: void };
+        \\fn handle(u: U) void {
+        \\    switch (u) {
+        \\        .foo => |v| consume(v),
+        \\        .bar => {},
+        \\    }
+        \\}
+    ;
+
+    var source = Source.init(allocator, "test.zig", code);
+    defer source.deinit();
+
+    var builder = CfgBuilder.init(allocator);
+    const tree = try source.ast();
+    const root_decls = tree.rootDecls();
+    const handle_node = ids.astId(@intFromEnum(root_decls[2]));
+    const maybe_cfg = try builder.buildFromFn(&source, handle_node);
+    try testing.expect(maybe_cfg != null);
+    var cfg = maybe_cfg.?;
+    defer cfg.deinit();
+
+    try testing.expectEqual(@as(usize, 1), countCallsToName(&cfg, tree, "consume"));
+}
+
+test "CfgBuilder inline switch in var_decl init visits arms" {
+    const testing = std.testing;
+    const allocator = testing.allocator;
+
+    const code: [:0]const u8 =
+        \\fn compute() u32 { return 1; }
+        \\fn other() u32 { return 2; }
+        \\fn foo(k: u8) u32 {
+        \\    const v = switch (k) {
+        \\        0 => compute(),
+        \\        else => other(),
+        \\    };
+        \\    return v;
+        \\}
+    ;
+
+    var source = Source.init(allocator, "test.zig", code);
+    defer source.deinit();
+
+    var builder = CfgBuilder.init(allocator);
+    const tree = try source.ast();
+    const root_decls = tree.rootDecls();
+    const foo_node = ids.astId(@intFromEnum(root_decls[2]));
+    const maybe_cfg = try builder.buildFromFn(&source, foo_node);
+    try testing.expect(maybe_cfg != null);
+    var cfg = maybe_cfg.?;
+    defer cfg.deinit();
+
+    try testing.expectEqual(@as(usize, 1), countCallsToName(&cfg, tree, "compute"));
+    try testing.expectEqual(@as(usize, 1), countCallsToName(&cfg, tree, "other"));
+
+    var var_decl_count: usize = 0;
+    for (cfg.nodes.items) |node| {
+        if (node.ir_node.tag == .var_decl) var_decl_count += 1;
+    }
+    try testing.expectEqual(@as(usize, 1), var_decl_count);
+}
+
+test "CfgBuilder switch with empty arm body" {
+    const testing = std.testing;
+    const allocator = testing.allocator;
+
+    const code: [:0]const u8 =
+        \\fn act() void {}
+        \\fn foo(k: u8) void {
+        \\    switch (k) {
+        \\        0 => {},
+        \\        else => act(),
+        \\    }
+        \\}
+    ;
+
+    var source = Source.init(allocator, "test.zig", code);
+    defer source.deinit();
+
+    var builder = CfgBuilder.init(allocator);
+    const tree = try source.ast();
+    const root_decls = tree.rootDecls();
+    const foo_node = ids.astId(@intFromEnum(root_decls[1]));
+    const maybe_cfg = try builder.buildFromFn(&source, foo_node);
+    try testing.expect(maybe_cfg != null);
+    var cfg = maybe_cfg.?;
+    defer cfg.deinit();
+
+    try testing.expectEqual(@as(usize, 1), countCallsToName(&cfg, tree, "act"));
 }

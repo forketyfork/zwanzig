@@ -305,48 +305,6 @@ const members = getMembers(tree, node_idx, &buf);
 
 This rule complements `stack-escape-engine` by catching patterns where the escape happens through an intermediate function call that the dataflow analysis can't track.
 
-### defer-frees-escapee
-
-Detects a `defer` whose release call frees a local resource that has already escaped into a container declared in a strictly outer scope. When the inner block ends, the deferred free fires unconditionally while the outer container still holds a reference to the freed memory, so the next access through the container is a use-after-free.
-
-The rule fires when:
-1. A `defer` statement appears in a nested (non-function-body) block.
-2. The defer body matches `<receiver>.free(X)` or `<receiver>.destroy(X)` with `X` a single identifier.
-3. `X` is declared by a `var`/`const` inside the same nested block.
-4. Within the same block, an `append`/`appendSlice`/`appendAssumeCapacity`/`appendSliceAssumeCapacity`/`insert`/`insertSlice` call is made on a receiver whose root identifier is *not* declared in this block, and that call's argument tree mentions `X`.
-
-**Bad:**
-```zig
-if (indent > 0) {
-    const spaces = try allocator.alloc(u8, indent);
-    defer allocator.free(spaces); // fires when this if-block exits
-    try run_inputs.append(allocator, .{ .text = spaces });
-}
-// run_inputs.items now holds a dangling slice
-```
-
-**Good (use a static buffer or move the lifetime out):**
-```zig
-const indent_padding: [24]u8 = [_]u8{' '} ** 24;
-// ...
-if (indent > 0) {
-    try run_inputs.append(allocator, .{ .text = indent_padding[0..indent] });
-}
-```
-
-**Good (move the defer to match the container's lifetime):**
-```zig
-var spaces_opt: ?[]u8 = null;
-defer if (spaces_opt) |s| allocator.free(s);
-if (indent > 0) {
-    const spaces = try allocator.alloc(u8, indent);
-    spaces_opt = spaces;
-    try run_inputs.append(allocator, .{ .text = spaces });
-}
-```
-
-`errdefer` is intentionally not flagged: the standard `errdefer free(x)` followed by `try container.append(x)` ownership-transfer idiom is correct, since errdefer does not fire on the success path. `put`-family methods (HashMap, Cache, …) are also excluded for v1 because many non-container APIs use the same name but consume their data during the call. A future engine-backed checker that consults type information can lift both restrictions.
-
 ### deinit-lifecycle
 
 Detects two lifecycle patterns that often produce double-cleanup bugs during error unwind:
@@ -687,7 +645,7 @@ fn baz() i32 {
 
 ### store-violations-engine
 
-Detects allocator/resource misuse: double-free, free-without-alloc, close-without-open, use-after-free/close, and leaks.
+Detects allocator/resource misuse: double-free, free-without-alloc, close-without-open, use-after-free/close, leaks, and **defer-frees-escapee** (a resource freed by `defer` that has already escaped into an outer container).
 
 **Error-path leak policy:** Leak checks run only on normal return paths. When a function returns an error (detected by literal error values or type-based analysis), leak reports are suppressed. This avoids false positives in code that cleans up via `errdefer`.
 
@@ -699,12 +657,39 @@ Resources stored in aggregates are treated as escaping with the aggregate.
 
 **Resource modeling:** Built-in allocator detection includes `alloc`/`free`, `dupe`, and `create`/`destroy`. Configurable `resource_models` can add project-specific APIs. `kind: "free_owned"` models APIs like `deinit` that free resources owned by a value without freeing the value itself.
 
-**Bad:**
+**Defer-frees-escapee detection:** When a value with a pending `defer <allocator>.free(x)` queued in a **nested** block is passed into `append`/`appendSlice`/`appendAssumeCapacity`/`appendSliceAssumeCapacity`/`insert`/`insertSlice` on a container whose declaration outlives that block, the engine reports a future use-after-free. The check covers any nested block — `if`, `while`, `for`, `switch` arms, and plain `{ ... }` blocks all qualify. The "outlives" check covers function parameters, top-level decls, `self.field` chains, and any local container declared above the defer's block. Defers at function-body scope are not flagged: without type info the engine cannot distinguish "`ArrayList(u8).appendSlice(byte_slice)` copies bytes" from "`ArrayList(Item).append(.{ .text = slice })` stores by reference", and the function-body case overlaps the legitimate copy idiom. A bare slice argument to `appendSlice`/`appendSliceAssumeCapacity`/`insertSlice` (e.g. `try out.appendSlice(allocator, tmp)`) is treated as the copy idiom and not flagged; only nested references (e.g. `&.{tmp}`) trigger the diagnostic. `errdefer` is not flagged because the canonical `errdefer free(x); try list.append(x)` ownership-transfer idiom is correct on the success path. The `put`/`putAssumeCapacity` family is not flagged because many non-container APIs (caches, writers, IO sinks) share the same names but consume their input during the call; a future type-aware extension can lift both restrictions.
+
+**Bad — double free:**
 ```zig
 fn foo(allocator: std.mem.Allocator) !void {
     var ptr = try allocator.alloc(u8, 1);
     allocator.free(ptr);
     allocator.free(ptr); // double-free
+}
+```
+
+**Bad — defer frees escapee:**
+```zig
+fn render(allocator: std.mem.Allocator, run_inputs: *std.ArrayList(Item)) !void {
+    if (indent > 0) {
+        const spaces = try allocator.alloc(u8, indent);
+        defer allocator.free(spaces); // fires when this if-block exits
+        try run_inputs.append(allocator, .{ .text = spaces });
+    }
+    // run_inputs now holds a dangling slice
+}
+```
+
+**Good (lift the lifetime up to match the container):**
+```zig
+fn render(allocator: std.mem.Allocator, run_inputs: *std.ArrayList(Item)) !void {
+    var spaces_opt: ?[]u8 = null;
+    defer if (spaces_opt) |s| allocator.free(s);
+    if (indent > 0) {
+        const spaces = try allocator.alloc(u8, indent);
+        spaces_opt = spaces;
+        try run_inputs.append(allocator, .{ .text = spaces });
+    }
 }
 ```
 

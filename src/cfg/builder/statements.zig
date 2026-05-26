@@ -111,6 +111,8 @@ pub fn mixin(comptime _Builder: type) type {
                         return try _Builder.error_flow.processReturnWithTry(self, cfg, source, ast_node, ret_expr_idx, prev_node, range);
                     } else if (ret_expr_tag == .@"catch") {
                         return try _Builder.error_flow.processReturnWithCatch(self, cfg, source, ast_node, ret_expr_idx, prev_node, range);
+                    } else if (ret_expr_tag == .@"switch" or ret_expr_tag == .switch_comma) {
+                        return try _Builder.switch_flow.processReturnWithSwitch(self, cfg, source, ast_node, ret_expr_idx, prev_node, range);
                     }
                 }
             }
@@ -143,6 +145,8 @@ pub fn mixin(comptime _Builder: type) type {
                             return try _Builder.error_flow.processVarDeclWithTry(self, cfg, source, ast_node, init_idx, prev_node, range);
                         } else if (init_tag == .@"catch") {
                             return try _Builder.error_flow.processVarDeclWithCatch(self, cfg, source, ast_node, init_idx, prev_node, range);
+                        } else if (init_tag == .@"switch" or init_tag == .switch_comma) {
+                            return try _Builder.switch_flow.processVarDeclWithSwitch(self, cfg, source, ast_node, init_idx, prev_node, range);
                         }
                     }
                 }
@@ -181,6 +185,8 @@ pub fn mixin(comptime _Builder: type) type {
                     return try _Builder.error_flow.processAssignWithTry(self, cfg, source, ast_node, lhs_idx, rhs_idx, prev_node, range);
                 } else if (rhs_tag == .@"catch") {
                     return try _Builder.error_flow.processAssignWithCatch(self, cfg, source, ast_node, lhs_idx, rhs_idx, prev_node, range);
+                } else if (rhs_tag == .@"switch" or rhs_tag == .switch_comma) {
+                    return try _Builder.switch_flow.processAssignWithSwitch(self, cfg, source, ast_node, lhs_idx, rhs_idx, prev_node, range);
                 }
             }
 

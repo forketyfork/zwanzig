@@ -21,6 +21,10 @@ pub const StoreViolationKind = enum {
     use_after_free,
     use_after_close,
     resource_leak,
+    /// A resource with a queued deferred free was passed into a container
+    /// declared in a scope that outlives the defer. When the defer fires
+    /// at block exit the container is left holding a freed slice.
+    defer_frees_escapee,
 };
 
 const DeferredAction = enum {
@@ -28,6 +32,18 @@ const DeferredAction = enum {
     close,
     free_owned,
 };
+
+const DeferredEntry = struct {
+    action: DeferredAction,
+    /// AST node of the lexical block that owns the defer. When that block
+    /// exits the action fires; this is what makes "container outlives defer"
+    /// decidable at the moment of escape.
+    scope_node: ?u32,
+};
+
+fn deferredEntryEql(lhs: DeferredEntry, rhs: DeferredEntry) bool {
+    return lhs.action == rhs.action and lhs.scope_node == rhs.scope_node;
+}
 
 const ErrdeferAction = struct {
     action: DeferredAction,
@@ -68,7 +84,7 @@ pub const Store = struct {
     resources: std.AutoHashMap(VarId, ResourceState),
     violations: std.ArrayList(StoreViolation),
     aliases: std.AutoHashMap(VarId, VarId),
-    deferred: std.AutoHashMap(VarId, DeferredAction),
+    deferred: std.AutoHashMap(VarId, DeferredEntry),
     errdeferred: std.AutoHashMap(VarId, ErrdeferAction),
     owners: std.AutoHashMap(VarId, VarId),
     allocator: std.mem.Allocator,
@@ -78,7 +94,7 @@ pub const Store = struct {
             .resources = std.AutoHashMap(VarId, ResourceState).init(allocator),
             .violations = .empty,
             .aliases = std.AutoHashMap(VarId, VarId).init(allocator),
-            .deferred = std.AutoHashMap(VarId, DeferredAction).init(allocator),
+            .deferred = std.AutoHashMap(VarId, DeferredEntry).init(allocator),
             .errdeferred = std.AutoHashMap(VarId, ErrdeferAction).init(allocator),
             .owners = std.AutoHashMap(VarId, VarId).init(allocator),
             .allocator = allocator,
@@ -166,8 +182,8 @@ pub const Store = struct {
         if (self.deferred.count() != other.deferred.count()) return false;
         var deferred_iter = self.deferred.iterator();
         while (deferred_iter.next()) |entry| {
-            if (other.deferred.get(entry.key_ptr.*)) |other_action| {
-                if (entry.value_ptr.* != other_action) return false;
+            if (other.deferred.get(entry.key_ptr.*)) |other_entry| {
+                if (!deferredEntryEql(entry.value_ptr.*, other_entry)) return false;
             } else {
                 return false;
             }
@@ -230,7 +246,13 @@ pub const Store = struct {
             var hasher = std.hash.Wyhash.init(0);
             const key = ids.varIndex(entry.key_ptr.*);
             hasher.update(std.mem.asBytes(&key));
-            hasher.update(std.mem.asBytes(&entry.value_ptr.*));
+            const action = entry.value_ptr.*.action;
+            hasher.update(std.mem.asBytes(&action));
+            const has_scope: u8 = if (entry.value_ptr.*.scope_node) |_| 1 else 0;
+            hasher.update(std.mem.asBytes(&has_scope));
+            if (entry.value_ptr.*.scope_node) |scope| {
+                hasher.update(std.mem.asBytes(&scope));
+            }
             deferred_hash ^= hasher.final();
         }
 
@@ -457,8 +479,8 @@ pub const Store = struct {
 
     pub fn markFreed(self: *Store, region: VarId, call_token: ?u32) !void {
         const root = self.canonical(region);
-        if (self.deferred.get(root)) |action| {
-            if (action == .free) {
+        if (self.deferred.get(root)) |entry| {
+            if (entry.action == .free) {
                 try self.recordViolation(root, .double_free, call_token);
             }
         }
@@ -480,8 +502,8 @@ pub const Store = struct {
 
     pub fn markClosed(self: *Store, region: VarId, call_token: ?u32) !void {
         const root = self.canonical(region);
-        if (self.deferred.get(root)) |action| {
-            if (action == .close) {
+        if (self.deferred.get(root)) |entry| {
+            if (entry.action == .close) {
                 try self.recordViolation(root, .double_close, call_token);
             }
         }
@@ -528,10 +550,10 @@ pub const Store = struct {
         }
     }
 
-    pub fn markDeferredFree(self: *Store, region: VarId, call_token: ?u32) !void {
+    pub fn markDeferredFree(self: *Store, region: VarId, call_token: ?u32, scope_node: ?u32) !void {
         const root = self.canonical(region);
-        if (self.deferred.get(root)) |action| {
-            if (action == .free) {
+        if (self.deferred.get(root)) |entry| {
+            if (entry.action == .free) {
                 try self.recordViolation(root, .double_free, call_token);
             }
         }
@@ -540,23 +562,23 @@ pub const Store = struct {
                 try self.recordViolation(root, .free_without_alloc, call_token);
             }
         }
-        try self.deferred.put(root, .free);
+        try self.deferred.put(root, .{ .action = .free, .scope_node = scope_node });
     }
 
-    pub fn markDeferredFreeOwned(self: *Store, region: VarId, call_token: ?u32) !void {
+    pub fn markDeferredFreeOwned(self: *Store, region: VarId, call_token: ?u32, scope_node: ?u32) !void {
         const root = self.canonical(region);
-        if (self.deferred.get(root)) |action| {
-            if (action == .free_owned) {
+        if (self.deferred.get(root)) |entry| {
+            if (entry.action == .free_owned) {
                 try self.recordViolation(root, .double_free, call_token);
             }
         }
-        try self.deferred.put(root, .free_owned);
+        try self.deferred.put(root, .{ .action = .free_owned, .scope_node = scope_node });
     }
 
-    pub fn markDeferredClose(self: *Store, region: VarId, call_token: ?u32) !void {
+    pub fn markDeferredClose(self: *Store, region: VarId, call_token: ?u32, scope_node: ?u32) !void {
         const root = self.canonical(region);
-        if (self.deferred.get(root)) |action| {
-            if (action == .close) {
+        if (self.deferred.get(root)) |entry| {
+            if (entry.action == .close) {
                 try self.recordViolation(root, .double_close, call_token);
             }
         }
@@ -565,7 +587,7 @@ pub const Store = struct {
                 try self.recordViolation(root, .close_without_open, call_token);
             }
         }
-        try self.deferred.put(root, .close);
+        try self.deferred.put(root, .{ .action = .close, .scope_node = scope_node });
     }
 
     pub fn markErrdeferredFree(self: *Store, region: VarId, call_token: ?u32, scope_node: ?u32) !void {
@@ -633,8 +655,8 @@ pub const Store = struct {
         while (iter.next()) |entry| {
             switch (entry.value_ptr.*) {
                 .allocated => {
-                    if (self.deferred.get(entry.key_ptr.*)) |action| {
-                        if (action == .free) continue;
+                    if (self.deferred.get(entry.key_ptr.*)) |deferred_entry| {
+                        if (deferred_entry.action == .free) continue;
                     }
                     if (self.ownerHasDeferredFreeOwned(entry.key_ptr.*, error_path)) {
                         continue;
@@ -647,8 +669,8 @@ pub const Store = struct {
                     try self.recordViolation(entry.key_ptr.*, .resource_leak, ids.varIndex(entry.key_ptr.*));
                 },
                 .open => {
-                    if (self.deferred.get(entry.key_ptr.*)) |action| {
-                        if (action == .close) continue;
+                    if (self.deferred.get(entry.key_ptr.*)) |deferred_entry| {
+                        if (deferred_entry.action == .close) continue;
                     }
                     if (self.ownerHasDeferredFreeOwned(entry.key_ptr.*, error_path)) {
                         continue;
@@ -668,8 +690,8 @@ pub const Store = struct {
     fn ownerHasDeferredFreeOwned(self: *const Store, region: VarId, error_path: bool) bool {
         const root = self.canonical(region);
         const owner = self.owners.get(root) orelse return false;
-        if (self.deferred.get(owner)) |action| {
-            if (action == .free_owned) return true;
+        if (self.deferred.get(owner)) |entry| {
+            if (entry.action == .free_owned) return true;
         }
         if (error_path) {
             if (self.errdeferred.get(owner)) |action| {
@@ -685,6 +707,23 @@ pub const Store = struct {
 
     pub fn getViolations(self: *const Store) []const StoreViolation {
         return self.violations.items;
+    }
+
+    /// Return the AST node of the lexical scope owning the pending defer-free
+    /// for `region`, if any is queued and the scope was recorded.
+    pub fn pendingDeferredFreeScope(self: *const Store, region: VarId) ?u32 {
+        const root = self.canonical(region);
+        const entry = self.deferred.get(root) orelse return null;
+        if (entry.action != .free and entry.action != .free_owned) return null;
+        return entry.scope_node;
+    }
+
+    /// Record that `resource` was just appended into a container declared in a
+    /// scope that outlives the defer-free queued on `resource`. The defer will
+    /// fire at block exit, leaving the container holding a dangling slice.
+    pub fn recordDeferFreesEscapee(self: *Store, resource: VarId, call_token: ?u32) !void {
+        const root = self.canonical(resource);
+        try self.recordViolation(root, .defer_frees_escapee, call_token);
     }
 
     fn recordViolation(self: *Store, region: VarId, kind: StoreViolationKind, call_token: ?u32) !void {
@@ -771,11 +810,11 @@ pub const Store = struct {
         var self_def_iter = self.deferred.iterator();
         while (self_def_iter.next()) |entry| {
             const region = entry.key_ptr.*;
-            const self_action = entry.value_ptr.*;
+            const self_entry = entry.value_ptr.*;
 
-            if (other.deferred.get(region)) |other_action| {
-                if (self_action == other_action) {
-                    try result.deferred.put(region, self_action);
+            if (other.deferred.get(region)) |other_entry| {
+                if (deferredEntryEql(self_entry, other_entry)) {
+                    try result.deferred.put(region, self_entry);
                 }
             }
         }
@@ -858,9 +897,9 @@ pub const Store = struct {
         var deferred_iter = self.deferred.iterator();
         while (deferred_iter.next()) |entry| {
             const region = entry.key_ptr.*;
-            const self_action = entry.value_ptr.*;
-            const other_action = other.deferred.get(region) orelse return false;
-            if (self_action != other_action) return false;
+            const self_entry = entry.value_ptr.*;
+            const other_entry = other.deferred.get(region) orelse return false;
+            if (!deferredEntryEql(self_entry, other_entry)) return false;
         }
 
         var errdeferred_iter = self.errdeferred.iterator();

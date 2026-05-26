@@ -313,20 +313,20 @@ pub const ProgramState = struct {
     }
 
     /// Track a deferred free for a region.
-    pub fn trackDeferredFree(self: *ProgramState, region: VarId, call_token: ?u32) !void {
-        try self.store.markDeferredFree(region, call_token);
+    pub fn trackDeferredFree(self: *ProgramState, region: VarId, call_token: ?u32, scope_node: ?u32) !void {
+        try self.store.markDeferredFree(region, call_token, scope_node);
         self.invalidateCache();
     }
 
     /// Track a deferred free-owned for a region.
-    pub fn trackDeferredFreeOwned(self: *ProgramState, region: VarId, call_token: ?u32) !void {
-        try self.store.markDeferredFreeOwned(region, call_token);
+    pub fn trackDeferredFreeOwned(self: *ProgramState, region: VarId, call_token: ?u32, scope_node: ?u32) !void {
+        try self.store.markDeferredFreeOwned(region, call_token, scope_node);
         self.invalidateCache();
     }
 
     /// Track a deferred close for a region.
-    pub fn trackDeferredClose(self: *ProgramState, region: VarId, call_token: ?u32) !void {
-        try self.store.markDeferredClose(region, call_token);
+    pub fn trackDeferredClose(self: *ProgramState, region: VarId, call_token: ?u32, scope_node: ?u32) !void {
+        try self.store.markDeferredClose(region, call_token, scope_node);
         self.invalidateCache();
     }
 
