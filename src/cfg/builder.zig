@@ -196,6 +196,7 @@ pub const CfgBuilder = struct {
             .@"try" => try error_flow.processTry(self, cfg, source, ast_node, prev_node),
             .@"catch" => try error_flow.processCatch(self, cfg, source, ast_node, prev_node),
             .@"switch", .switch_comma => try switch_flow.processSwitch(self, cfg, source, ast_node, prev_node),
+            .unreachable_literal => try statements.processUnreachable(self, cfg, source, ast_node, prev_node),
             else => try statements.processGenericExpr(self, cfg, source, ast_node, prev_node),
         };
     }
@@ -2046,6 +2047,85 @@ test "CfgBuilder switch with all-terminating arms" {
         if (node.ir_node.tag == .ret) ret_count += 1;
     }
     try testing.expectEqual(@as(usize, 3), ret_count);
+}
+
+test "CfgBuilder switch with unreachable arm terminates that path" {
+    const testing = std.testing;
+    const allocator = testing.allocator;
+
+    const code: [:0]const u8 =
+        \\fn act() void {}
+        \\fn foo(k: u8) void {
+        \\    switch (k) {
+        \\        0 => unreachable,
+        \\        else => act(),
+        \\    }
+        \\}
+    ;
+
+    var source = Source.init(allocator, "test.zig", code);
+    defer source.deinit();
+
+    var builder = CfgBuilder.init(allocator);
+    const tree = try source.ast();
+    const root_decls = tree.rootDecls();
+    const foo_node = ids.astId(@intFromEnum(root_decls[1]));
+    const maybe_cfg = try builder.buildFromFn(&source, foo_node);
+    try testing.expect(maybe_cfg != null);
+    var cfg = maybe_cfg.?;
+    defer cfg.deinit();
+
+    var unreachable_node: ?ids.CfgNodeId = null;
+    for (cfg.nodes.items) |node| {
+        if (node.ir_node.tag == .unreachable_stmt) {
+            unreachable_node = node.index;
+            break;
+        }
+    }
+    try testing.expect(unreachable_node != null);
+
+    // The unreachable node must have no outgoing edges — the path stops here
+    // and never feeds the merge.
+    for (cfg.edges.items) |edge| {
+        try testing.expect(edge.from != unreachable_node.?);
+    }
+}
+
+test "CfgBuilder all-arms-unreachable switch propagates terminates" {
+    const testing = std.testing;
+    const allocator = testing.allocator;
+
+    const code: [:0]const u8 =
+        \\fn foo(k: u8) void {
+        \\    switch (k) {
+        \\        0 => unreachable,
+        \\        else => unreachable,
+        \\    }
+        \\}
+    ;
+
+    var source = Source.init(allocator, "test.zig", code);
+    defer source.deinit();
+
+    var builder = CfgBuilder.init(allocator);
+    const tree = try source.ast();
+    const root_decls = tree.rootDecls();
+    const fn_node = ids.astId(@intFromEnum(root_decls[0]));
+    const maybe_cfg = try builder.buildFromFn(&source, fn_node);
+    try testing.expect(maybe_cfg != null);
+    var cfg = maybe_cfg.?;
+    defer cfg.deinit();
+
+    // Every unreachable_stmt node must be a dead end (no outgoing edges).
+    var unreachable_count: usize = 0;
+    for (cfg.nodes.items) |node| {
+        if (node.ir_node.tag != .unreachable_stmt) continue;
+        unreachable_count += 1;
+        for (cfg.edges.items) |edge| {
+            try testing.expect(edge.from != node.index);
+        }
+    }
+    try testing.expectEqual(@as(usize, 2), unreachable_count);
 }
 
 test "CfgBuilder switch with payload capture visits body" {

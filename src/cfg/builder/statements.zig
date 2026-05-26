@@ -222,5 +222,25 @@ pub fn mixin(comptime _Builder: type) type {
             try cfg.addEdge(prev_node, expr_node);
             return .{ .last = expr_node, .terminates = false };
         }
+
+        /// `unreachable` is a statically dead point: any path that reaches it
+        /// does not continue. Create an IR node so analyses can see the
+        /// statement, attach an incoming edge, and return `terminates = true`
+        /// so the surrounding block stops feeding successors. No outgoing
+        /// edges are added; the engine treats a node with no successors as a
+        /// dead end and stops propagating state.
+        pub fn processUnreachable(
+            self: *_Builder,
+            cfg: *Cfg,
+            source: *Source,
+            ast_node: u32,
+            prev_node: CfgNodeId,
+        ) !_Builder.ProcessResult {
+            _ = self;
+            const range = try source_range.getSourceRange(source, ast_node);
+            const u_node = try cfg.addNode(IrNode.initFull(.unreachable_stmt, ast_node, range));
+            try cfg.addEdge(prev_node, u_node);
+            return .{ .last = u_node, .terminates = true };
+        }
     };
 }

@@ -278,19 +278,8 @@ pub fn mixin(comptime _Engine: type) type {
             const tree = src.ast() catch return;
             const parent_map = try self.getParentMap(tree);
             const tags = tree.nodes.items(.tag);
-            const datas = tree.nodes.items(.data);
 
             const call_token = _Engine.ownership.resolveCallToken(self, call_node);
-
-            // Skip if we cannot identify the function body. Without that anchor
-            // we can't tell a nested defer from a fn-body-level defer and would
-            // false-positive on the common "copy a slice into a caller-owned
-            // ArrayList(u8)" pattern where the copy semantics make the defer safe.
-            const fn_node_id = current_cfg.fn_ast_node orelse return;
-            const fn_node = ids.astIndex(fn_node_id);
-            if (fn_node >= tags.len or tags[fn_node] != .fn_decl) return;
-            const fn_body = @intFromEnum(datas[fn_node].node_and_node[1]);
-            if (fn_body == 0) return;
 
             var seen: std.AutoHashMap(ids.VarId, void) = .init(self.allocator);
             defer seen.deinit();
@@ -304,7 +293,6 @@ pub fn mixin(comptime _Engine: type) type {
                 receiver_node,
                 item_expr_node,
                 call_token,
-                fn_body,
                 current_cfg,
                 &seen,
             );
@@ -319,7 +307,6 @@ pub fn mixin(comptime _Engine: type) type {
             receiver_node: u32,
             expr_node: u32,
             call_token: ?u32,
-            fn_body: u32,
             current_cfg: *const Cfg,
             seen: *std.AutoHashMap(ids.VarId, void),
         ) EngineError!void {
@@ -332,15 +319,13 @@ pub fn mixin(comptime _Engine: type) type {
                     if (seen.contains(var_id)) return;
                     try seen.put(var_id, {});
                     const defer_scope = state.store.pendingDeferredFreeScope(var_id) orelse return;
-                    // Only fire for defers in nested blocks. A defer at function-body
-                    // level fires at fn exit, where same-fn local containers' defers
-                    // also fire in reverse-declaration order — the AST rule treated
-                    // this as safe and so do we. Caller-owned `ArrayList(u8)` +
-                    // `appendSlice(byte_slice)` copies bytes, so the slice can be
-                    // safely freed afterward; without type info we can't tell that
-                    // from `ArrayList(Item).append(.{ .text = slice })`, so we
-                    // mirror the AST rule's scope filter rather than firing.
-                    if (defer_scope == fn_body) return;
+                    // Same-block locals are safe (defers fire in reverse declaration
+                    // order, so the container is destroyed before the resource).
+                    // Parameters, top-level decls, and any container declared outside
+                    // the defer's scope are not. The bare-slice carve-out for the
+                    // appendSlice / insertSlice family already excludes the byte-slice
+                    // copy idiom upstream, so the remaining append/insert call shapes
+                    // store by reference and a dangling escape is a real UAF.
                     if (containerOutlivesDeferScope(self, tree, tags, parent_map, receiver_node, defer_scope, current_cfg)) {
                         try state.store.recordDeferFreesEscapee(var_id, call_token);
                         state.invalidateCache();
@@ -348,43 +333,43 @@ pub fn mixin(comptime _Engine: type) type {
                 },
                 .grouped_expression, .unwrap_optional => {
                     const data = datas[expr_node].node_and_token;
-                    try collectEscapeeViolations(self, state, tree, tags, parent_map, receiver_node, @intFromEnum(data[0]), call_token, fn_body, current_cfg, seen);
+                    try collectEscapeeViolations(self, state, tree, tags, parent_map, receiver_node, @intFromEnum(data[0]), call_token, current_cfg, seen);
                 },
                 .slice, .slice_open, .slice_sentinel => {
                     const slice = tree.fullSlice(@enumFromInt(expr_node)) orelse return;
-                    try collectEscapeeViolations(self, state, tree, tags, parent_map, receiver_node, @intFromEnum(slice.ast.sliced), call_token, fn_body, current_cfg, seen);
+                    try collectEscapeeViolations(self, state, tree, tags, parent_map, receiver_node, @intFromEnum(slice.ast.sliced), call_token, current_cfg, seen);
                 },
                 .array_access => {
                     const pair = datas[expr_node].node_and_node;
-                    try collectEscapeeViolations(self, state, tree, tags, parent_map, receiver_node, @intFromEnum(pair[0]), call_token, fn_body, current_cfg, seen);
+                    try collectEscapeeViolations(self, state, tree, tags, parent_map, receiver_node, @intFromEnum(pair[0]), call_token, current_cfg, seen);
                 },
                 .field_access => {
                     const data = datas[expr_node].node_and_token;
-                    try collectEscapeeViolations(self, state, tree, tags, parent_map, receiver_node, @intFromEnum(data[0]), call_token, fn_body, current_cfg, seen);
+                    try collectEscapeeViolations(self, state, tree, tags, parent_map, receiver_node, @intFromEnum(data[0]), call_token, current_cfg, seen);
                 },
                 .address_of, .deref, .@"try" => {
                     const child = datas[expr_node].node;
-                    try collectEscapeeViolations(self, state, tree, tags, parent_map, receiver_node, @intFromEnum(child), call_token, fn_body, current_cfg, seen);
+                    try collectEscapeeViolations(self, state, tree, tags, parent_map, receiver_node, @intFromEnum(child), call_token, current_cfg, seen);
                 },
                 .@"catch" => {
                     const pair = datas[expr_node].node_and_node;
-                    try collectEscapeeViolations(self, state, tree, tags, parent_map, receiver_node, @intFromEnum(pair[0]), call_token, fn_body, current_cfg, seen);
-                    try collectEscapeeViolations(self, state, tree, tags, parent_map, receiver_node, @intFromEnum(pair[1]), call_token, fn_body, current_cfg, seen);
+                    try collectEscapeeViolations(self, state, tree, tags, parent_map, receiver_node, @intFromEnum(pair[0]), call_token, current_cfg, seen);
+                    try collectEscapeeViolations(self, state, tree, tags, parent_map, receiver_node, @intFromEnum(pair[1]), call_token, current_cfg, seen);
                 },
                 .struct_init, .struct_init_comma, .struct_init_one, .struct_init_one_comma, .struct_init_dot, .struct_init_dot_comma, .struct_init_dot_two, .struct_init_dot_two_comma => {
                     var buf: [2]std.zig.Ast.Node.Index = undefined;
                     const struct_init = tree.fullStructInit(&buf, @enumFromInt(expr_node)) orelse return;
                     for (struct_init.ast.fields) |field| {
-                        try collectEscapeeViolations(self, state, tree, tags, parent_map, receiver_node, @intFromEnum(field), call_token, fn_body, current_cfg, seen);
+                        try collectEscapeeViolations(self, state, tree, tags, parent_map, receiver_node, @intFromEnum(field), call_token, current_cfg, seen);
                     }
                 },
                 .container_field, .container_field_init, .container_field_align => {
                     const field = tree.fullContainerField(@enumFromInt(expr_node)) orelse return;
                     if (field.ast.value_expr.unwrap()) |value_expr| {
-                        try collectEscapeeViolations(self, state, tree, tags, parent_map, receiver_node, @intFromEnum(value_expr), call_token, fn_body, current_cfg, seen);
+                        try collectEscapeeViolations(self, state, tree, tags, parent_map, receiver_node, @intFromEnum(value_expr), call_token, current_cfg, seen);
                     } else if (field.ast.tuple_like) {
                         if (field.ast.type_expr.unwrap()) |value_expr| {
-                            try collectEscapeeViolations(self, state, tree, tags, parent_map, receiver_node, @intFromEnum(value_expr), call_token, fn_body, current_cfg, seen);
+                            try collectEscapeeViolations(self, state, tree, tags, parent_map, receiver_node, @intFromEnum(value_expr), call_token, current_cfg, seen);
                         }
                     }
                 },
@@ -392,7 +377,7 @@ pub fn mixin(comptime _Engine: type) type {
                     var buf: [2]std.zig.Ast.Node.Index = undefined;
                     const array_init = tree.fullArrayInit(&buf, @enumFromInt(expr_node)) orelse return;
                     for (array_init.ast.elements) |elem| {
-                        try collectEscapeeViolations(self, state, tree, tags, parent_map, receiver_node, @intFromEnum(elem), call_token, fn_body, current_cfg, seen);
+                        try collectEscapeeViolations(self, state, tree, tags, parent_map, receiver_node, @intFromEnum(elem), call_token, current_cfg, seen);
                     }
                 },
                 else => {},

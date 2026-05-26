@@ -440,6 +440,21 @@ test "store_violations_engine ignores defer at function-body scope" {
     try std.testing.expectEqual(@as(usize, 0), try countEscapeeDiagnostics(std.testing.allocator, code));
 }
 
+test "store_violations_engine flags fn-body defer when container is a parameter" {
+    // The container outlives the function, so the defer at function-body scope
+    // fires while the caller still holds the appended slice — a real UAF.
+    const code: [:0]const u8 =
+        \\const std = @import("std");
+        \\const Item = struct { text: []const u8 };
+        \\fn render(allocator: std.mem.Allocator, sink: *std.ArrayList(Item)) !void {
+        \\    const spaces = try allocator.alloc(u8, 2);
+        \\    defer allocator.free(spaces);
+        \\    try sink.append(allocator, .{ .text = spaces });
+        \\}
+    ;
+    try std.testing.expectEqual(@as(usize, 1), try countEscapeeDiagnostics(std.testing.allocator, code));
+}
+
 test "store_violations_engine ignores escape into container declared in same block" {
     const code: [:0]const u8 =
         \\const std = @import("std");
