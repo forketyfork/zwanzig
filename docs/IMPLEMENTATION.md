@@ -1241,11 +1241,12 @@ The worklist is an `ArrayList(WorklistItem)` consumed via `append` and `pop`, wh
 
 Why DFS:
 
-- **Correctness is order-independent.** Deduplication via `ExplodedGraph.getOrCreateNode` ensures every `(ProgramPoint, ProgramState)` pair is processed at most once, so the fixed point computed by the engine is identical under DFS, BFS, or any other order. Successful runs produce the same diagnostics either way.
-- **`pop` is O(1).** A FIFO traversal would require either `swapRemove(0)` (O(n) per step) or a separate deque/ring buffer with extra bookkeeping. The DFS approach is the cheapest implementation that satisfies the algorithm.
+- **Correctness is order-independent in the pure-deduplication case.** Deduplication via `ExplodedGraph.getOrCreateNode` ensures every `(ProgramPoint, ProgramState)` pair is processed at most once, so with widening disabled the fixed point computed by the engine is identical under DFS, BFS, or any other order.
+- **Widening is order-sensitive.** With widening enabled (the default), traversal order can affect precision because `AbstractValue.widen` is not commutative. For example, `int_range[a,b].widen(concrete_int v)` keeps the range when `v` lies inside `[a,b]`, while `concrete_int(v).widen(int_range[a,b])` collapses to `unknown`. DFS vs BFS can therefore change which state arrives at a widening point first and how aggressively values are widened. The engine does not aim to be deterministic across order changes; widening is a precision/termination tool, and the cheaper traversal is preferred.
+- **`pop` is O(1).** Removing from the front of an `ArrayList` to get FIFO requires `orderedRemove(0)`, which is O(n); a true order-preserving deque needs `std.fifo.LinearFifo` or a head-index pattern with its own bookkeeping. DFS via `pop` is the cheapest implementation that satisfies the algorithm.
 - **Better cache locality.** Items pushed last are popped next, so the processing kernel tends to reuse state freshly written by the transfer function.
 
-When the step budget `max_worklist_steps` is exhausted, `run` aborts with `error.AnalysisLimitExceeded` and the per-function analysis produces no diagnostics; the engine never reports partial best-effort results. Traversal order therefore does not affect which diagnostics a successful run emits.
+When the step budget `max_worklist_steps` is exhausted, `run` returns `error.AnalysisLimitExceeded` and the engine itself produces no partial output. Some engine-based checkers (e.g., `empty-catch-engine`, `swallowed-error`) catch that error and fall back to a CFG/token scan, which emits diagnostics that do not depend on engine state and are therefore unaffected by traversal order.
 
 The BFS tradeoff to keep in mind: under a fixed step limit, DFS may explore one branch deeply before touching wide fan-outs, while BFS would cover all branches up to a shallower depth. This only matters if the step-limit behavior is ever changed from fail-stop to best-effort partial reporting; until then DFS is preferred. If a configurable order is added later, it should come with fixtures that demonstrate the divergence in coverage.
 
