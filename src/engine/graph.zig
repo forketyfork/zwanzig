@@ -426,14 +426,26 @@ pub const ExplodedGraph = struct {
         };
     }
 
-    /// Add an edge between two exploded graph nodes
+    /// Add an edge between two exploded graph nodes.
+    /// Edges are deduplicated: a given (from, to) pair is recorded at most once,
+    /// so repeated calls after state updates don't accumulate duplicates.
+    /// On allocation failure neither list is mutated, so the successors/predecessors
+    /// lockstep invariant is preserved.
     pub fn addEdge(self: *ExplodedGraph, from_index: u32, to_index: u32) EngineError!void {
         if (from_index >= self.nodes.items.len or to_index >= self.nodes.items.len) {
             return;
         }
 
-        try self.nodes.items[from_index].successors.append(self.allocator, to_index);
-        try self.nodes.items[to_index].predecessors.append(self.allocator, from_index);
+        const successors = &self.nodes.items[from_index].successors;
+        for (successors.items) |existing| {
+            if (existing == to_index) return;
+        }
+
+        try successors.ensureUnusedCapacity(self.allocator, 1);
+        try self.nodes.items[to_index].predecessors.ensureUnusedCapacity(self.allocator, 1);
+
+        successors.appendAssumeCapacity(to_index);
+        self.nodes.items[to_index].predecessors.appendAssumeCapacity(from_index);
     }
 
     /// Get a node by index
@@ -569,6 +581,76 @@ test "ExplodedGraph edge operations" {
     try testing.expectEqual(@as(usize, 1), node2.predecessors.items.len);
     try testing.expectEqual(result2.index, node1.successors.items[0]);
     try testing.expectEqual(result1.index, node2.predecessors.items[0]);
+}
+
+test "ExplodedGraph addEdge deduplicates repeated edges" {
+    const testing = std.testing;
+    const allocator = testing.allocator;
+
+    var cfg = Cfg.init(allocator);
+    defer cfg.deinit();
+
+    _ = try cfg.addNode(IrNode.init(.fn_entry));
+
+    var graph = ExplodedGraph.init(allocator, &cfg);
+    defer graph.deinit();
+
+    const point = ProgramPoint.initPre(ids.cfgId(0), &cfg);
+
+    var state1 = ProgramState.init(allocator);
+    try state1.setVar(ids.varId(1), .{ .concrete_int = 1 });
+    const result1 = try graph.getOrCreateNode(point, &state1);
+
+    var state2 = ProgramState.init(allocator);
+    try state2.setVar(ids.varId(1), .{ .concrete_int = 2 });
+    const result2 = try graph.getOrCreateNode(point, &state2);
+
+    try graph.addEdge(result1.index, result2.index);
+    try graph.addEdge(result1.index, result2.index);
+    try graph.addEdge(result1.index, result2.index);
+
+    const node1 = graph.getNode(result1.index) orelse return error.TestUnexpectedResult;
+    const node2 = graph.getNode(result2.index) orelse return error.TestUnexpectedResult;
+
+    try testing.expectEqual(@as(usize, 1), node1.successors.items.len);
+    try testing.expectEqual(@as(usize, 1), node2.predecessors.items.len);
+    try testing.expectEqual(result2.index, node1.successors.items[0]);
+    try testing.expectEqual(result1.index, node2.predecessors.items[0]);
+}
+
+test "ExplodedGraph addEdge keeps distinct edges" {
+    const testing = std.testing;
+    const allocator = testing.allocator;
+
+    var cfg = Cfg.init(allocator);
+    defer cfg.deinit();
+
+    _ = try cfg.addNode(IrNode.init(.fn_entry));
+
+    var graph = ExplodedGraph.init(allocator, &cfg);
+    defer graph.deinit();
+
+    const point = ProgramPoint.initPre(ids.cfgId(0), &cfg);
+
+    var state1 = ProgramState.init(allocator);
+    try state1.setVar(ids.varId(1), .{ .concrete_int = 1 });
+    const result1 = try graph.getOrCreateNode(point, &state1);
+
+    var state2 = ProgramState.init(allocator);
+    try state2.setVar(ids.varId(1), .{ .concrete_int = 2 });
+    const result2 = try graph.getOrCreateNode(point, &state2);
+
+    var state3 = ProgramState.init(allocator);
+    try state3.setVar(ids.varId(1), .{ .concrete_int = 3 });
+    const result3 = try graph.getOrCreateNode(point, &state3);
+
+    try graph.addEdge(result1.index, result2.index);
+    try graph.addEdge(result1.index, result3.index);
+    try graph.addEdge(result1.index, result2.index);
+
+    const node1 = graph.getNode(result1.index) orelse return error.TestUnexpectedResult;
+
+    try testing.expectEqual(@as(usize, 2), node1.successors.items.len);
 }
 
 test "ExplodedGraph widening first visit stores state" {
