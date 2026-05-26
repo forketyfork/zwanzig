@@ -211,15 +211,14 @@ pub fn mixin(comptime _Engine: type) type {
                     const receiver_node = @intFromEnum(datas[callee_node].node_and_token[0]);
                     // *Slice methods (appendSlice / appendSliceAssumeCapacity /
                     // insertSlice) iterate the argument and copy each element. A
-                    // bare slice arg (`appendSlice(out, tmp)`) is consumed in the
-                    // call; freeing `tmp` afterwards is safe. Only the nested case
-                    // (`appendSlice(out, &.{tmp})` etc.) retains a reference, so
-                    // skip the escape check when the whole item arg is a single
-                    // identifier matching a pending defer-free.
+                    // direct slice arg (`appendSlice(out, tmp)` or `tmp[start..end]`)
+                    // is consumed in the call; freeing `tmp` afterwards is safe.
+                    // Nested references (`appendSlice(out, &.{tmp})` etc.) retain
+                    // a reference, so they still go through the escape check.
                     const is_slice_store = std.mem.eql(u8, fn_name, "appendSlice") or
                         std.mem.eql(u8, fn_name, "appendSliceAssumeCapacity") or
                         std.mem.eql(u8, fn_name, "insertSlice");
-                    const skip_escape_check = is_slice_store and tags[item_node] == .identifier;
+                    const skip_escape_check = is_slice_store and isDirectSliceCopyArgument(tree, tags, datas, item_node);
                     if (!skip_escape_check) {
                         checkDeferFreesEscapeeIntoContainer(self, state, call_node, receiver_node, item_node, current_cfg) catch return;
                     }
@@ -256,6 +255,28 @@ pub fn mixin(comptime _Engine: type) type {
                     const param_node = @intFromEnum(param);
                     markEscapedInExpr(self, state, param_node, current_cfg) catch return;
                 }
+            }
+        }
+
+        fn isDirectSliceCopyArgument(
+            tree: *const std.zig.Ast,
+            tags: []const std.zig.Ast.Node.Tag,
+            datas: []const std.zig.Ast.Node.Data,
+            expr_node: u32,
+        ) bool {
+            if (expr_node >= tags.len) return false;
+
+            switch (tags[expr_node]) {
+                .identifier => return true,
+                .grouped_expression, .unwrap_optional => {
+                    const data = datas[expr_node].node_and_token;
+                    return isDirectSliceCopyArgument(tree, tags, datas, @intFromEnum(data[0]));
+                },
+                .slice, .slice_open, .slice_sentinel => {
+                    const slice = tree.fullSlice(@enumFromInt(expr_node)) orelse return false;
+                    return isDirectSliceCopyArgument(tree, tags, datas, @intFromEnum(slice.ast.sliced));
+                },
+                else => return false,
             }
         }
 
