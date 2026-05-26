@@ -43,6 +43,12 @@ All code must be formatted with `zig fmt`.
 
 Any changes or additions to the existing rules/checkers must be documented.
 
+## Changelog
+
+After completing a user-visible change, add a short entry to the `## [Unreleased]` section of `CHANGELOG.md` under `### Added`, `### Changed`, `### Fixed`, or `### Removed` as appropriate. Keep the entry user-focused (what changed from the user's perspective, not implementation detail) and include the related issue and/or PR number, e.g. `(#42)` or `(PR #42)`. Skip the entry for purely internal changes (refactors, test-only changes, CI tweaks) that a user would not notice.
+
+The format follows [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.1.0/).
+
 ## Releases
 
 When asked to release: create a PR for the version bump, wait for required checks to pass, then tag and publish the release from the merged commit.

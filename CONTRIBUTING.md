@@ -111,14 +111,19 @@ Document what your rule checks, why it matters, and show before/after examples.
 
 All rules need tests. Put them in the same file as the rule implementation using Zig's `test` blocks.
 
+## Changelog
+
+For any user-visible change, add a short entry to the `## [Unreleased]` section of `CHANGELOG.md` under `### Added`, `### Changed`, `### Fixed`, or `### Removed` as appropriate. Keep entries user-focused and include the issue or PR number, e.g. `(#42)`. Skip the entry for purely internal changes (refactors, test-only changes, CI tweaks) that a user would not notice. The format follows [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.1.0/).
+
 ## Pull requests
 
 1. Fork the repo
 2. Create a branch (`git checkout -b feature/my-rule`)
 3. Make changes
 4. Run `zig build test` and `zig fmt src/`
-5. Commit with a clear message
-6. Open a PR
+5. Update `CHANGELOG.md` if your change is user-visible
+6. Commit with a clear message
+7. Open a PR
 
 ## What makes a good rule
 
