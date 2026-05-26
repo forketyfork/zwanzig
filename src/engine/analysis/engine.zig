@@ -44,7 +44,13 @@ pub const AnalysisEngine = struct {
     allocator: std.mem.Allocator,
     /// The exploded graph being built
     graph: ExplodedGraph,
-    /// Worklist of (exploded node index, edge kind from predecessor, optional constraint) pairs to process
+    /// Worklist of (exploded node index, edge kind from predecessor, optional constraint) pairs to process.
+    ///
+    /// Items are pushed with `append` and popped with `pop`, i.e. LIFO order, producing a
+    /// depth-first traversal of the exploded graph. State deduplication in `ExplodedGraph`
+    /// makes the final fixed point independent of traversal order, and DFS keeps `pop` O(1)
+    /// with better cache locality than a FIFO deque. See `docs/IMPLEMENTATION.md` §
+    /// "Worklist algorithm" for the rationale and the BFS tradeoff.
     worklist: std.ArrayList(WorklistItem),
     /// Count of pruned paths (for testing/debugging)
     pruned_path_count: u32,
@@ -288,6 +294,7 @@ pub const AnalysisEngine = struct {
         }
 
         var worklist_steps: usize = 0;
+        // LIFO (depth-first) by design: see the `worklist` field doc-comment.
         while (self.worklist.pop()) |item| {
             worklist_steps += 1;
             if (worklist_steps > self.max_worklist_steps) {

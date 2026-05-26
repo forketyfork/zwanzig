@@ -1235,6 +1235,20 @@ const graph = engine.getGraph();
 // Analyze the exploded graph...
 ```
 
+#### Traversal order: LIFO (depth-first) by design
+
+The worklist is an `ArrayList(WorklistItem)` consumed via `append` and `pop`, which is LIFO and gives a depth-first traversal of the exploded graph.
+
+Why DFS:
+
+- **Correctness is order-independent.** Deduplication via `ExplodedGraph.getOrCreateNode` ensures every `(ProgramPoint, ProgramState)` pair is processed at most once, so the fixed point computed by the engine is identical under DFS, BFS, or any other order. Successful runs produce the same diagnostics either way.
+- **`pop` is O(1).** A FIFO traversal would require either `swapRemove(0)` (O(n) per step) or a separate deque/ring buffer with extra bookkeeping. The DFS approach is the cheapest implementation that satisfies the algorithm.
+- **Better cache locality.** Items pushed last are popped next, so the processing kernel tends to reuse state freshly written by the transfer function.
+
+When the step budget `max_worklist_steps` is exhausted, `run` aborts with `error.AnalysisLimitExceeded` and the per-function analysis produces no diagnostics; the engine never reports partial best-effort results. Traversal order therefore does not affect which diagnostics a successful run emits.
+
+The BFS tradeoff to keep in mind: under a fixed step limit, DFS may explore one branch deeply before touching wide fan-outs, while BFS would cover all branches up to a shallower depth. This only matters if the step-limit behavior is ever changed from fail-stop to best-effort partial reporting; until then DFS is preferred. If a configurable order is added later, it should come with fixtures that demonstrate the divergence in coverage.
+
 ### Deduplication
 
 Deduplication ensures analysis terminates: loops don't cause infinite exploration, and paths converging to the same state are merged.
