@@ -630,6 +630,26 @@ pub const AnalysisEngine = struct {
         const call_ast_node = cfg_node.ir_node.ast_node orelse return .{ .inlined = false, .summary_applied = false };
         const callee_fn_node = self.resolveFunctionCall(call_ast_node) orelse return .{ .inlined = false, .summary_applied = false };
 
+        // Skip inlining when the callee is already on the call stack (direct
+        // or indirect recursion). Inlining a recursive call adds depth without
+        // new precision: each call site spawns its own (call_node, caller_cfg)
+        // context, so a self-recursive walker over a wide switch multiplies
+        // the engine's state space by N at every level. Treat recursive calls
+        // as opaque; the engine still tracks side effects via the call IR
+        // node's ownership / escape / use-after-free hooks.
+        if (caller_cfg.fn_ast_node) |caller_fn| {
+            if (caller_fn == callee_fn_node) {
+                return .{ .inlined = false, .summary_applied = false };
+            }
+        }
+        for (state.call_stack.items) |frame| {
+            if (frame.caller_cfg.fn_ast_node) |ancestor_fn| {
+                if (ancestor_fn == callee_fn_node) {
+                    return .{ .inlined = false, .summary_applied = false };
+                }
+            }
+        }
+
         // Try to use a cached summary if summaries are enabled
         // Only use summaries for pure functions (no side effects) to avoid losing
         // callee effects when skipping inlining

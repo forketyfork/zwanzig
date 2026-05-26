@@ -41,6 +41,8 @@ pub const IrTag = enum {
     try_expr,
     /// Catch expression - handles errors locally
     catch_expr,
+    /// `unreachable` literal — terminates the current path
+    unreachable_stmt,
 };
 
 /// A single IR node representing a statement or expression.

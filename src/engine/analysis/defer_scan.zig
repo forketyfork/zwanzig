@@ -10,9 +10,12 @@ pub fn mixin(comptime _Engine: type) type {
             const src = self.source orelse return;
             const tree = src.ast() catch return;
             const data = tree.nodes.items(.data);
+            const tags = tree.nodes.items(.tag);
             if (defer_node >= data.len) return;
             const body_node = @intFromEnum(data[defer_node].node);
-            try scanDeferredBody(self, state, body_node, current_cfg, false, null);
+            const parent_map = try self.getParentMap(tree);
+            const scope_node = findEnclosingBlock(tags, parent_map, defer_node);
+            try scanDeferredBody(self, state, body_node, current_cfg, false, scope_node);
         }
 
         pub fn applyErrdeferredReleases(self: *_Engine, state: *ProgramState, defer_node: u32, current_cfg: *const Cfg) EngineError!void {
@@ -54,7 +57,7 @@ pub fn mixin(comptime _Engine: type) type {
                                         if (error_only) {
                                             try state.trackErrdeferredFree(var_id, call_token, scope_node);
                                         } else {
-                                            try state.trackDeferredFree(var_id, call_token);
+                                            try state.trackDeferredFree(var_id, call_token, scope_node);
                                         }
                                     }
                                 }
@@ -65,7 +68,7 @@ pub fn mixin(comptime _Engine: type) type {
                                         if (error_only) {
                                             try state.trackErrdeferredFreeOwned(var_id, call_token, scope_node);
                                         } else {
-                                            try state.trackDeferredFreeOwned(var_id, call_token);
+                                            try state.trackDeferredFreeOwned(var_id, call_token, scope_node);
                                         }
                                     }
                                 }
@@ -76,7 +79,7 @@ pub fn mixin(comptime _Engine: type) type {
                                         if (error_only) {
                                             try state.trackErrdeferredClose(var_id, call_token, scope_node);
                                         } else {
-                                            try state.trackDeferredClose(var_id, call_token);
+                                            try state.trackDeferredClose(var_id, call_token, scope_node);
                                         }
                                     }
                                 }
@@ -175,6 +178,28 @@ pub fn mixin(comptime _Engine: type) type {
                 },
                 else => {},
             }
+        }
+
+        /// Find the lexical block whose exit will execute this defer.
+        /// A defer fires when its enclosing block terminates, so the "scope" is
+        /// the closest block-shaped ancestor (.block*). Returns null if the
+        /// defer is not nested under any block (shouldn't happen for valid AST).
+        fn findEnclosingBlock(tags: []const std.zig.Ast.Node.Tag, parent_map: []const u32, node: u32) ?u32 {
+            var current = node;
+            var depth: u32 = 0;
+            while (current < parent_map.len and depth < 64) : (depth += 1) {
+                const parent = parent_map[current];
+                if (parent == 0 or parent >= tags.len) return null;
+                switch (tags[parent]) {
+                    .block,
+                    .block_semicolon,
+                    .block_two,
+                    .block_two_semicolon,
+                    => return parent,
+                    else => current = parent,
+                }
+            }
+            return null;
         }
 
         fn findErrdeferScope(tags: []const std.zig.Ast.Node.Tag, parent_map: []const u32, node: u32) ?u32 {

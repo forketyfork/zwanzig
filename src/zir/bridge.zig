@@ -602,6 +602,7 @@ pub const ZirBridge = struct {
 
                 const bits_per_field = 4;
                 const fields_per_u32 = 32 / bits_per_field;
+                // zwanzig-disable-next-line: swallowed-error
                 const bit_bags_count = std.math.divCeil(usize, fields_len, fields_per_u32) catch unreachable;
                 var cur_bit_bag: u32 = undefined;
 
@@ -973,6 +974,7 @@ pub const ZirBridge = struct {
                     end += 1;
                 }
                 const num_str = source[start..end];
+                // zwanzig-disable-next-line: swallowed-error
                 return std.fmt.parseInt(i64, num_str, 10) catch null;
             },
             .char_literal => {

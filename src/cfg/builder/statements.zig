@@ -111,6 +111,8 @@ pub fn mixin(comptime _Builder: type) type {
                         return try _Builder.error_flow.processReturnWithTry(self, cfg, source, ast_node, ret_expr_idx, prev_node, range);
                     } else if (ret_expr_tag == .@"catch") {
                         return try _Builder.error_flow.processReturnWithCatch(self, cfg, source, ast_node, ret_expr_idx, prev_node, range);
+                    } else if (ret_expr_tag == .@"switch" or ret_expr_tag == .switch_comma) {
+                        return try _Builder.switch_flow.processReturnWithSwitch(self, cfg, source, ast_node, ret_expr_idx, prev_node, range);
                     }
                 }
             }
@@ -143,6 +145,8 @@ pub fn mixin(comptime _Builder: type) type {
                             return try _Builder.error_flow.processVarDeclWithTry(self, cfg, source, ast_node, init_idx, prev_node, range);
                         } else if (init_tag == .@"catch") {
                             return try _Builder.error_flow.processVarDeclWithCatch(self, cfg, source, ast_node, init_idx, prev_node, range);
+                        } else if (init_tag == .@"switch" or init_tag == .switch_comma) {
+                            return try _Builder.switch_flow.processVarDeclWithSwitch(self, cfg, source, ast_node, init_idx, prev_node, range);
                         }
                     }
                 }
@@ -181,6 +185,8 @@ pub fn mixin(comptime _Builder: type) type {
                     return try _Builder.error_flow.processAssignWithTry(self, cfg, source, ast_node, lhs_idx, rhs_idx, prev_node, range);
                 } else if (rhs_tag == .@"catch") {
                     return try _Builder.error_flow.processAssignWithCatch(self, cfg, source, ast_node, lhs_idx, rhs_idx, prev_node, range);
+                } else if (rhs_tag == .@"switch" or rhs_tag == .switch_comma) {
+                    return try _Builder.switch_flow.processAssignWithSwitch(self, cfg, source, ast_node, lhs_idx, rhs_idx, prev_node, range);
                 }
             }
 
@@ -215,6 +221,26 @@ pub fn mixin(comptime _Builder: type) type {
             const expr_node = try cfg.addNode(IrNode.initFull(.expr, ast_node, range));
             try cfg.addEdge(prev_node, expr_node);
             return .{ .last = expr_node, .terminates = false };
+        }
+
+        /// `unreachable` is a statically dead point: any path that reaches it
+        /// does not continue. Create an IR node so analyses can see the
+        /// statement, attach an incoming edge, and return `terminates = true`
+        /// so the surrounding block stops feeding successors. No outgoing
+        /// edges are added; the engine treats a node with no successors as a
+        /// dead end and stops propagating state.
+        pub fn processUnreachable(
+            self: *_Builder,
+            cfg: *Cfg,
+            source: *Source,
+            ast_node: u32,
+            prev_node: CfgNodeId,
+        ) !_Builder.ProcessResult {
+            _ = self;
+            const range = try source_range.getSourceRange(source, ast_node);
+            const u_node = try cfg.addNode(IrNode.initFull(.unreachable_stmt, ast_node, range));
+            try cfg.addEdge(prev_node, u_node);
+            return .{ .last = u_node, .terminates = true };
         }
     };
 }
