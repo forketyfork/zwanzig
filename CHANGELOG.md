@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.12.2] - 2026-05-27
+
 ### Changed
 
 - Per-file scratch now uses libc's allocator instead of an arena over the page allocator. The engine eagerly frees its temporaries, so the arena was retaining roughly an order of magnitude more memory than the analyzer's actual working set. On engine-heavy inputs (notably `0.12.x` after `defer-frees-escapee` landed) this could push peak RSS into multi-GB territory and OOM on CI runners with limited memory (#89).
