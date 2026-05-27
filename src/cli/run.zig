@@ -23,14 +23,13 @@ const WorkerContext = struct {
 };
 
 fn workerTask(file_index: usize, ctx: *WorkerContext) void {
-    // Use a per-task arena allocator backed by the page allocator.
-    // This eliminates lock contention on the shared GPA during parallel analysis,
-    // as each worker thread has its own independent arena.
-    var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
-    defer arena.deinit();
-
+    // Use libc's allocator for per-task scratch. The engine eagerly frees its
+    // temporaries (~1M allocations per file on a 3500-line input), so an arena
+    // ends up retaining all of that churn until file-end, which on
+    // engine-heavy files inflates peak RSS by an order of magnitude. libc
+    // malloc has thread-local caches, so per-task usage doesn't contend.
     const file_path = ctx.files[file_index];
-    const result = ctx.analyzer.analyzeFileResultWithScratchAllocator(file_path, arena.allocator());
+    const result = ctx.analyzer.analyzeFileResultWithScratchAllocator(file_path, std.heap.c_allocator);
     if (result) |r| {
         ctx.results[file_index] = r;
         ctx.errors[file_index] = null;
