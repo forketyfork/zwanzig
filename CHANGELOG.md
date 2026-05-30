@@ -15,6 +15,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Project-wide `unused-decl` ignores package entrypoint and alias-style public API exports to reduce library facade noise (#91).
 - Project-wide `unused-decl` now keeps declarations that are exposed through another used public declaration's type, signature, field, or initializer surface (#91).
+- Project-wide `unused-decl` now discovers package roots from analyzed or workspace `build.zig` `root_source_file` entries, ignores `build.zig`'s `build` entrypoint, and recognizes typed receiver and result-location method calls across files (#91).
 
 ## [0.12.2] - 2026-05-27
 
