@@ -91,7 +91,7 @@ Detects unused container-level `const`, `var`, and `fn` declarations that aren't
 - Underscore-prefixed names (e.g., `_unused`) are ignored (explicit opt-out)
 - Special names like `main` and `panic` are ignored (entry points)
 
-When `unused-decl` is explicitly selected and more than one file is analyzed, zwanzig also runs a project pass over all analyzed files. That pass reports public top-level declarations that are not referenced by any other analyzed file, while ignoring package API entrypoints and alias-style re-exports to avoid library facade noise. Declarations exposed through another used public declaration's type, signature, field, or initializer surface are treated as used.
+When `unused-decl` is enabled and more than one file is analyzed, zwanzig also runs a project pass over all analyzed files. That pass reports public top-level declarations that are not referenced by any other analyzed file, while ignoring package API entrypoints and alias-style re-exports to avoid library facade noise. Declarations exposed through another used public declaration's type, signature, field, or initializer surface are treated as used.
 
 **Bad:**
 ```zig

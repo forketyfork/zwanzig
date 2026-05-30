@@ -208,10 +208,7 @@ pub const Analyzer = struct {
     }
 
     pub fn shouldRunProjectUnusedDecls(self: *const Analyzer) bool {
-        return switch (self.rule_filter) {
-            .allowlist => |rules| containsRuleName(rules, "unused-decl"),
-            .none, .blocklist => false,
-        };
+        return self.isRuleEnabled("unused-decl");
     }
 
     pub fn analyzeProjectUnusedDecls(self: *Analyzer, files: []const []const u8) !void {
@@ -593,7 +590,7 @@ test "Analyzer.shouldRunProjectUnusedDecls follows rule filter" {
     var analyzer = Analyzer.init(allocator);
     defer analyzer.deinit();
 
-    try std.testing.expect(!analyzer.shouldRunProjectUnusedDecls());
+    try std.testing.expect(analyzer.shouldRunProjectUnusedDecls());
 
     const allowlist = [_][]const u8{"todo"};
     analyzer.setRuleFilter(.{ .allowlist = &allowlist });

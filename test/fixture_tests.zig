@@ -125,10 +125,9 @@ test "project-wide unused declarations follow public API surfaces" {
     };
     try analyzer.analyzeProjectUnusedDecls(&files);
 
-    try std.testing.expectEqual(@as(usize, 3), analyzer.diagnostics.items.len);
-    try std.testing.expect(std.mem.indexOf(u8, analyzer.diagnostics.items[0].message, "HelperForUnusedApi") != null);
-    try std.testing.expect(std.mem.indexOf(u8, analyzer.diagnostics.items[1].message, "unusedApi") != null);
-    try std.testing.expect(std.mem.indexOf(u8, analyzer.diagnostics.items[2].message, "unusedFunction") != null);
+    try std.testing.expectEqual(@as(usize, 2), analyzer.diagnostics.items.len);
+    try std.testing.expect(std.mem.indexOf(u8, analyzer.diagnostics.items[0].message, "unusedApi") != null);
+    try std.testing.expect(std.mem.indexOf(u8, analyzer.diagnostics.items[1].message, "unusedFunction") != null);
 }
 
 test "project-wide unused declarations ignore package API entrypoints" {
@@ -267,7 +266,7 @@ test "project-wide unused declarations follow tagged union public API surfaces" 
     try std.testing.expect(std.mem.indexOf(u8, analyzer.diagnostics.items[0].message, "UnusedUnionHelper") != null);
 }
 
-test "project-wide unused declarations do not treat function bodies as public API surface" {
+test "project-wide unused declarations count same-file function body references" {
     var analyzer = src.Analyzer.init(std.testing.allocator);
     defer analyzer.deinit();
 
@@ -280,8 +279,7 @@ test "project-wide unused declarations do not treat function bodies as public AP
     };
     try analyzer.analyzeProjectUnusedDecls(&files);
 
-    try std.testing.expectEqual(@as(usize, 1), analyzer.diagnostics.items.len);
-    try std.testing.expect(std.mem.indexOf(u8, analyzer.diagnostics.items[0].message, "unusedPublicHelper") != null);
+    try std.testing.expectEqual(@as(usize, 0), analyzer.diagnostics.items.len);
 }
 
 test "project-wide unused declarations report public constants copied from values" {
