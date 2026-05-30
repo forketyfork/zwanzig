@@ -195,7 +195,7 @@ fn extractPublicVarDecl(
     if (token_tags[name_token] != .identifier) return null;
 
     const name = tree.tokenSlice(name_token);
-    return makeDeclInfo(
+    return try makeDeclInfo(
         allocator,
         file_index,
         name,
@@ -269,7 +269,7 @@ fn extractPublicFnProto(
     const name_token = proto.name_token orelse return null;
     if (tree.tokenTag(name_token) != .identifier) return null;
 
-    return makeDeclInfo(
+    return try makeDeclInfo(
         allocator,
         file_index,
         tree.tokenSlice(name_token),
