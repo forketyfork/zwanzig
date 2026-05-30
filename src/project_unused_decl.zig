@@ -96,6 +96,8 @@ pub fn analyze(
         });
     }
 
+    if (files.items.len < 2) return;
+
     var decls: std.ArrayList(DeclInfo) = .empty;
     defer {
         for (decls.items) |*decl| decl.deinit(allocator);
@@ -340,7 +342,7 @@ fn filePubliclyImportsPath(file: *const FileInfo, target_path: []const u8) bool 
         if (!isVarDeclTag(tags[idx])) continue;
         if (publicVarDeclImportsPath(&file.tree, @intCast(idx), file.path, target_path)) return true;
     }
-    return false;
+    return publicUsingnamespaceImportsPath(&file.tree, file.path, target_path);
 }
 
 fn publicVarDeclImportsPath(
@@ -389,10 +391,13 @@ fn isPublicAliasDecl(tree: *const std.zig.Ast, full: std.zig.Ast.full.VarDecl) b
     const tags = tree.nodes.items(.tag);
     if (init_idx >= tags.len) return false;
 
+    const name_token = full.ast.mut_token + 1;
+    if (name_token >= tree.tokens.len or tree.tokenTag(name_token) != .identifier) return false;
+    const public_name = tree.tokenSlice(name_token);
+
     return switch (tags[init_idx]) {
-        .identifier,
-        .field_access,
-        => true,
+        .identifier => isTypeLikeAlias(public_name, identifierName(tree, init_idx) orelse return false),
+        .field_access => isTypeLikeAlias(public_name, fieldAccessName(tree, init_idx) orelse return false),
         .builtin_call,
         .builtin_call_comma,
         .builtin_call_two,
@@ -429,16 +434,17 @@ fn importResolvesToPath(importer_path: []const u8, import_path: []const u8, targ
     if (std.mem.eql(u8, import_path, target_path)) return true;
 
     const importer_dir = std.fs.path.dirname(importer_path) orelse "";
-    if (importer_dir.len == 0) return std.mem.eql(u8, import_path, target_path);
+    if (importer_dir.len == 0) return pathsEquivalent(import_path, target_path);
 
     var resolved_buf: [std.fs.max_path_bytes]u8 = undefined;
     const resolved = std.fmt.bufPrint(&resolved_buf, "{s}/{s}", .{ importer_dir, import_path }) catch return false;
-    return std.mem.eql(u8, resolved, target_path);
+    return pathsEquivalent(resolved, target_path);
 }
 
 fn classifyVarDecl(tree: *const std.zig.Ast, full: std.zig.Ast.full.VarDecl) DeclKind {
     if (full.ast.init_node.unwrap()) |init_node| {
-        if (isContainerTag(tree.nodes.items(.tag)[@intFromEnum(init_node)])) return .type_decl;
+        const tag = tree.nodes.items(.tag)[@intFromEnum(init_node)];
+        if (isContainerTag(tag) or tag == .error_set_decl) return .type_decl;
     }
     const mut_tag = tree.tokenTag(full.ast.mut_token);
     if (mut_tag == .keyword_const) return .constant;
@@ -475,7 +481,7 @@ fn isReferencedFromAnotherFile(files: []const FileInfo, decl: DeclInfo) bool {
     for (files, 0..) |*file, file_index| {
         if (file_index == decl.file_index) continue;
         if (std.mem.eql(u8, file.path, decl_file.path)) continue;
-        if (fileReferencesName(&file.tree, decl.normalized_name)) return true;
+        if (fileReferencesDecl(file, decl_file.path, decl.normalized_name)) return true;
     }
     return false;
 }
@@ -683,7 +689,18 @@ const PublicSurfaceScanner = struct {
     }
 };
 
-fn fileReferencesName(tree: *const std.zig.Ast, normalized_name: []const u8) bool {
+fn fileReferencesDecl(file: *const FileInfo, decl_path: []const u8, normalized_name: []const u8) bool {
+    if (fileReferencesDeclByFieldAccess(&file.tree, file.path, decl_path, normalized_name)) return true;
+    if (fileUsingnamespaceImportsPath(&file.tree, file.path, decl_path) and fileReferencesBareName(&file.tree, normalized_name)) return true;
+    return false;
+}
+
+fn fileReferencesDeclByFieldAccess(
+    tree: *const std.zig.Ast,
+    importer_path: []const u8,
+    decl_path: []const u8,
+    normalized_name: []const u8,
+) bool {
     const tags = tree.nodes.items(.tag);
     const datas = tree.nodes.items(.data);
 
@@ -691,9 +708,225 @@ fn fileReferencesName(tree: *const std.zig.Ast, normalized_name: []const u8) boo
         if (tag != .field_access) continue;
         const field_token = datas[node_index].node_and_token[1];
         const slice = normalizeIdentifier(tree.tokenSlice(field_token));
-        if (std.mem.eql(u8, slice, normalized_name)) return true;
+        if (!std.mem.eql(u8, slice, normalized_name)) continue;
+
+        const lhs = @intFromEnum(datas[node_index].node_and_token[0]);
+        if (nodeImportsPath(tree, lhs, importer_path, decl_path)) return true;
     }
     return false;
+}
+
+fn fileReferencesBareName(tree: *const std.zig.Ast, normalized_name: []const u8) bool {
+    const tags = tree.nodes.items(.tag);
+    const main_tokens = tree.nodes.items(.main_token);
+
+    for (tags, 0..) |tag, node_index| {
+        if (tag != .identifier) continue;
+        if (node_index >= main_tokens.len) continue;
+        const name = normalizeIdentifier(tree.tokenSlice(main_tokens[node_index]));
+        if (std.mem.eql(u8, name, normalized_name)) return true;
+    }
+    return false;
+}
+
+fn nodeImportsPath(
+    tree: *const std.zig.Ast,
+    node: usize,
+    importer_path: []const u8,
+    target_path: []const u8,
+) bool {
+    const tags = tree.nodes.items(.tag);
+    if (node >= tags.len) return false;
+
+    switch (tags[node]) {
+        .identifier => {
+            const name = identifierName(tree, node) orelse return false;
+            return importAliasResolvesToPath(tree, importer_path, name, target_path);
+        },
+        .builtin_call,
+        .builtin_call_comma,
+        .builtin_call_two,
+        .builtin_call_two_comma,
+        => {
+            const import_path = importPathFromBuiltinCall(tree, node) orelse return false;
+            return importResolvesToPath(importer_path, import_path, target_path);
+        },
+        else => return false,
+    }
+}
+
+fn importAliasResolvesToPath(
+    tree: *const std.zig.Ast,
+    importer_path: []const u8,
+    alias_name: []const u8,
+    target_path: []const u8,
+) bool {
+    const tags = tree.nodes.items(.tag);
+
+    for (tags, 0..) |tag, node_index| {
+        if (!isVarDeclTag(tag)) continue;
+        const full = tree.fullVarDecl(@enumFromInt(node_index)) orelse continue;
+        const name_token = full.ast.mut_token + 1;
+        if (name_token >= tree.tokens.len) continue;
+        if (tree.tokenTag(name_token) != .identifier) continue;
+
+        const name = normalizeIdentifier(tree.tokenSlice(name_token));
+        if (!std.mem.eql(u8, name, alias_name)) continue;
+
+        const init_node = full.ast.init_node.unwrap() orelse continue;
+        const import_path = importPathFromBuiltinCall(tree, @intFromEnum(init_node)) orelse continue;
+        if (importResolvesToPath(importer_path, import_path, target_path)) return true;
+    }
+
+    return false;
+}
+
+fn fileUsingnamespaceImportsPath(
+    tree: *const std.zig.Ast,
+    importer_path: []const u8,
+    target_path: []const u8,
+) bool {
+    const token_tags = tree.tokens.items(.tag);
+
+    for (token_tags, 0..) |_, token_index| {
+        if (!std.mem.eql(u8, tree.tokenSlice(@intCast(token_index)), "usingnamespace")) continue;
+
+        const import_token = nextNonCommentToken(token_tags, token_index + 1) orelse continue;
+        if (!std.mem.eql(u8, tree.tokenSlice(@intCast(import_token)), "@import")) continue;
+
+        const import_path = importPathFromBuiltinToken(tree, import_token) orelse continue;
+        if (importResolvesToPath(importer_path, import_path, target_path)) return true;
+    }
+
+    return false;
+}
+
+fn publicUsingnamespaceImportsPath(
+    tree: *const std.zig.Ast,
+    importer_path: []const u8,
+    target_path: []const u8,
+) bool {
+    const token_tags = tree.tokens.items(.tag);
+
+    for (token_tags, 0..) |_, token_index| {
+        if (!std.mem.eql(u8, tree.tokenSlice(@intCast(token_index)), "usingnamespace")) continue;
+
+        const pub_token = prevNonCommentToken(token_tags, token_index) orelse continue;
+        if (tree.tokenTag(@intCast(pub_token)) != .keyword_pub) continue;
+
+        const import_token = nextNonCommentToken(token_tags, token_index + 1) orelse continue;
+        if (!std.mem.eql(u8, tree.tokenSlice(@intCast(import_token)), "@import")) continue;
+
+        const import_path = importPathFromBuiltinToken(tree, import_token) orelse continue;
+        if (importResolvesToPath(importer_path, import_path, target_path)) return true;
+    }
+
+    return false;
+}
+
+fn importPathFromBuiltinToken(tree: *const std.zig.Ast, token: usize) ?[]const u8 {
+    const token_tags = tree.tokens.items(.tag);
+    const l_paren = nextNonCommentToken(token_tags, token + 1) orelse return null;
+    if (token_tags[l_paren] != .l_paren) return null;
+
+    const string_token = nextNonCommentToken(token_tags, l_paren + 1) orelse return null;
+    if (token_tags[string_token] != .string_literal) return null;
+
+    const literal = tree.tokenSlice(@intCast(string_token));
+    if (literal.len < 2) return null;
+    return literal[1 .. literal.len - 1];
+}
+
+fn nextNonCommentToken(token_tags: []const std.zig.Token.Tag, start: usize) ?usize {
+    var index = start;
+    while (index < token_tags.len) : (index += 1) {
+        switch (token_tags[index]) {
+            .container_doc_comment, .doc_comment => continue,
+            else => return index,
+        }
+    }
+    return null;
+}
+
+fn prevNonCommentToken(token_tags: []const std.zig.Token.Tag, start: usize) ?usize {
+    if (start == 0) return null;
+    var index = start - 1;
+    while (true) {
+        switch (token_tags[index]) {
+            .container_doc_comment, .doc_comment => {},
+            else => return index,
+        }
+        if (index == 0) return null;
+        index -= 1;
+    }
+}
+
+fn identifierName(tree: *const std.zig.Ast, node: usize) ?[]const u8 {
+    const tags = tree.nodes.items(.tag);
+    if (node >= tags.len or tags[node] != .identifier) return null;
+    const main_tokens = tree.nodes.items(.main_token);
+    if (node >= main_tokens.len) return null;
+    return normalizeIdentifier(tree.tokenSlice(main_tokens[node]));
+}
+
+fn fieldAccessName(tree: *const std.zig.Ast, node: usize) ?[]const u8 {
+    const tags = tree.nodes.items(.tag);
+    if (node >= tags.len or tags[node] != .field_access) return null;
+    const datas = tree.nodes.items(.data);
+    return normalizeIdentifier(tree.tokenSlice(datas[node].node_and_token[1]));
+}
+
+fn isTypeLikeAlias(public_name: []const u8, referenced_name: []const u8) bool {
+    return isTypeLikeName(normalizeIdentifier(public_name)) and isTypeLikeName(normalizeIdentifier(referenced_name));
+}
+
+fn isTypeLikeName(name: []const u8) bool {
+    if (name.len == 0) return false;
+    return std.ascii.isUpper(name[0]);
+}
+
+fn pathsEquivalent(a: []const u8, b: []const u8) bool {
+    var a_buf: [std.fs.max_path_bytes]u8 = undefined;
+    var b_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const normalized_a = normalizePath(&a_buf, a) catch return false;
+    const normalized_b = normalizePath(&b_buf, b) catch return false;
+    return std.mem.eql(u8, normalized_a, normalized_b);
+}
+
+fn normalizePath(buffer: []u8, path: []const u8) ![]const u8 {
+    var segments: [128][]const u8 = undefined;
+    var segment_count: usize = 0;
+
+    var rest = path;
+    while (rest.len > 0) {
+        const slash_index = std.mem.indexOfScalar(u8, rest, '/') orelse rest.len;
+        const segment = rest[0..slash_index];
+        if (segment.len != 0 and !std.mem.eql(u8, segment, ".")) {
+            if (std.mem.eql(u8, segment, "..") and segment_count > 0) {
+                segment_count -= 1;
+            } else {
+                if (segment_count >= segments.len) return error.PathTooManySegments;
+                segments[segment_count] = segment;
+                segment_count += 1;
+            }
+        }
+        if (slash_index == rest.len) break;
+        rest = rest[slash_index + 1 ..];
+    }
+
+    var len: usize = 0;
+    for (segments[0..segment_count]) |segment| {
+        if (len != 0) {
+            if (len >= buffer.len) return error.PathTooLong;
+            buffer[len] = '/';
+            len += 1;
+        }
+        if (len + segment.len > buffer.len) return error.PathTooLong;
+        @memcpy(buffer[len..][0..segment.len], segment);
+        len += segment.len;
+    }
+
+    return buffer[0..len];
 }
 
 fn normalizeIdentifier(ident: []const u8) []const u8 {

@@ -9,7 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-- `unused-decl` now runs a project-wide pass by default when more than one file is analyzed, reporting public top-level declarations that are not referenced by any other analyzed file (#91).
+- `unused-decl` now runs a project-wide pass when explicitly selected for more than one analyzed file, reporting public top-level declarations that are not referenced by any other analyzed file (#91).
 
 ### Changed
 

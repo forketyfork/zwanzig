@@ -163,12 +163,7 @@ pub const Analyzer = struct {
         switch (self.rule_filter) {
             .none => return true,
             .allowlist => |list| {
-                for (list) |allowed| {
-                    if (std.mem.eql(u8, rule_name, allowed)) {
-                        return true;
-                    }
-                }
-                return false;
+                return containsRuleName(list, rule_name);
             },
             .blocklist => |list| {
                 for (list) |blocked| {
@@ -179,6 +174,13 @@ pub const Analyzer = struct {
                 return true;
             },
         }
+    }
+
+    fn containsRuleName(list: []const []const u8, rule_name: []const u8) bool {
+        for (list) |item| {
+            if (std.mem.eql(u8, rule_name, item)) return true;
+        }
+        return false;
     }
 
     fn ruleNameLess(a: []const u8, b: []const u8) bool {
@@ -206,7 +208,10 @@ pub const Analyzer = struct {
     }
 
     pub fn shouldRunProjectUnusedDecls(self: *const Analyzer) bool {
-        return self.isRuleEnabled("unused-decl");
+        return switch (self.rule_filter) {
+            .allowlist => |rules| containsRuleName(rules, "unused-decl"),
+            .none, .blocklist => false,
+        };
     }
 
     pub fn analyzeProjectUnusedDecls(self: *Analyzer, files: []const []const u8) !void {
@@ -588,11 +593,15 @@ test "Analyzer.shouldRunProjectUnusedDecls follows rule filter" {
     var analyzer = Analyzer.init(allocator);
     defer analyzer.deinit();
 
-    try std.testing.expect(analyzer.shouldRunProjectUnusedDecls());
+    try std.testing.expect(!analyzer.shouldRunProjectUnusedDecls());
 
     const allowlist = [_][]const u8{"todo"};
     analyzer.setRuleFilter(.{ .allowlist = &allowlist });
     try std.testing.expect(!analyzer.shouldRunProjectUnusedDecls());
+
+    const project_allowlist = [_][]const u8{"unused-decl"};
+    analyzer.setRuleFilter(.{ .allowlist = &project_allowlist });
+    try std.testing.expect(analyzer.shouldRunProjectUnusedDecls());
 
     const blocklist = [_][]const u8{"unused-decl"};
     analyzer.setRuleFilter(.{ .blocklist = &blocklist });

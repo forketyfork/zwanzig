@@ -149,6 +149,38 @@ test "project-wide unused declarations ignore package API entrypoints" {
     try std.testing.expect(std.mem.indexOf(u8, analyzer.diagnostics.items[0].message, "hiddenUnused") != null);
 }
 
+test "project-wide unused declarations ignore package usingnamespace entrypoints" {
+    var analyzer = src.Analyzer.init(std.testing.allocator);
+    defer analyzer.deinit();
+
+    const allowlist = [_][]const u8{"unused-decl"};
+    analyzer.setRuleFilter(.{ .allowlist = &allowlist });
+
+    const files = [_][]const u8{
+        "test/fixtures/project_unused_decl/usingnamespace_pkg/src/lib.zig",
+        "test/fixtures/project_unused_decl/usingnamespace_pkg/src/public_api.zig",
+    };
+    try analyzer.analyzeProjectUnusedDecls(&files);
+
+    try std.testing.expectEqual(@as(usize, 0), analyzer.diagnostics.items.len);
+}
+
+test "project-wide unused declarations ignore duplicate-only inputs" {
+    var analyzer = src.Analyzer.init(std.testing.allocator);
+    defer analyzer.deinit();
+
+    const allowlist = [_][]const u8{"unused-decl"};
+    analyzer.setRuleFilter(.{ .allowlist = &allowlist });
+
+    const files = [_][]const u8{
+        "test/fixtures/project_unused_decl/duplicate_a.zig",
+        "test/fixtures/project_unused_decl/duplicate_a.zig",
+    };
+    try analyzer.analyzeProjectUnusedDecls(&files);
+
+    try std.testing.expectEqual(@as(usize, 0), analyzer.diagnostics.items.len);
+}
+
 test "project-wide unused declarations normalize quoted identifiers" {
     var analyzer = src.Analyzer.init(std.testing.allocator);
     defer analyzer.deinit();
@@ -180,6 +212,25 @@ test "project-wide unused declarations ignore externally visible and special pub
     try analyzer.analyzeProjectUnusedDecls(&files);
 
     try std.testing.expectEqual(@as(usize, 0), analyzer.diagnostics.items.len);
+}
+
+test "project-wide unused declarations ignore unrelated field accesses" {
+    var analyzer = src.Analyzer.init(std.testing.allocator);
+    defer analyzer.deinit();
+
+    const allowlist = [_][]const u8{"unused-decl"};
+    analyzer.setRuleFilter(.{ .allowlist = &allowlist });
+
+    const files = [_][]const u8{
+        "test/fixtures/project_unused_decl/unrelated_field_main.zig",
+        "test/fixtures/project_unused_decl/unrelated_field_api.zig",
+        "test/fixtures/project_unused_decl/unrelated_field_other.zig",
+    };
+    try analyzer.analyzeProjectUnusedDecls(&files);
+
+    try std.testing.expectEqual(@as(usize, 1), analyzer.diagnostics.items.len);
+    try std.testing.expectEqualStrings("test/fixtures/project_unused_decl/unrelated_field_api.zig", analyzer.diagnostics.items[0].file_path);
+    try std.testing.expect(std.mem.indexOf(u8, analyzer.diagnostics.items[0].message, "init") != null);
 }
 
 test "project-wide unused declarations follow nested public API surfaces" {
@@ -231,6 +282,58 @@ test "project-wide unused declarations do not treat function bodies as public AP
 
     try std.testing.expectEqual(@as(usize, 1), analyzer.diagnostics.items.len);
     try std.testing.expect(std.mem.indexOf(u8, analyzer.diagnostics.items[0].message, "unusedPublicHelper") != null);
+}
+
+test "project-wide unused declarations report public constants copied from values" {
+    var analyzer = src.Analyzer.init(std.testing.allocator);
+    defer analyzer.deinit();
+
+    const allowlist = [_][]const u8{"unused-decl"};
+    analyzer.setRuleFilter(.{ .allowlist = &allowlist });
+
+    const files = [_][]const u8{
+        "test/fixtures/project_unused_decl/value_alias.zig",
+        "test/fixtures/project_unused_decl/value_alias_main.zig",
+    };
+    try analyzer.analyzeProjectUnusedDecls(&files);
+
+    try std.testing.expectEqual(@as(usize, 2), analyzer.diagnostics.items.len);
+    try std.testing.expect(std.mem.indexOf(u8, analyzer.diagnostics.items[0].message, "DefaultTimeoutMs") != null);
+    try std.testing.expect(std.mem.indexOf(u8, analyzer.diagnostics.items[1].message, "DefaultLimit") != null);
+}
+
+test "project-wide unused declarations follow usingnamespace bare references" {
+    var analyzer = src.Analyzer.init(std.testing.allocator);
+    defer analyzer.deinit();
+
+    const allowlist = [_][]const u8{"unused-decl"};
+    analyzer.setRuleFilter(.{ .allowlist = &allowlist });
+
+    const files = [_][]const u8{
+        "test/fixtures/project_unused_decl/usingnamespace_main.zig",
+        "test/fixtures/project_unused_decl/usingnamespace_api.zig",
+    };
+    try analyzer.analyzeProjectUnusedDecls(&files);
+
+    try std.testing.expectEqual(@as(usize, 1), analyzer.diagnostics.items.len);
+    try std.testing.expect(std.mem.indexOf(u8, analyzer.diagnostics.items[0].message, "unused") != null);
+}
+
+test "project-wide unused declarations classify error sets as types" {
+    var analyzer = src.Analyzer.init(std.testing.allocator);
+    defer analyzer.deinit();
+
+    const allowlist = [_][]const u8{"unused-decl"};
+    analyzer.setRuleFilter(.{ .allowlist = &allowlist });
+
+    const files = [_][]const u8{
+        "test/fixtures/project_unused_decl/error_set_api.zig",
+        "test/fixtures/project_unused_decl/error_set_main.zig",
+    };
+    try analyzer.analyzeProjectUnusedDecls(&files);
+
+    try std.testing.expectEqual(@as(usize, 1), analyzer.diagnostics.items.len);
+    try std.testing.expect(std.mem.indexOf(u8, analyzer.diagnostics.items[0].message, "Type 'ApiError'") != null);
 }
 
 test "project-wide unused declarations honor suppressions" {
