@@ -11,6 +11,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - `unused-decl` can now run a project-wide pass for explicitly selected analyses, reporting public top-level declarations that are not referenced by any other analyzed file (#91).
 
+### Changed
+
+- Project-wide `unused-decl` ignores package entrypoint and alias-style public API exports to reduce library facade noise (#91).
+
 ## [0.12.2] - 2026-05-27
 
 ### Changed

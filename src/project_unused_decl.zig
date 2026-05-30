@@ -101,6 +101,7 @@ pub fn analyze(
     }
 
     for (files.items, 0..) |*file, file_index| {
+        if (isPublicApiFile(files.items, file.path)) continue;
         try collectPublicRootDecls(allocator, &file.tree, file_index, &decls);
     }
 
@@ -188,6 +189,7 @@ fn extractPublicVarDecl(
     const full = tree.fullVarDecl(@enumFromInt(node_idx)) orelse return null;
     if (!isPubToken(tree, full.visib_token)) return null;
     if (full.extern_export_token != null) return null;
+    if (isPublicAliasDecl(tree, full)) return null;
 
     const token_tags = tree.tokens.items(.tag);
     const name_token = full.ast.mut_token + 1;
@@ -302,6 +304,125 @@ fn isPubToken(tree: *const std.zig.Ast, token: ?std.zig.Ast.TokenIndex) bool {
     return tree.tokenTag(tok) == .keyword_pub;
 }
 
+fn isPublicEntrypointPath(path: []const u8) bool {
+    return std.mem.eql(u8, path, "src/lib.zig") or std.mem.endsWith(u8, path, "/src/lib.zig");
+}
+
+fn isPublicApiFile(files: []const FileInfo, path: []const u8) bool {
+    if (isPublicEntrypointPath(path)) return true;
+
+    for (files) |*file| {
+        if (!isPublicEntrypointPath(file.path)) continue;
+        if (filePubliclyImportsPath(file, path)) return true;
+    }
+    return false;
+}
+
+fn filePubliclyImportsPath(file: *const FileInfo, target_path: []const u8) bool {
+    const tags = file.tree.nodes.items(.tag);
+
+    for (file.tree.rootDecls()) |decl_idx| {
+        const idx = @intFromEnum(decl_idx);
+        if (idx >= tags.len) continue;
+        if (!isVarDeclTag(tags[idx])) continue;
+        if (publicVarDeclImportsPath(&file.tree, @intCast(idx), file.path, target_path)) return true;
+    }
+    return false;
+}
+
+fn publicVarDeclImportsPath(
+    tree: *const std.zig.Ast,
+    node_idx: u32,
+    importer_path: []const u8,
+    target_path: []const u8,
+) bool {
+    const full = tree.fullVarDecl(@enumFromInt(node_idx)) orelse return false;
+    if (!isPubToken(tree, full.visib_token)) return false;
+
+    const init_node = full.ast.init_node.unwrap() orelse return false;
+    const init_idx = @intFromEnum(init_node);
+    const tags = tree.nodes.items(.tag);
+    if (init_idx >= tags.len) return false;
+
+    switch (tags[init_idx]) {
+        .builtin_call,
+        .builtin_call_comma,
+        .builtin_call_two,
+        .builtin_call_two_comma,
+        => {
+            const import_path = importPathFromBuiltinCall(tree, init_idx) orelse return false;
+            return importResolvesToPath(importer_path, import_path, target_path);
+        },
+        else => return false,
+    }
+}
+
+fn isVarDeclTag(tag: std.zig.Ast.Node.Tag) bool {
+    return switch (tag) {
+        .simple_var_decl,
+        .aligned_var_decl,
+        .global_var_decl,
+        .local_var_decl,
+        => true,
+        else => false,
+    };
+}
+
+fn isPublicAliasDecl(tree: *const std.zig.Ast, full: std.zig.Ast.full.VarDecl) bool {
+    if (tree.tokenTag(full.ast.mut_token) != .keyword_const) return false;
+
+    const init_node = full.ast.init_node.unwrap() orelse return false;
+    const init_idx = @intFromEnum(init_node);
+    const tags = tree.nodes.items(.tag);
+    if (init_idx >= tags.len) return false;
+
+    return switch (tags[init_idx]) {
+        .identifier,
+        .field_access,
+        => true,
+        .builtin_call,
+        .builtin_call_comma,
+        .builtin_call_two,
+        .builtin_call_two_comma,
+        => isImportBuiltinCall(tree, init_idx),
+        else => false,
+    };
+}
+
+fn isImportBuiltinCall(tree: *const std.zig.Ast, node_idx: usize) bool {
+    return importPathFromBuiltinCall(tree, node_idx) != null;
+}
+
+fn importPathFromBuiltinCall(tree: *const std.zig.Ast, node_idx: usize) ?[]const u8 {
+    const main_tokens = tree.nodes.items(.main_token);
+    if (node_idx >= main_tokens.len) return null;
+    const token = main_tokens[node_idx];
+    if (token >= tree.tokens.len) return null;
+    if (!std.mem.eql(u8, tree.tokenSlice(token), "@import")) return null;
+
+    const token_tags = tree.tokens.items(.tag);
+    var scan_token = token + 1;
+    const end_token = @min(token_tags.len, token + 6);
+    while (scan_token < end_token) : (scan_token += 1) {
+        if (token_tags[scan_token] != .string_literal) continue;
+        const literal = tree.tokenSlice(scan_token);
+        if (literal.len < 2) return null;
+        return literal[1 .. literal.len - 1];
+    }
+    return null;
+}
+
+fn importResolvesToPath(importer_path: []const u8, import_path: []const u8, target_path: []const u8) bool {
+    if (std.mem.eql(u8, import_path, target_path)) return true;
+
+    const importer_dir = std.fs.path.dirname(importer_path) orelse "";
+    if (importer_dir.len == 0) return std.mem.eql(u8, import_path, target_path);
+
+    var resolved_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const resolved = std.fmt.bufPrint(&resolved_buf, "{s}/{s}", .{ importer_dir, import_path }) catch return false;
+    return std.mem.eql(u8, resolved, target_path);
+}
+
 fn classifyVarDecl(tree: *const std.zig.Ast, full: std.zig.Ast.full.VarDecl) DeclKind {
     if (full.ast.init_node.unwrap()) |init_node| {
         if (isContainerTag(tree.nodes.items(.tag)[@intFromEnum(init_node)])) return .type_decl;
@@ -367,4 +488,11 @@ fn isContainerTag(tag: std.zig.Ast.Node.Tag) bool {
         => true,
         else => false,
     };
+}
+
+test "project unused declarations recognize public entrypoint path" {
+    try std.testing.expect(isPublicEntrypointPath("src/lib.zig"));
+    try std.testing.expect(isPublicEntrypointPath("workspace/src/lib.zig"));
+    try std.testing.expect(!isPublicEntrypointPath("src/main.zig"));
+    try std.testing.expect(!isPublicEntrypointPath("test/fixtures/project_unused_decl/lib.zig"));
 }

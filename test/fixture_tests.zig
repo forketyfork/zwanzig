@@ -61,7 +61,7 @@ test "project-wide unused declarations" {
     var analyzer = src.Analyzer.init(std.testing.allocator);
     defer analyzer.deinit();
 
-    const allowlist = [_][]const u8{ "unused-decl" };
+    const allowlist = [_][]const u8{"unused-decl"};
     analyzer.setRuleFilter(.{ .allowlist = &allowlist });
 
     const files = [_][]const u8{
@@ -79,7 +79,7 @@ test "project-wide unused declarations ignore duplicate names and paths" {
     var analyzer = src.Analyzer.init(std.testing.allocator);
     defer analyzer.deinit();
 
-    const allowlist = [_][]const u8{ "unused-decl" };
+    const allowlist = [_][]const u8{"unused-decl"};
     analyzer.setRuleFilter(.{ .allowlist = &allowlist });
 
     const files = [_][]const u8{
@@ -92,6 +92,24 @@ test "project-wide unused declarations ignore duplicate names and paths" {
     try std.testing.expectEqual(@as(usize, 2), analyzer.diagnostics.items.len);
     try std.testing.expectEqualStrings("test/fixtures/project_unused_decl/duplicate_a.zig", analyzer.diagnostics.items[0].file_path);
     try std.testing.expectEqualStrings("test/fixtures/project_unused_decl/duplicate_b.zig", analyzer.diagnostics.items[1].file_path);
+}
+
+test "project-wide unused declarations ignore public aliases" {
+    var analyzer = src.Analyzer.init(std.testing.allocator);
+    defer analyzer.deinit();
+
+    const allowlist = [_][]const u8{"unused-decl"};
+    analyzer.setRuleFilter(.{ .allowlist = &allowlist });
+
+    const files = [_][]const u8{
+        "test/fixtures/project_unused_decl/alias.zig",
+        "test/fixtures/project_unused_decl/alias_inner.zig",
+    };
+    try analyzer.analyzeProjectUnusedDecls(&files);
+
+    try std.testing.expectEqual(@as(usize, 2), analyzer.diagnostics.items.len);
+    try std.testing.expect(std.mem.indexOf(u8, analyzer.diagnostics.items[0].message, "RegularType") != null);
+    try std.testing.expect(std.mem.indexOf(u8, analyzer.diagnostics.items[1].message, "unusedFunction") != null);
 }
 
 test "identifier_style fixtures" {
