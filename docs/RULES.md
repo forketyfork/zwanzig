@@ -85,11 +85,13 @@ pub fn helper() void {
 
 ### unused-decl
 
-Detects unused container-level `const`, `var`, and `fn` declarations that aren't exported. The check is conservative:
-- Exported (`pub`) declarations are ignored (they may be used externally)
+Detects unused container-level `const`, `var`, and `fn` declarations that aren't exported. The per-file check is conservative:
+- Exported (`pub`) declarations are ignored during default per-file analysis (they may be used externally)
 - `export` and `extern` declarations are ignored (they may be used by other compilation units)
 - Underscore-prefixed names (e.g., `_unused`) are ignored (explicit opt-out)
 - Special names like `main` and `panic` are ignored (entry points)
+
+When `unused-decl` is enabled and more than one file is analyzed, zwanzig also runs a project pass over all analyzed files. That pass reports public top-level declarations that are not referenced by any other analyzed file, while ignoring `build.zig`'s `build` entrypoint, package API roots discovered from `root_source_file` in analyzed or workspace `build.zig` files, and alias-style re-exports to avoid library facade noise. Declarations exposed through another used public declaration's type, signature, field, initializer surface, typed receiver method call, or result-location method call are treated as used.
 
 **Bad:**
 ```zig

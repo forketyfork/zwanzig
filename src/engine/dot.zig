@@ -17,7 +17,7 @@ const log = std.log.scoped(.engine_dot);
 
 /// Generate DOT format for the full exploded graph.
 /// Shows all (CFG node, state) pairs with edges between them.
-pub fn generateExplodedGraph(
+fn generateExplodedGraph(
     graph: *const ExplodedGraph,
     allocator: std.mem.Allocator,
 ) ![]const u8 {
@@ -101,7 +101,7 @@ pub fn writeExplodedGraphToFile(
 
 /// Generate DOT format for CFG with state annotations.
 /// Shows the original CFG structure with state summary at each node.
-pub fn generateAnnotatedCfg(
+fn generateAnnotatedCfg(
     graph: *const ExplodedGraph,
     allocator: std.mem.Allocator,
 ) ![]const u8 {
@@ -217,7 +217,7 @@ pub fn writeAnnotatedCfgToFile(
 
 /// Generate DOT format for path traces leading to violations.
 /// Shows linear paths from entry to each violation with state info.
-pub fn generatePathTraces(
+fn generatePathTraces(
     graph: *const ExplodedGraph,
     allocator: std.mem.Allocator,
 ) ![]const u8 {

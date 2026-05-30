@@ -291,14 +291,7 @@ pub fn run() !void {
     defer std.process.argsFree(allocator, args);
 
     const cli_args = parseCliArgs(allocator, args);
-    defer {
-        allocator.free(cli_args.paths);
-        switch (cli_args.rule_filter) {
-            .allowlist => |list| allocator.free(list),
-            .blocklist => |list| allocator.free(list),
-            .none => {},
-        }
-    }
+    defer args_mod.freeCliArgs(allocator, cli_args);
 
     const final_config = loadMergedConfig(allocator, cli_args);
     defer merge_mod.freeMergedConfig(allocator, cli_args, final_config);
@@ -320,6 +313,7 @@ pub fn run() !void {
 
     log.info("analyzing with {d} rule(s) using {d} thread(s)", .{ analyzer.totalCheckerCount(), cli_args.thread_count });
     try analyzeFilesParallel(&analyzer, files, cli_args.thread_count, allocator);
+    try analyzer.analyzeProjectUnusedDecls(files);
     log.info("analysis complete", .{});
     analyzer.logAnalysisStats();
 

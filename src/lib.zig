@@ -3,12 +3,16 @@ pub const diagnostic = @import("diagnostic.zig");
 pub const rule = @import("rule.zig");
 pub const checker = @import("checker.zig");
 pub const config = @import("config.zig");
+pub const analyzer = @import("analyzer.zig");
+pub const rule_filter = @import("rule_filter.zig");
 
 pub const Source = source.Source;
 pub const Diagnostic = diagnostic.Diagnostic;
 pub const Severity = diagnostic.Severity;
 pub const Rule = rule.Rule;
 pub const Checker = checker.Checker;
+pub const Analyzer = analyzer.Analyzer;
+pub const RuleFilter = rule_filter.RuleFilter;
 
 pub const rules = struct {
     pub const dupe_import = @import("rules/dupe_import.zig");

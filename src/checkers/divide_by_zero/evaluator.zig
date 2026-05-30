@@ -7,7 +7,7 @@ const AnalysisEngine = engine_mod.AnalysisEngine;
 const ProgramState = @import("../../engine/state.zig").ProgramState;
 const AbstractValue = @import("../../engine/value.zig").AbstractValue;
 
-pub const DenominatorRisk = enum {
+const DenominatorRisk = enum {
     definitely_zero,
     definitely_non_zero,
     maybe_zero,

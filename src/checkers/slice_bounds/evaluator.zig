@@ -5,7 +5,7 @@ const ids = @import("../../ids.zig");
 const Cfg = @import("../../cfg.zig").Cfg;
 const AnalysisEngine = @import("../../engine.zig").AnalysisEngine;
 
-pub const BoundsRisk = enum {
+const BoundsRisk = enum {
     safe,
     definitely_oob,
     possibly_oob,

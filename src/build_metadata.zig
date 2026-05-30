@@ -38,7 +38,7 @@ pub const TargetOS = enum {
     }
 };
 
-pub const OptimizeMode = enum {
+const OptimizeMode = enum {
     debug,
     release_safe,
     release_fast,

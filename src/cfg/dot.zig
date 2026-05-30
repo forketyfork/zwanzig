@@ -9,7 +9,7 @@ const log = std.log.scoped(.cfg_dot);
 /// Generate DOT format representation of a CFG for visualization.
 /// The output can be rendered with Graphviz: `dot -Tpng file.dot -o file.png`
 /// or viewed at online tools like edotor.net or viz-js.com
-pub fn generate(cfg: *const Cfg, allocator: std.mem.Allocator) ![]const u8 {
+fn generate(cfg: *const Cfg, allocator: std.mem.Allocator) ![]const u8 {
     var buffer: std.ArrayList(u8) = .empty;
     errdefer buffer.deinit(allocator);
 
@@ -103,16 +103,6 @@ pub fn writeToFile(
     };
 
     log.debug("dumped CFG to {s}", .{file_path});
-}
-
-/// Print DOT format to stderr for quick debugging.
-pub fn dumpToStderr(cfg: *const Cfg, allocator: std.mem.Allocator) void {
-    const dot = generate(cfg, allocator) catch |err| {
-        std.debug.print("Failed to generate DOT: {}\n", .{err});
-        return;
-    };
-    defer allocator.free(dot);
-    std.debug.print("{s}", .{dot});
 }
 
 // ============================================================================
