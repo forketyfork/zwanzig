@@ -9,13 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-- `unused-decl` now runs a project-wide pass by default when more than one file is analyzed, reporting public top-level declarations that are not referenced by any other analyzed file (#91).
-
-### Changed
-
-- Project-wide `unused-decl` ignores package entrypoint and alias-style public API exports to reduce library facade noise (#91).
-- Project-wide `unused-decl` now keeps declarations that are exposed through another used public declaration's type, signature, field, or initializer surface (#91).
-- Project-wide `unused-decl` now discovers package roots from analyzed or workspace `build.zig` `root_source_file` entries, ignores `build.zig`'s `build` entrypoint, and recognizes typed receiver and result-location method calls across files (#91).
+- `unused-decl` now runs a project-wide pass by default when more than one file is analyzed, reporting public top-level declarations unreferenced by any other analyzed file. Package entrypoints, alias-style public API exports, and declarations exposed through a used declaration's type, signature, field, or initializer are excluded to reduce false positives. Package roots are auto-discovered from `build.zig` `root_source_file` entries, and typed receiver and result-location method calls are recognized across files (#91).
 
 ## [0.12.2] - 2026-05-27
 
@@ -199,7 +193,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Initial release: Zig static analyzer MVP with the `empty-catch` rule, rule-selection flags, and source parsing cache.
 
-[Unreleased]: https://github.com/forketyfork/zwanzig/compare/v0.12.1...HEAD
+[Unreleased]: https://github.com/forketyfork/zwanzig/compare/v0.12.2...HEAD
+[0.12.2]: https://github.com/forketyfork/zwanzig/compare/v0.12.1...v0.12.2
 [0.12.1]: https://github.com/forketyfork/zwanzig/compare/v0.12.0...v0.12.1
 [0.12.0]: https://github.com/forketyfork/zwanzig/compare/v0.11.0...v0.12.0
 [0.11.0]: https://github.com/forketyfork/zwanzig/compare/v0.10.0...v0.11.0
