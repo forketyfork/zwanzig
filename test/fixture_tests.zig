@@ -57,6 +57,24 @@ test "shadowed_variable fixtures" {
     try runFixturesInDir(std.testing.allocator, &ShadowedVariableRule.rule, "test/fixtures/shadowed_variable");
 }
 
+test "project-wide unused declarations" {
+    var analyzer = src.Analyzer.init(std.testing.allocator);
+    defer analyzer.deinit();
+
+    const allowlist = [_][]const u8{ "unused-decl" };
+    analyzer.setRuleFilter(.{ .allowlist = &allowlist });
+
+    const files = [_][]const u8{
+        "test/fixtures/project_unused_decl/main.zig",
+        "test/fixtures/project_unused_decl/api.zig",
+    };
+    try analyzer.analyzeProjectUnusedDecls(&files);
+
+    try std.testing.expectEqual(@as(usize, 1), analyzer.diagnostics.items.len);
+    try std.testing.expectEqualStrings("unused-decl", analyzer.diagnostics.items[0].rule_id);
+    try std.testing.expect(std.mem.indexOf(u8, analyzer.diagnostics.items[0].message, "unusedByProject") != null);
+}
+
 test "identifier_style fixtures" {
     try runFixturesInDir(std.testing.allocator, &IdentifierStyleRule.rule, "test/fixtures/identifier_style");
 }

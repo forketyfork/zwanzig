@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- `unused-decl` can now run a project-wide pass for explicitly selected analyses, reporting public top-level declarations that are not referenced by any other analyzed file (PR #TBD).
+
 ## [0.12.2] - 2026-05-27
 
 ### Changed

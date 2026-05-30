@@ -21,6 +21,7 @@ const SarifFormatter = @import("formatters/sarif.zig").SarifFormatter;
 const log = std.log.scoped(.analyzer);
 const diagnostic_mod = @import("diagnostic.zig");
 const suppression = @import("suppression.zig");
+const project_unused_decl = @import("project_unused_decl.zig");
 
 pub const Analyzer = struct {
     allocator: std.mem.Allocator,
@@ -202,6 +203,24 @@ pub const Analyzer = struct {
                 }
             }
         }
+    }
+
+    pub fn shouldRunProjectUnusedDecls(self: *const Analyzer) bool {
+        switch (self.rule_filter) {
+            .allowlist => |list| {
+                for (list) |allowed| {
+                    if (std.mem.eql(u8, allowed, "unused-decl")) return true;
+                }
+                return false;
+            },
+            else => return false,
+        }
+    }
+
+    pub fn analyzeProjectUnusedDecls(self: *Analyzer, files: []const []const u8) !void {
+        if (!self.shouldRunProjectUnusedDecls()) return;
+        try project_unused_decl.analyze(self.allocator, files, &self.diagnostics);
+        std.mem.sort(Diagnostic, self.diagnostics.items, {}, Diagnostic.lessThan);
     }
 
     pub fn analyzeFile(self: *Analyzer, file_path: []const u8) !void {

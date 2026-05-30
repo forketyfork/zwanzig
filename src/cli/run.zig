@@ -320,6 +320,7 @@ pub fn run() !void {
 
     log.info("analyzing with {d} rule(s) using {d} thread(s)", .{ analyzer.totalCheckerCount(), cli_args.thread_count });
     try analyzeFilesParallel(&analyzer, files, cli_args.thread_count, allocator);
+    try analyzer.analyzeProjectUnusedDecls(files);
     log.info("analysis complete", .{});
     analyzer.logAnalysisStats();
 
