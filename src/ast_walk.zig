@@ -613,21 +613,6 @@ fn fillParentMapInternal(tree: *const Ast, node: u32, parent: u32, parent_map: [
     }
 }
 
-pub fn collectNodesByTag(
-    allocator: std.mem.Allocator,
-    tree: *const Ast,
-    root: u32,
-    tag: Ast.Node.Tag,
-    out: *std.ArrayList(u32),
-) !void {
-    var collector = TagCollector{
-        .allocator = allocator,
-        .tag = tag,
-        .out = out,
-    };
-    try walk(TagCollector, tree, root, &collector);
-}
-
 pub fn containsIdentifier(tree: *const Ast, root: u32, target_name: []const u8) bool {
     var finder = IdentifierFinder{
         .target_name = target_name,
@@ -635,28 +620,6 @@ pub fn containsIdentifier(tree: *const Ast, root: u32, target_name: []const u8) 
     walk(IdentifierFinder, tree, root, &finder) catch return false;
     return finder.found;
 }
-
-pub fn containsNode(tree: *const Ast, root: u32, target: u32) bool {
-    if (root == target) return true;
-    var finder = NodeFinder{
-        .target = target,
-    };
-    walk(NodeFinder, tree, root, &finder) catch return false;
-    return finder.found;
-}
-
-const TagCollector = struct {
-    allocator: std.mem.Allocator,
-    tag: Ast.Node.Tag,
-    out: *std.ArrayList(u32),
-    stop: bool = false,
-
-    pub fn visit(self: *TagCollector, _: *const Ast, node: u32, tag: Ast.Node.Tag) !void {
-        if (tag == self.tag) {
-            try self.out.append(self.allocator, node);
-        }
-    }
-};
 
 const IdentifierFinder = struct {
     target_name: []const u8,
@@ -672,19 +635,6 @@ const IdentifierFinder = struct {
         const token = tree.nodes.items(.main_token)[node];
         const name = tree.tokenSlice(token);
         if (std.mem.eql(u8, name, self.target_name)) {
-            self.found = true;
-            self.stop = true;
-        }
-    }
-};
-
-const NodeFinder = struct {
-    target: u32,
-    found: bool = false,
-    stop: bool = false,
-
-    pub fn visit(self: *NodeFinder, _: *const Ast, node: u32, _: Ast.Node.Tag) !void {
-        if (node == self.target) {
             self.found = true;
             self.stop = true;
         }

@@ -1,7 +1,7 @@
 const std = @import("std");
 const ast_walk = @import("ast_walk.zig");
 
-pub const AssertionKind = enum {
+const AssertionKind = enum {
     boolean,
     equality,
 };
@@ -93,7 +93,7 @@ pub fn buildAssertionScope(
     return scope;
 }
 
-pub fn isTestAssertionName(name: []const u8) bool {
+fn isTestAssertionName(name: []const u8) bool {
     return std.mem.eql(u8, name, "expect") or
         std.mem.eql(u8, name, "expectEqual") or
         std.mem.eql(u8, name, "expectEqualStrings") or

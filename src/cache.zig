@@ -2,7 +2,7 @@ const std = @import("std");
 const log = std.log.scoped(.cache);
 const BuildMetadata = @import("build_metadata.zig").BuildMetadata;
 
-pub const CacheError = error{
+const CacheError = error{
     CacheCorrupted,
     VersionMismatch,
     OutOfMemory,
@@ -83,7 +83,7 @@ pub const CacheKey = struct {
     }
 };
 
-pub const CacheEntry = struct {
+const CacheEntry = struct {
     version: u32,
     key: CacheKey,
     timestamp: i64,

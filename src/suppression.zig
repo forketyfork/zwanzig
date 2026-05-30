@@ -1,6 +1,6 @@
 const std = @import("std");
 
-pub const SuppressionError = error{
+const SuppressionError = error{
     OutOfMemory,
 };
 

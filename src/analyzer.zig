@@ -206,15 +206,7 @@ pub const Analyzer = struct {
     }
 
     pub fn shouldRunProjectUnusedDecls(self: *const Analyzer) bool {
-        switch (self.rule_filter) {
-            .allowlist => |list| {
-                for (list) |allowed| {
-                    if (std.mem.eql(u8, allowed, "unused-decl")) return true;
-                }
-                return false;
-            },
-            else => return false,
-        }
+        return self.isRuleEnabled("unused-decl");
     }
 
     pub fn analyzeProjectUnusedDecls(self: *Analyzer, files: []const []const u8) !void {
@@ -589,6 +581,22 @@ test "Analyzer.isRuleEnabled: blocklist" {
     try std.testing.expect(!analyzer.isRuleEnabled("empty-catch"));
     try std.testing.expect(!analyzer.isRuleEnabled("unused-var"));
     try std.testing.expect(analyzer.isRuleEnabled("other-rule"));
+}
+
+test "Analyzer.shouldRunProjectUnusedDecls follows rule filter" {
+    const allocator = std.testing.allocator;
+    var analyzer = Analyzer.init(allocator);
+    defer analyzer.deinit();
+
+    try std.testing.expect(analyzer.shouldRunProjectUnusedDecls());
+
+    const allowlist = [_][]const u8{"todo"};
+    analyzer.setRuleFilter(.{ .allowlist = &allowlist });
+    try std.testing.expect(!analyzer.shouldRunProjectUnusedDecls());
+
+    const blocklist = [_][]const u8{"unused-decl"};
+    analyzer.setRuleFilter(.{ .blocklist = &blocklist });
+    try std.testing.expect(!analyzer.shouldRunProjectUnusedDecls());
 }
 
 test "Analyzer text output format" {

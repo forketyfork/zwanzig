@@ -105,16 +105,6 @@ pub fn writeToFile(
     log.debug("dumped CFG to {s}", .{file_path});
 }
 
-/// Print DOT format to stderr for quick debugging.
-pub fn dumpToStderr(cfg: *const Cfg, allocator: std.mem.Allocator) void {
-    const dot = generate(cfg, allocator) catch |err| {
-        std.debug.print("Failed to generate DOT: {}\n", .{err});
-        return;
-    };
-    defer allocator.free(dot);
-    std.debug.print("{s}", .{dot});
-}
-
 // ============================================================================
 // Tests
 // ============================================================================

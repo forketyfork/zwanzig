@@ -15,7 +15,7 @@ fn isAllocatorType(type_ctx: ?*TypeContext, expr_node: u32) bool {
     return isAllocatorTypeName(type_str);
 }
 
-pub fn isAllocatorTypeName(type_str: []const u8) bool {
+fn isAllocatorTypeName(type_str: []const u8) bool {
     var slice = type_str;
     while (slice.len > 0 and (slice[0] == '*' or slice[0] == '?')) {
         slice = slice[1..];

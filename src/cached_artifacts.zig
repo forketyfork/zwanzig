@@ -17,7 +17,7 @@ const magic: [4]u8 = .{ 'Z', 'W', 'C', 'A' };
 
 /// Current format version for cached artifacts.
 /// Increment when the serialization format changes.
-pub const format_version: u32 = 1;
+const format_version: u32 = 1;
 
 /// Cached intermediate artifacts for a source file.
 /// Contains CFGs for all functions and any other precomputed analysis data.
