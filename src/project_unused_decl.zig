@@ -27,8 +27,10 @@ const FileInfo = struct {
     path: []const u8,
     content: [:0]const u8,
     tree: std.zig.Ast,
+    suppressions: suppression.SuppressionMap,
 
     fn deinit(self: *FileInfo, allocator: std.mem.Allocator) void {
+        self.suppressions.deinit();
         self.tree.deinit(allocator);
         allocator.free(self.content.ptr[0 .. self.content.len + 1]);
     }
@@ -61,6 +63,8 @@ pub fn analyze(
     }
 
     for (file_paths) |path| {
+        if (containsPath(files.items, path)) continue;
+
         const file = try std.fs.cwd().openFile(path, .{});
         defer file.close();
 
@@ -79,10 +83,14 @@ pub fn analyze(
         var tree = try std.zig.Ast.parse(allocator, content, .zig);
         errdefer tree.deinit(allocator);
 
+        var suppressions = try suppression.parseSuppressions(allocator, content);
+        errdefer suppressions.deinit();
+
         try files.append(allocator, .{
             .path = path,
             .content = content,
             .tree = tree,
+            .suppressions = suppressions,
         });
     }
 
@@ -103,9 +111,7 @@ pub fn analyze(
         defer source.deinit();
         const range = try source.byteRangeToSourceRange(decl.byte_offset, decl.byte_offset + decl.name.len);
 
-        var sup_map = try suppression.parseSuppressions(allocator, files.items[decl.file_index].content);
-        defer sup_map.deinit();
-        if (sup_map.isSuppressed(range.start.line, rule_id)) continue;
+        if (files.items[decl.file_index].suppressions.isSuppressed(range.start.line, rule_id)) continue;
 
         const message = try std.fmt.allocPrint(
             allocator,
@@ -114,7 +120,7 @@ pub fn analyze(
         );
         defer allocator.free(message);
 
-        const diag = try Diagnostic.init(
+        var diag = try Diagnostic.init(
             allocator,
             files.items[decl.file_index].path,
             rule_id,
@@ -122,8 +128,16 @@ pub fn analyze(
             message,
             range,
         );
+        errdefer diag.deinit(allocator);
         try diagnostics.append(allocator, diag);
     }
+}
+
+fn containsPath(files: []const FileInfo, path: []const u8) bool {
+    for (files) |file| {
+        if (std.mem.eql(u8, file.path, path)) return true;
+    }
+    return false;
 }
 
 fn collectPublicRootDecls(
@@ -157,7 +171,9 @@ fn collectPublicRootDecls(
                 mutable_decl.deinit(allocator);
                 continue;
             }
-            try decls.append(allocator, decl);
+            var mutable_decl = decl;
+            errdefer mutable_decl.deinit(allocator);
+            try decls.append(allocator, mutable_decl);
         }
     }
 }
@@ -297,18 +313,23 @@ fn classifyVarDecl(tree: *const std.zig.Ast, full: std.zig.Ast.full.VarDecl) Dec
 }
 
 fn isReferencedFromAnotherFile(files: []const FileInfo, decl: DeclInfo) bool {
+    const decl_file = files[decl.file_index];
     for (files, 0..) |*file, file_index| {
         if (file_index == decl.file_index) continue;
+        if (std.mem.eql(u8, file.path, decl_file.path)) continue;
         if (fileReferencesName(&file.tree, decl.normalized_name)) return true;
     }
     return false;
 }
 
 fn fileReferencesName(tree: *const std.zig.Ast, normalized_name: []const u8) bool {
-    const token_tags = tree.tokens.items(.tag);
-    for (token_tags, 0..) |tag, token_index| {
-        if (tag != .identifier) continue;
-        const slice = normalizeIdentifier(tree.tokenSlice(@intCast(token_index)));
+    const tags = tree.nodes.items(.tag);
+    const datas = tree.nodes.items(.data);
+
+    for (tags, 0..) |tag, node_index| {
+        if (tag != .field_access) continue;
+        const field_token = datas[node_index].node_and_token[1];
+        const slice = normalizeIdentifier(tree.tokenSlice(field_token));
         if (std.mem.eql(u8, slice, normalized_name)) return true;
     }
     return false;

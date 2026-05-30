@@ -75,6 +75,25 @@ test "project-wide unused declarations" {
     try std.testing.expect(std.mem.indexOf(u8, analyzer.diagnostics.items[0].message, "unusedByProject") != null);
 }
 
+test "project-wide unused declarations ignore duplicate names and paths" {
+    var analyzer = src.Analyzer.init(std.testing.allocator);
+    defer analyzer.deinit();
+
+    const allowlist = [_][]const u8{ "unused-decl" };
+    analyzer.setRuleFilter(.{ .allowlist = &allowlist });
+
+    const files = [_][]const u8{
+        "test/fixtures/project_unused_decl/duplicate_a.zig",
+        "test/fixtures/project_unused_decl/duplicate_a.zig",
+        "test/fixtures/project_unused_decl/duplicate_b.zig",
+    };
+    try analyzer.analyzeProjectUnusedDecls(&files);
+
+    try std.testing.expectEqual(@as(usize, 2), analyzer.diagnostics.items.len);
+    try std.testing.expectEqualStrings("test/fixtures/project_unused_decl/duplicate_a.zig", analyzer.diagnostics.items[0].file_path);
+    try std.testing.expectEqualStrings("test/fixtures/project_unused_decl/duplicate_b.zig", analyzer.diagnostics.items[1].file_path);
+}
+
 test "identifier_style fixtures" {
     try runFixturesInDir(std.testing.allocator, &IdentifierStyleRule.rule, "test/fixtures/identifier_style");
 }
