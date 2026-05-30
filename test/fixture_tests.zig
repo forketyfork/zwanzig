@@ -112,6 +112,143 @@ test "project-wide unused declarations ignore public aliases" {
     try std.testing.expect(std.mem.indexOf(u8, analyzer.diagnostics.items[1].message, "unusedFunction") != null);
 }
 
+test "project-wide unused declarations follow public API surfaces" {
+    var analyzer = src.Analyzer.init(std.testing.allocator);
+    defer analyzer.deinit();
+
+    const allowlist = [_][]const u8{"unused-decl"};
+    analyzer.setRuleFilter(.{ .allowlist = &allowlist });
+
+    const files = [_][]const u8{
+        "test/fixtures/project_unused_decl/api_surface_main.zig",
+        "test/fixtures/project_unused_decl/api_surface.zig",
+    };
+    try analyzer.analyzeProjectUnusedDecls(&files);
+
+    try std.testing.expectEqual(@as(usize, 3), analyzer.diagnostics.items.len);
+    try std.testing.expect(std.mem.indexOf(u8, analyzer.diagnostics.items[0].message, "HelperForUnusedApi") != null);
+    try std.testing.expect(std.mem.indexOf(u8, analyzer.diagnostics.items[1].message, "unusedApi") != null);
+    try std.testing.expect(std.mem.indexOf(u8, analyzer.diagnostics.items[2].message, "unusedFunction") != null);
+}
+
+test "project-wide unused declarations ignore package API entrypoints" {
+    var analyzer = src.Analyzer.init(std.testing.allocator);
+    defer analyzer.deinit();
+
+    const allowlist = [_][]const u8{"unused-decl"};
+    analyzer.setRuleFilter(.{ .allowlist = &allowlist });
+
+    const files = [_][]const u8{
+        "test/fixtures/project_unused_decl/src/lib.zig",
+        "test/fixtures/project_unused_decl/src/public_api.zig",
+        "test/fixtures/project_unused_decl/src/private_api.zig",
+    };
+    try analyzer.analyzeProjectUnusedDecls(&files);
+
+    try std.testing.expectEqual(@as(usize, 1), analyzer.diagnostics.items.len);
+    try std.testing.expect(std.mem.indexOf(u8, analyzer.diagnostics.items[0].message, "hiddenUnused") != null);
+}
+
+test "project-wide unused declarations normalize quoted identifiers" {
+    var analyzer = src.Analyzer.init(std.testing.allocator);
+    defer analyzer.deinit();
+
+    const allowlist = [_][]const u8{"unused-decl"};
+    analyzer.setRuleFilter(.{ .allowlist = &allowlist });
+
+    const files = [_][]const u8{
+        "test/fixtures/project_unused_decl/quoted_main.zig",
+        "test/fixtures/project_unused_decl/quoted_api.zig",
+    };
+    try analyzer.analyzeProjectUnusedDecls(&files);
+
+    try std.testing.expectEqual(@as(usize, 1), analyzer.diagnostics.items.len);
+    try std.testing.expect(std.mem.indexOf(u8, analyzer.diagnostics.items[0].message, "unused-name") != null);
+}
+
+test "project-wide unused declarations ignore externally visible and special public declarations" {
+    var analyzer = src.Analyzer.init(std.testing.allocator);
+    defer analyzer.deinit();
+
+    const allowlist = [_][]const u8{"unused-decl"};
+    analyzer.setRuleFilter(.{ .allowlist = &allowlist });
+
+    const files = [_][]const u8{
+        "test/fixtures/project_unused_decl/ignored_publics.zig",
+        "test/fixtures/project_unused_decl/ignored_publics_main.zig",
+    };
+    try analyzer.analyzeProjectUnusedDecls(&files);
+
+    try std.testing.expectEqual(@as(usize, 0), analyzer.diagnostics.items.len);
+}
+
+test "project-wide unused declarations follow nested public API surfaces" {
+    var analyzer = src.Analyzer.init(std.testing.allocator);
+    defer analyzer.deinit();
+
+    const allowlist = [_][]const u8{"unused-decl"};
+    analyzer.setRuleFilter(.{ .allowlist = &allowlist });
+
+    const files = [_][]const u8{
+        "test/fixtures/project_unused_decl/nested_surface_main.zig",
+        "test/fixtures/project_unused_decl/nested_surface.zig",
+    };
+    try analyzer.analyzeProjectUnusedDecls(&files);
+
+    try std.testing.expectEqual(@as(usize, 1), analyzer.diagnostics.items.len);
+    try std.testing.expect(std.mem.indexOf(u8, analyzer.diagnostics.items[0].message, "UnusedNestedHelper") != null);
+}
+
+test "project-wide unused declarations follow tagged union public API surfaces" {
+    var analyzer = src.Analyzer.init(std.testing.allocator);
+    defer analyzer.deinit();
+
+    const allowlist = [_][]const u8{"unused-decl"};
+    analyzer.setRuleFilter(.{ .allowlist = &allowlist });
+
+    const files = [_][]const u8{
+        "test/fixtures/project_unused_decl/union_surface_main.zig",
+        "test/fixtures/project_unused_decl/union_surface.zig",
+    };
+    try analyzer.analyzeProjectUnusedDecls(&files);
+
+    try std.testing.expectEqual(@as(usize, 1), analyzer.diagnostics.items.len);
+    try std.testing.expect(std.mem.indexOf(u8, analyzer.diagnostics.items[0].message, "UnusedUnionHelper") != null);
+}
+
+test "project-wide unused declarations do not treat function bodies as public API surface" {
+    var analyzer = src.Analyzer.init(std.testing.allocator);
+    defer analyzer.deinit();
+
+    const allowlist = [_][]const u8{"unused-decl"};
+    analyzer.setRuleFilter(.{ .allowlist = &allowlist });
+
+    const files = [_][]const u8{
+        "test/fixtures/project_unused_decl/body_surface_main.zig",
+        "test/fixtures/project_unused_decl/body_surface.zig",
+    };
+    try analyzer.analyzeProjectUnusedDecls(&files);
+
+    try std.testing.expectEqual(@as(usize, 1), analyzer.diagnostics.items.len);
+    try std.testing.expect(std.mem.indexOf(u8, analyzer.diagnostics.items[0].message, "unusedPublicHelper") != null);
+}
+
+test "project-wide unused declarations honor suppressions" {
+    var analyzer = src.Analyzer.init(std.testing.allocator);
+    defer analyzer.deinit();
+
+    const allowlist = [_][]const u8{"unused-decl"};
+    analyzer.setRuleFilter(.{ .allowlist = &allowlist });
+
+    const files = [_][]const u8{
+        "test/fixtures/project_unused_decl/suppressed_api.zig",
+        "test/fixtures/project_unused_decl/suppressed_main.zig",
+    };
+    try analyzer.analyzeProjectUnusedDecls(&files);
+
+    try std.testing.expectEqual(@as(usize, 0), analyzer.diagnostics.items.len);
+}
+
 test "identifier_style fixtures" {
     try runFixturesInDir(std.testing.allocator, &IdentifierStyleRule.rule, "test/fixtures/identifier_style");
 }

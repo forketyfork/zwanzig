@@ -1,4 +1,5 @@
 const std = @import("std");
+const ast_walk = @import("ast_walk.zig");
 const Diagnostic = @import("diagnostic.zig").Diagnostic;
 const Source = @import("source.zig").Source;
 const suppression = @import("suppression.zig");
@@ -38,6 +39,7 @@ const FileInfo = struct {
 
 const DeclInfo = struct {
     file_index: usize,
+    node_index: u32,
     name: []const u8,
     normalized_name: []const u8,
     byte_offset: usize,
@@ -105,9 +107,11 @@ pub fn analyze(
         try collectPublicRootDecls(allocator, &file.tree, file_index, &decls);
     }
 
-    for (decls.items) |decl| {
-        if (isReferencedFromAnotherFile(files.items, decl)) continue;
+    const used = try collectProjectUsedDecls(allocator, files.items, decls.items);
+    defer allocator.free(used);
 
+    for (decls.items, 0..) |decl, decl_index| {
+        if (used[decl_index]) continue;
         var source = Source.init(allocator, files.items[decl.file_index].path, files.items[decl.file_index].content);
         defer source.deinit();
         const range = try source.byteRangeToSourceRange(decl.byte_offset, decl.byte_offset + decl.name.len);
@@ -200,6 +204,7 @@ fn extractPublicVarDecl(
     return try makeDeclInfo(
         allocator,
         file_index,
+        node_idx,
         name,
         token_starts[name_token],
         classifyVarDecl(tree, full),
@@ -226,6 +231,7 @@ fn extractPublicFnDecl(
         .fn_proto => extractPublicFnProto(
             allocator,
             tree,
+            node_idx,
             tree.fnProto(@enumFromInt(node_idx)),
             token_starts,
             file_index,
@@ -233,6 +239,7 @@ fn extractPublicFnDecl(
         .fn_proto_simple => extractPublicFnProto(
             allocator,
             tree,
+            node_idx,
             tree.fnProtoSimple(&buffer, @enumFromInt(node_idx)),
             token_starts,
             file_index,
@@ -240,6 +247,7 @@ fn extractPublicFnDecl(
         .fn_proto_one => extractPublicFnProto(
             allocator,
             tree,
+            node_idx,
             tree.fnProtoOne(&buffer, @enumFromInt(node_idx)),
             token_starts,
             file_index,
@@ -247,6 +255,7 @@ fn extractPublicFnDecl(
         .fn_proto_multi => extractPublicFnProto(
             allocator,
             tree,
+            node_idx,
             tree.fnProtoMulti(@enumFromInt(node_idx)),
             token_starts,
             file_index,
@@ -258,6 +267,7 @@ fn extractPublicFnDecl(
 fn extractPublicFnProto(
     allocator: std.mem.Allocator,
     tree: *const std.zig.Ast,
+    node_idx: u32,
     proto: std.zig.Ast.full.FnProto,
     token_starts: []const u32,
     file_index: usize,
@@ -274,6 +284,7 @@ fn extractPublicFnProto(
     return try makeDeclInfo(
         allocator,
         file_index,
+        node_idx,
         tree.tokenSlice(name_token),
         token_starts[name_token],
         .function,
@@ -283,6 +294,7 @@ fn extractPublicFnProto(
 fn makeDeclInfo(
     allocator: std.mem.Allocator,
     file_index: usize,
+    node_index: u32,
     name: []const u8,
     byte_offset: usize,
     kind: DeclKind,
@@ -292,6 +304,7 @@ fn makeDeclInfo(
     const normalized_copy = try allocator.dupe(u8, normalizeIdentifier(name));
     return .{
         .file_index = file_index,
+        .node_index = node_index,
         .name = name_copy,
         .normalized_name = normalized_copy,
         .byte_offset = byte_offset,
@@ -433,6 +446,30 @@ fn classifyVarDecl(tree: *const std.zig.Ast, full: std.zig.Ast.full.VarDecl) Dec
     return .declaration;
 }
 
+fn collectProjectUsedDecls(
+    allocator: std.mem.Allocator,
+    files: []const FileInfo,
+    decls: []const DeclInfo,
+) ![]bool {
+    const used = try allocator.alloc(bool, decls.len);
+    @memset(used, false);
+
+    for (decls, 0..) |decl, decl_index| {
+        if (isReferencedFromAnotherFile(files, decl)) used[decl_index] = true;
+    }
+
+    var changed = true;
+    while (changed) {
+        changed = false;
+        for (decls, 0..) |decl, decl_index| {
+            if (!used[decl_index]) continue;
+            if (try markPublicSurfaceReferences(files, decls, used, decl)) changed = true;
+        }
+    }
+
+    return used;
+}
+
 fn isReferencedFromAnotherFile(files: []const FileInfo, decl: DeclInfo) bool {
     const decl_file = files[decl.file_index];
     for (files, 0..) |*file, file_index| {
@@ -442,6 +479,209 @@ fn isReferencedFromAnotherFile(files: []const FileInfo, decl: DeclInfo) bool {
     }
     return false;
 }
+
+fn markPublicSurfaceReferences(
+    files: []const FileInfo,
+    decls: []const DeclInfo,
+    used: []bool,
+    decl: DeclInfo,
+) !bool {
+    const file = &files[decl.file_index];
+    var scanner = PublicSurfaceScanner{
+        .tree = &file.tree,
+        .decls = decls,
+        .used = used,
+        .file_index = decl.file_index,
+    };
+    try scanner.scanDecl(decl.node_index);
+    return scanner.changed;
+}
+
+const PublicSurfaceScanner = struct {
+    tree: *const std.zig.Ast,
+    decls: []const DeclInfo,
+    used: []bool,
+    file_index: usize,
+    changed: bool = false,
+    stop: bool = false,
+
+    fn scanDecl(self: *PublicSurfaceScanner, node: u32) anyerror!void {
+        const tags = self.tree.nodes.items(.tag);
+        if (node >= tags.len) return;
+
+        switch (tags[node]) {
+            .simple_var_decl,
+            .aligned_var_decl,
+            .global_var_decl,
+            => try self.scanVarDeclSurface(node),
+            .fn_decl => {
+                const data = self.tree.nodes.items(.data)[node];
+                try self.scanFnProto(@intFromEnum(data.node_and_node[0]));
+            },
+            .fn_proto,
+            .fn_proto_simple,
+            .fn_proto_one,
+            .fn_proto_multi,
+            => try self.scanFnProto(node),
+            else => {},
+        }
+    }
+
+    fn scanVarDeclSurface(self: *PublicSurfaceScanner, node: u32) anyerror!void {
+        const full = self.tree.fullVarDecl(@enumFromInt(node)) orelse return;
+        try self.scanOptionalNode(full.ast.type_node);
+
+        const init_node = full.ast.init_node.unwrap() orelse return;
+        const init_idx = @intFromEnum(init_node);
+        const tags = self.tree.nodes.items(.tag);
+        if (init_idx < tags.len and isContainerTag(tags[init_idx])) {
+            try self.scanContainerSurface(init_idx);
+        } else {
+            try self.scanNode(init_idx);
+        }
+    }
+
+    fn scanFnProto(self: *PublicSurfaceScanner, node: u32) anyerror!void {
+        const tags = self.tree.nodes.items(.tag);
+        if (node >= tags.len) return;
+
+        var buffer: [1]std.zig.Ast.Node.Index = undefined;
+        const proto = switch (tags[node]) {
+            .fn_proto => self.tree.fnProto(@enumFromInt(node)),
+            .fn_proto_simple => self.tree.fnProtoSimple(&buffer, @enumFromInt(node)),
+            .fn_proto_one => self.tree.fnProtoOne(&buffer, @enumFromInt(node)),
+            .fn_proto_multi => self.tree.fnProtoMulti(@enumFromInt(node)),
+            else => return,
+        };
+
+        for (proto.ast.params) |param| try self.scanParam(@intFromEnum(param));
+        try self.scanOptionalNode(proto.ast.return_type);
+        try self.scanOptionalNode(proto.ast.align_expr);
+        try self.scanOptionalNode(proto.ast.addrspace_expr);
+        try self.scanOptionalNode(proto.ast.section_expr);
+        try self.scanOptionalNode(proto.ast.callconv_expr);
+    }
+
+    fn scanParam(self: *PublicSurfaceScanner, node: u32) anyerror!void {
+        const tags = self.tree.nodes.items(.tag);
+        if (node >= tags.len) return;
+
+        if (isVarDeclTag(tags[node])) {
+            const full = self.tree.fullVarDecl(@enumFromInt(node)) orelse return;
+            try self.scanOptionalNode(full.ast.type_node);
+            return;
+        }
+
+        try self.scanNode(node);
+    }
+
+    fn scanContainerSurface(self: *PublicSurfaceScanner, node: u32) anyerror!void {
+        const tags = self.tree.nodes.items(.tag);
+        if (node >= tags.len) return;
+
+        switch (tags[node]) {
+            .container_decl,
+            .container_decl_trailing,
+            => try self.scanContainerDeclComponents(self.tree.containerDecl(@enumFromInt(node))),
+            .container_decl_two,
+            .container_decl_two_trailing,
+            => {
+                var buffer: [2]std.zig.Ast.Node.Index = undefined;
+                try self.scanContainerDeclComponents(self.tree.containerDeclTwo(&buffer, @enumFromInt(node)));
+            },
+            .container_decl_arg,
+            .container_decl_arg_trailing,
+            => try self.scanContainerDeclComponents(self.tree.containerDeclArg(@enumFromInt(node))),
+            .tagged_union,
+            .tagged_union_trailing,
+            => try self.scanContainerDeclComponents(self.tree.taggedUnion(@enumFromInt(node))),
+            .tagged_union_enum_tag,
+            .tagged_union_enum_tag_trailing,
+            => try self.scanContainerDeclComponents(self.tree.taggedUnionEnumTag(@enumFromInt(node))),
+            .tagged_union_two,
+            .tagged_union_two_trailing,
+            => {
+                var buffer: [2]std.zig.Ast.Node.Index = undefined;
+                try self.scanContainerDeclComponents(self.tree.taggedUnionTwo(&buffer, @enumFromInt(node)));
+            },
+            else => {},
+        }
+    }
+
+    fn scanContainerDeclComponents(
+        self: *PublicSurfaceScanner,
+        container: std.zig.Ast.full.ContainerDecl,
+    ) anyerror!void {
+        if (container.ast.arg.unwrap()) |arg_node| try self.scanNode(@intFromEnum(arg_node));
+
+        const tags = self.tree.nodes.items(.tag);
+        for (container.ast.members) |member_node| {
+            const member = @intFromEnum(member_node);
+            if (member >= tags.len) continue;
+
+            switch (tags[member]) {
+                .container_field,
+                .container_field_init,
+                .container_field_align,
+                => try self.scanContainerField(member),
+                .simple_var_decl,
+                .aligned_var_decl,
+                .global_var_decl,
+                => {
+                    const full = self.tree.fullVarDecl(@enumFromInt(member)) orelse continue;
+                    if (isPubToken(self.tree, full.visib_token)) try self.scanVarDeclSurface(member);
+                },
+                .fn_decl,
+                .fn_proto,
+                .fn_proto_simple,
+                .fn_proto_one,
+                .fn_proto_multi,
+                => if (isPublicFnDecl(self.tree, member)) try self.scanDecl(member),
+                else => {},
+            }
+        }
+    }
+
+    fn scanContainerField(self: *PublicSurfaceScanner, node: u32) anyerror!void {
+        const field = self.tree.fullContainerField(@enumFromInt(node)) orelse return;
+        try self.scanOptionalNode(field.ast.type_expr);
+        try self.scanOptionalNode(field.ast.value_expr);
+        try self.scanOptionalNode(field.ast.align_expr);
+    }
+
+    fn scanOptionalNode(self: *PublicSurfaceScanner, node_opt: std.zig.Ast.Node.OptionalIndex) anyerror!void {
+        if (node_opt.unwrap()) |node| try self.scanNode(@intFromEnum(node));
+    }
+
+    fn scanNode(self: *PublicSurfaceScanner, node: u32) anyerror!void {
+        try ast_walk.walk(PublicSurfaceScanner, self.tree, node, self);
+    }
+
+    pub fn visit(
+        self: *PublicSurfaceScanner,
+        tree: *const std.zig.Ast,
+        node: u32,
+        tag: std.zig.Ast.Node.Tag,
+    ) anyerror!void {
+        if (tag != .identifier) return;
+
+        const main_tokens = tree.nodes.items(.main_token);
+        if (node >= main_tokens.len) return;
+        self.markIdentifier(tree.tokenSlice(main_tokens[node]));
+    }
+
+    fn markIdentifier(self: *PublicSurfaceScanner, identifier: []const u8) void {
+        const normalized = normalizeIdentifier(identifier);
+        for (self.decls, 0..) |candidate, candidate_index| {
+            if (candidate.file_index != self.file_index) continue;
+            if (self.used[candidate_index]) continue;
+            if (!std.mem.eql(u8, candidate.normalized_name, normalized)) continue;
+
+            self.used[candidate_index] = true;
+            self.changed = true;
+        }
+    }
+};
 
 fn fileReferencesName(tree: *const std.zig.Ast, normalized_name: []const u8) bool {
     const tags = tree.nodes.items(.tag);
@@ -469,6 +709,33 @@ fn isSpecialName(name: []const u8) bool {
     if (std.mem.eql(u8, name, "panic")) return true;
     if (std.mem.eql(u8, name, "std_options")) return true;
     return false;
+}
+
+fn isPublicFnDecl(tree: *const std.zig.Ast, node: u32) bool {
+    const tags = tree.nodes.items(.tag);
+    if (node >= tags.len) return false;
+
+    var buffer: [1]std.zig.Ast.Node.Index = undefined;
+    const proto = switch (tags[node]) {
+        .fn_decl => blk: {
+            const data = tree.nodes.items(.data)[node];
+            const proto_node = @intFromEnum(data.node_and_node[0]);
+            break :blk switch (tags[proto_node]) {
+                .fn_proto => tree.fnProto(@enumFromInt(proto_node)),
+                .fn_proto_simple => tree.fnProtoSimple(&buffer, @enumFromInt(proto_node)),
+                .fn_proto_one => tree.fnProtoOne(&buffer, @enumFromInt(proto_node)),
+                .fn_proto_multi => tree.fnProtoMulti(@enumFromInt(proto_node)),
+                else => return false,
+            };
+        },
+        .fn_proto => tree.fnProto(@enumFromInt(node)),
+        .fn_proto_simple => tree.fnProtoSimple(&buffer, @enumFromInt(node)),
+        .fn_proto_one => tree.fnProtoOne(&buffer, @enumFromInt(node)),
+        .fn_proto_multi => tree.fnProtoMulti(@enumFromInt(node)),
+        else => return false,
+    };
+
+    return isPubToken(tree, proto.visib_token);
 }
 
 fn isContainerTag(tag: std.zig.Ast.Node.Tag) bool {

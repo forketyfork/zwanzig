@@ -14,6 +14,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 
 - Project-wide `unused-decl` ignores package entrypoint and alias-style public API exports to reduce library facade noise (#91).
+- Project-wide `unused-decl` now keeps declarations that are exposed through another used public declaration's type, signature, field, or initializer surface (#91).
 
 ## [0.12.2] - 2026-05-27
 
