@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.13.1] - 2026-06-01
+
 ### Added
 
 - `unused-decl` now runs a project-wide pass by default when more than one file is analyzed, reporting public top-level declarations unreferenced by any other analyzed file. Package entrypoints, alias-style public API exports, and declarations exposed through a used declaration's type, signature, field, or initializer are excluded to reduce false positives. Package roots are auto-discovered from `build.zig` `root_source_file` entries, and typed receiver and result-location method calls are recognized across files (#91).
@@ -193,7 +195,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Initial release: Zig static analyzer MVP with the `empty-catch` rule, rule-selection flags, and source parsing cache.
 
-[Unreleased]: https://github.com/forketyfork/zwanzig/compare/v0.12.2...HEAD
+[Unreleased]: https://github.com/forketyfork/zwanzig/compare/v0.13.1...HEAD
+[0.13.1]: https://github.com/forketyfork/zwanzig/compare/v0.12.2...v0.13.1
 [0.12.2]: https://github.com/forketyfork/zwanzig/compare/v0.12.1...v0.12.2
 [0.12.1]: https://github.com/forketyfork/zwanzig/compare/v0.12.0...v0.12.1
 [0.12.0]: https://github.com/forketyfork/zwanzig/compare/v0.11.0...v0.12.0
