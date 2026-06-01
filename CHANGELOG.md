@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.13.1] - 2026-06-01
+
 ### Added
 
 - `unused-decl` now runs a project-wide pass by default when more than one file is analyzed, reporting public top-level declarations unreferenced by any other analyzed file. Package entrypoints, alias-style public API exports, and declarations exposed through a used declaration's type, signature, field, or initializer are excluded to reduce false positives. Package roots are auto-discovered from `build.zig` `root_source_file` entries, and typed receiver and result-location method calls are recognized across files (#91).
