@@ -140,8 +140,18 @@ pub fn mixin(comptime _Engine: type) type {
             }
 
             if (std.mem.eql(u8, call_info.method_name, "close")) {
-                const target_expr: ?u32 = if (first_arg) |arg| arg else call_info.base_node;
-                return .{ .kind = .close, .target_expr = target_expr, .call_node = call_ast_node };
+                if (first_arg == null) {
+                    if (call_info.base_node) |base_node| {
+                        return .{ .kind = .close, .target_expr = base_node, .call_node = call_ast_node };
+                    }
+                }
+                if (call_info.fqn) |fqn| {
+                    if (std.mem.eql(u8, fqn, "std.posix.close")) {
+                        if (first_arg) |arg| {
+                            return .{ .kind = .close, .target_expr = arg, .call_node = call_ast_node };
+                        }
+                    }
+                }
             }
             return null;
         }

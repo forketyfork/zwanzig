@@ -24,10 +24,6 @@ pub fn callParam(tree: *const std.zig.Ast, call_node: u32, index: usize) ?u32 {
     return call_resolver.callParam(tree, call_node, index);
 }
 
-pub fn receiverSourceSlice(source: []const u8, tree: *const std.zig.Ast, node: u32) ?[]const u8 {
-    return call_resolver.receiverSourceSlice(source, tree, node);
-}
-
 pub fn resolveResultLocationType(
     tree: *const std.zig.Ast,
     type_ctx: *TypeContext,

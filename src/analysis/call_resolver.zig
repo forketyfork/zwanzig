@@ -146,12 +146,6 @@ pub fn constructFqn(
     return buffer[0..pos];
 }
 
-pub fn receiverSourceSlice(source: []const u8, tree: *const std.zig.Ast, node: u32) ?[]const u8 {
-    const range = receiverByteRange(tree, node) orelse return null;
-    if (range.start >= source.len or range.end > source.len or range.start >= range.end) return null;
-    return source[range.start..range.end];
-}
-
 pub fn resolveResultLocationType(
     tree: *const std.zig.Ast,
     type_ctx: *TypeContext,
@@ -769,35 +763,6 @@ pub fn isContainerTag(tag: std.zig.Ast.Node.Tag) bool {
         => true,
         else => false,
     };
-}
-
-fn receiverByteRange(tree: *const std.zig.Ast, node: u32) ?struct { start: usize, end: usize } {
-    const tags = tree.nodes.items(.tag);
-    const datas = tree.nodes.items(.data);
-    const main_tokens = tree.nodes.items(.main_token);
-    const token_starts = tree.tokens.items(.start);
-    const token_tags = tree.tokens.items(.tag);
-
-    if (node >= tags.len) return null;
-    switch (tags[node]) {
-        .identifier => {
-            const token = main_tokens[node];
-            if (token >= token_tags.len or token_tags[token] != .identifier) return null;
-            const start = token_starts[token];
-            return .{ .start = start, .end = start + tree.tokenSlice(token).len };
-        },
-        .field_access => {
-            const access = datas[node].node_and_token;
-            const base_range = receiverByteRange(tree, @intFromEnum(access[0])) orelse return null;
-            const field_token = access[1];
-            if (field_token >= token_tags.len or token_tags[field_token] != .identifier) return null;
-            return .{
-                .start = base_range.start,
-                .end = token_starts[field_token] + tree.tokenSlice(field_token).len,
-            };
-        },
-        else => return null,
-    }
 }
 
 fn appendFqnPart(buffer: *[256]u8, part: []const u8, pos: *usize) bool {
