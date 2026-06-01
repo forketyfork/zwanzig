@@ -214,6 +214,10 @@ pub const SentinelAllocRule = struct {
         bridge: ?*const ZirBridge,
         call_node: u32,
     ) ?TypeInfo {
+        if (call_utils.resolveResultLocationType(tree, type_ctx, parent_map, call_node)) |ti| {
+            if (!isUnknownTypeInfo(ti)) return ti;
+        }
+
         var node = call_node;
         var depth: u32 = 0;
         while (node < parent_map.len and depth < 64) : (depth += 1) {

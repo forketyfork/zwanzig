@@ -274,6 +274,8 @@ Detected functions:
 - `allocWithOptions` with non-null sentinel parameter
 - `readToEndAllocOptions` with non-null sentinel parameter
 
+The rule uses shared result-location resolution for casts, variable declarations, assignments, and returns, so preserving `[:sentinel]T` through common factory and wrapper patterns suppresses the diagnostic.
+
 ### return-local-ptr
 
 Detects functions that return slices or pointers derived from local stack buffers. This catches use-after-return bugs where the returned data points to memory that becomes invalid when the function returns. The rule only reports when the function’s return type is a pointer/slice (including optional or error-union wrappers).
@@ -319,6 +321,8 @@ The hint does not trigger when:
 - The reinitialization is infallible (`x = make()`), since no error unwind can occur.
 - The receiver is assigned a non-`try` value before the `try` assignment, resetting it to a valid state.
 - The active deferred cleanup uses a different method than the direct call (`defer x.close()` with `x.deinit()` does not match).
+
+Receiver matching handles simple variables and field chains such as `holder.value.deinit()`, so lifecycle checks apply to cleanup methods on nested resources as well as local variables.
 
 **Bad (warning):**
 ```zig
@@ -657,7 +661,7 @@ Detects allocator/resource misuse: double-free, free-without-alloc, close-withou
 
 Resources stored in aggregates are treated as escaping with the aggregate.
 
-**Resource modeling:** Built-in allocator detection includes `alloc`/`free`, `dupe`, and `create`/`destroy`. Configurable `resource_models` can add project-specific APIs. `kind: "free_owned"` models APIs like `deinit` that free resources owned by a value without freeing the value itself.
+**Resource modeling:** Built-in allocator detection includes `alloc`/`free`, `dupe`, and `create`/`destroy`. Configurable `resource_models` can add project-specific APIs. Model matching uses shared call resolution for identifier calls, receiver methods, receiver types, and FQNs. `kind: "free_owned"` models APIs like `deinit` that free resources owned by a value without freeing the value itself.
 
 **Defer-frees-escapee detection:** When a value with a pending `defer <allocator>.free(x)` is passed into `append`/`appendSlice`/`appendAssumeCapacity`/`appendSliceAssumeCapacity`/`insert`/`insertSlice` on a container whose declaration outlives the defer's lexical scope, the engine reports a future use-after-free. "Outlives" covers function parameters, top-level decls, `self.field` chains, and any local container declared above the defer's block. The check applies uniformly to defers in any block — `if`, `while`, `for`, `switch` arms, plain `{ ... }`, and the function body itself — because the safety question is always the same: does the container survive past the moment the defer fires? Same-block local containers are not flagged: defers fire in reverse declaration order, so the container is destroyed before the resource. A direct slice argument to `appendSlice`/`appendSliceAssumeCapacity`/`insertSlice` (e.g. `try out.appendSlice(allocator, tmp)` or `tmp[start..end]`) is treated as the byte-copy idiom and not flagged; only nested references (e.g. `&.{tmp}`) trigger the diagnostic for those methods. `errdefer` is not flagged because the canonical `errdefer free(x); try list.append(x)` ownership-transfer idiom is correct on the success path. The `put`/`putAssumeCapacity` family is not flagged because many non-container APIs (caches, writers, IO sinks) share the same names but consume their input during the call; a future type-aware extension can lift these restrictions.
 
@@ -736,6 +740,8 @@ Config:
 - `escape_models`: custom escape/capture rules
 - `escape_max_depth`: helper call depth for origin tracking (default: 3)
 - `resource_models` of kind `alloc` are used to treat allocator-backed values as heap
+
+Custom escape models use the same shared call resolution as resource models, including identifier calls, receiver method calls, receiver types, and FQNs.
 
 Notes:
 - `try std.Thread.spawn(...)` ignores the `try_error` edge when checking join guarantees (no thread is created on the error path).

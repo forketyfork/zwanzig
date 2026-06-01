@@ -53,12 +53,16 @@ pub const DeinitLifecycleRule = struct {
         const tags = tree.nodes.items(.tag);
         const datas = tree.nodes.items(.data);
 
+        var receiver_arena = std.heap.ArenaAllocator.init(allocator);
+        defer receiver_arena.deinit();
+
         var scanner = Scanner{
             .src = src,
             .tree = tree,
             .tags = tags,
             .datas = datas,
             .allocator = allocator,
+            .receiver_allocator = receiver_arena.allocator(),
             .diagnostics = diagnostics,
             .active_cleanup_receivers = .empty,
         };
@@ -89,6 +93,7 @@ pub const DeinitLifecycleRule = struct {
         tags: []const Ast.Node.Tag,
         datas: []const Ast.Node.Data,
         allocator: std.mem.Allocator,
+        receiver_allocator: std.mem.Allocator,
         diagnostics: *std.ArrayList(Diagnostic),
         active_cleanup_receivers: std.ArrayList(ActiveCleanup),
 
@@ -124,7 +129,7 @@ pub const DeinitLifecycleRule = struct {
                     else => continue,
                 };
 
-                if (self.extractDeferredMethodCall(stmt)) |call| {
+                if (try self.extractDeferredMethodCall(stmt)) |call| {
                     if (!isCleanupMethod(call.method)) continue;
                     try self.recordDeferredCleanup(
                         &deferred_cleanups,
@@ -144,7 +149,7 @@ pub const DeinitLifecycleRule = struct {
             for (statements, 0..) |stmt, idx| {
                 switch (self.tags[stmt]) {
                     .@"defer", .@"errdefer" => {
-                        if (self.extractDeferredMethodCall(stmt)) |call| {
+                        if (try self.extractDeferredMethodCall(stmt)) |call| {
                             if (isCleanupMethod(call.method) and !self.hasActiveCleanup(call.receiver, call.method)) {
                                 try self.active_cleanup_receivers.append(self.allocator, .{
                                     .receiver = call.receiver,
@@ -156,9 +161,9 @@ pub const DeinitLifecycleRule = struct {
                     else => {},
                 }
 
-                if (self.extractDirectCleanupCall(stmt)) |call| {
+                if (try self.extractDirectCleanupCall(stmt)) |call| {
                     if (self.hasActiveCleanup(call.receiver, call.method) and
-                        self.findTryReinit(statements[idx + 1 ..], call.receiver) != null)
+                        (try self.findTryReinit(statements[idx + 1 ..], call.receiver)) != null)
                     {
                         try self.emitCleanupBeforeTryReinit(stmt, call.receiver, call.method);
                     }
@@ -193,7 +198,7 @@ pub const DeinitLifecycleRule = struct {
             }
         }
 
-        fn extractDeferredMethodCall(self: *const Scanner, stmt: u32) ?MethodCall {
+        fn extractDeferredMethodCall(self: *const Scanner, stmt: u32) RuleError!?MethodCall {
             const body: u32 = switch (self.tags[stmt]) {
                 .@"defer" => @intFromEnum(self.datas[stmt].node),
                 .@"errdefer" => @intFromEnum(self.datas[stmt].opt_token_and_node[1]),
@@ -201,7 +206,7 @@ pub const DeinitLifecycleRule = struct {
             };
             if (body == 0 or body >= self.tags.len) return null;
 
-            if (self.extractMethodCall(body)) |call| return call;
+            if (try self.extractMethodCall(body)) |call| return call;
 
             if (self.tags[body] == .block or self.tags[body] == .block_semicolon or
                 self.tags[body] == .block_two or self.tags[body] == .block_two_semicolon)
@@ -209,20 +214,20 @@ pub const DeinitLifecycleRule = struct {
                 var scratch: [2]u32 = undefined;
                 const statements = self.blockStatements(body, &scratch);
                 if (statements.len == 1) {
-                    return self.extractMethodCall(statements[0]);
+                    return try self.extractMethodCall(statements[0]);
                 }
             }
 
             return null;
         }
 
-        fn extractDirectCleanupCall(self: *const Scanner, stmt: u32) ?MethodCall {
-            const call = self.extractMethodCall(stmt) orelse return null;
+        fn extractDirectCleanupCall(self: *const Scanner, stmt: u32) RuleError!?MethodCall {
+            const call = (try self.extractMethodCall(stmt)) orelse return null;
             if (!isCleanupMethod(call.method)) return null;
             return call;
         }
 
-        fn extractMethodCall(self: *const Scanner, expr_node: u32) ?MethodCall {
+        fn extractMethodCall(self: *const Scanner, expr_node: u32) RuleError!?MethodCall {
             if (expr_node >= self.tags.len) return null;
             if (!call_utils.isCallNode(self.tags[expr_node])) return null;
 
@@ -237,15 +242,57 @@ pub const DeinitLifecycleRule = struct {
             const method_token = field_access[1];
 
             if (method_token >= token_tags.len or token_tags[method_token] != .identifier) return null;
-            if (receiver_node == 0 or receiver_node >= self.tags.len or self.tags[receiver_node] != .identifier) return null;
-
-            const receiver_token = self.tree.nodes.items(.main_token)[receiver_node];
-            if (receiver_token >= token_tags.len or token_tags[receiver_token] != .identifier) return null;
+            if (receiver_node == 0 or receiver_node >= self.tags.len) return null;
+            const receiver = (try self.canonicalReceiver(receiver_node)) orelse return null;
 
             return .{
-                .receiver = self.tree.tokenSlice(receiver_token),
+                .receiver = receiver,
                 .method = self.tree.tokenSlice(method_token),
             };
+        }
+
+        fn canonicalReceiver(self: *const Scanner, receiver_node: u32) RuleError!?[]const u8 {
+            const token_tags = self.tree.tokens.items(.tag);
+            const main_tokens = self.tree.nodes.items(.main_token);
+
+            var parts: [32][]const u8 = undefined;
+            var part_count: usize = 0;
+            var node = receiver_node;
+
+            while (true) {
+                if (node == 0 or node >= self.tags.len) return null;
+                switch (self.tags[node]) {
+                    .identifier => {
+                        const token = main_tokens[node];
+                        if (token >= token_tags.len or token_tags[token] != .identifier) return null;
+                        if (part_count >= parts.len) return null;
+                        parts[part_count] = self.tree.tokenSlice(token);
+                        part_count += 1;
+                        break;
+                    },
+                    .field_access => {
+                        const field_access = self.datas[node].node_and_token;
+                        const field_token = field_access[1];
+                        if (field_token >= token_tags.len or token_tags[field_token] != .identifier) return null;
+                        if (part_count >= parts.len) return null;
+                        parts[part_count] = self.tree.tokenSlice(field_token);
+                        part_count += 1;
+                        node = @intFromEnum(field_access[0]);
+                    },
+                    else => return null,
+                }
+            }
+
+            var canonical: std.ArrayList(u8) = .empty;
+            errdefer canonical.deinit(self.receiver_allocator);
+
+            var idx = part_count;
+            while (idx > 0) : (idx -= 1) {
+                if (canonical.items.len > 0) try canonical.append(self.receiver_allocator, '.');
+                try canonical.appendSlice(self.receiver_allocator, parts[idx - 1]);
+            }
+
+            return try canonical.toOwnedSlice(self.receiver_allocator);
         }
 
         fn recordDeferredCleanup(
@@ -298,27 +345,25 @@ pub const DeinitLifecycleRule = struct {
             return false;
         }
 
-        fn findTryReinit(self: *const Scanner, statements: []const u32, receiver: []const u8) ?u32 {
+        fn findTryReinit(self: *const Scanner, statements: []const u32, receiver: []const u8) RuleError!?u32 {
             for (statements) |stmt| {
-                if (self.assignmentToReceiverIsTry(stmt, receiver)) |is_try| {
+                if (try self.assignmentToReceiverIsTry(stmt, receiver)) |is_try| {
                     return if (is_try) stmt else null;
                 }
             }
             return null;
         }
 
-        fn assignmentToReceiverIsTry(self: *const Scanner, stmt: u32, receiver: []const u8) ?bool {
+        fn assignmentToReceiverIsTry(self: *const Scanner, stmt: u32, receiver: []const u8) RuleError!?bool {
             if (stmt >= self.tags.len or !isAssignTag(self.tags[stmt])) return null;
 
             const pair = self.datas[stmt].node_and_node;
             const lhs = @intFromEnum(pair[0]);
             const rhs = @intFromEnum(pair[1]);
-            if (lhs == 0 or lhs >= self.tags.len or self.tags[lhs] != .identifier) return null;
+            if (lhs == 0 or lhs >= self.tags.len) return null;
 
-            const token_tags = self.tree.tokens.items(.tag);
-            const lhs_token = self.tree.nodes.items(.main_token)[lhs];
-            if (lhs_token >= token_tags.len or token_tags[lhs_token] != .identifier) return null;
-            if (!std.mem.eql(u8, self.tree.tokenSlice(lhs_token), receiver)) return null;
+            const lhs_receiver = (try self.canonicalReceiver(lhs)) orelse return null;
+            if (!std.mem.eql(u8, lhs_receiver, receiver)) return null;
 
             if (rhs == 0 or rhs >= self.tags.len) return false;
             return self.tags[rhs] == .@"try";
