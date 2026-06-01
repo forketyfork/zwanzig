@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.14.0] - 2026-06-01
+
 ### Changed
 
 - Shared project-aware import and call resolution across resource, stack-escape, sentinel allocation, and cleanup lifecycle checks, improving precision for identifier calls, typed receivers, FQNs, field-chain receivers, and result-location contexts (#92).
@@ -199,7 +201,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Initial release: Zig static analyzer MVP with the `empty-catch` rule, rule-selection flags, and source parsing cache.
 
-[Unreleased]: https://github.com/forketyfork/zwanzig/compare/v0.13.1...HEAD
+[Unreleased]: https://github.com/forketyfork/zwanzig/compare/v0.14.0...HEAD
+[0.14.0]: https://github.com/forketyfork/zwanzig/compare/v0.13.1...v0.14.0
 [0.13.1]: https://github.com/forketyfork/zwanzig/compare/v0.12.2...v0.13.1
 [0.12.2]: https://github.com/forketyfork/zwanzig/compare/v0.12.1...v0.12.2
 [0.12.1]: https://github.com/forketyfork/zwanzig/compare/v0.12.0...v0.12.1
