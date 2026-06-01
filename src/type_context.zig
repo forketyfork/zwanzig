@@ -336,7 +336,7 @@ pub const TypeContext = struct {
                     const name = tree.tokenSlice(name_token);
                     if (!std.mem.eql(u8, name, field_name)) continue;
                     if (field.ast.type_expr.unwrap()) |type_node| {
-                        return self.getTypeFromAstNode(tree, @intFromEnum(type_node));
+                        return self.getTypeFromAstNode(@intFromEnum(type_node));
                     }
                     if (field.ast.value_expr.unwrap()) |value_node| {
                         return self.getExpressionTypeInternal(@intFromEnum(value_node), use_known_methods, use_cache);
@@ -350,7 +350,7 @@ pub const TypeContext = struct {
                     const name = tree.tokenSlice(name_token);
                     if (!std.mem.eql(u8, name, field_name)) continue;
                     if (field.ast.type_expr.unwrap()) |type_node| {
-                        return self.getTypeFromAstNode(tree, @intFromEnum(type_node));
+                        return self.getTypeFromAstNode(@intFromEnum(type_node));
                     }
                     if (field.ast.value_expr.unwrap()) |value_node| {
                         return self.getExpressionTypeInternal(@intFromEnum(value_node), use_known_methods, use_cache);
@@ -364,7 +364,7 @@ pub const TypeContext = struct {
                     const name = tree.tokenSlice(name_token);
                     if (!std.mem.eql(u8, name, field_name)) continue;
                     if (field.ast.type_expr.unwrap()) |type_node| {
-                        return self.getTypeFromAstNode(tree, @intFromEnum(type_node));
+                        return self.getTypeFromAstNode(@intFromEnum(type_node));
                     }
                     if (field.ast.value_expr.unwrap()) |value_node| {
                         return self.getExpressionTypeInternal(@intFromEnum(value_node), use_known_methods, use_cache);
@@ -551,7 +551,7 @@ pub const TypeContext = struct {
                         }
                     }
 
-                    if (self.getTypeFromAstNode(tree, type_node)) |ti| {
+                    if (self.getTypeFromAstNode(type_node)) |ti| {
                         if (ti.kind != .unknown or ti.type_str != null) {
                             return ti;
                         }
@@ -607,8 +607,7 @@ pub const TypeContext = struct {
             std.mem.indexOf(u8, name, "error") != null;
     }
 
-    fn getTypeFromAstNode(self: *TypeContext, tree: *const std.zig.Ast, ast_node: u32) ?TypeInfo {
-        _ = tree;
+    pub fn getTypeFromAstNode(self: *TypeContext, ast_node: u32) ?TypeInfo {
         const bridge = self.source.zirBridge() orelse return null;
         return bridge.getTypeFromAstNode(ast_node);
     }
@@ -631,7 +630,7 @@ pub const TypeContext = struct {
                 var buf: [2]std.zig.Ast.Node.Index = undefined;
                 const struct_init = tree.fullStructInit(&buf, @enumFromInt(init_node)) orelse return null;
                 if (struct_init.ast.type_expr.unwrap()) |type_node| {
-                    if (self.getTypeFromAstNode(tree, @intFromEnum(type_node))) |ti| {
+                    if (self.getTypeFromAstNode(@intFromEnum(type_node))) |ti| {
                         if (ti.kind != .unknown or ti.type_str != null) return ti;
                     }
                 }
@@ -648,7 +647,7 @@ pub const TypeContext = struct {
                 var buf: [2]std.zig.Ast.Node.Index = undefined;
                 const array_init = tree.fullArrayInit(&buf, @enumFromInt(init_node)) orelse return null;
                 if (array_init.ast.type_expr.unwrap()) |type_node| {
-                    if (self.getTypeFromAstNode(tree, @intFromEnum(type_node))) |ti| {
+                    if (self.getTypeFromAstNode(@intFromEnum(type_node))) |ti| {
                         if (ti.kind != .unknown or ti.type_str != null) return ti;
                     }
                 }

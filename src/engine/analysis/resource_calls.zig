@@ -58,30 +58,12 @@ pub fn mixin(comptime _Engine: type) type {
 
         pub fn resolveResourceCallFromCall(self: *_Engine, tree: *const std.zig.Ast, call_ast_node: u32) ?ResourceCall {
             const tags = tree.nodes.items(.tag);
-            const datas = tree.nodes.items(.data);
-            const token_tags = tree.tokens.items(.tag);
 
             if (call_ast_node >= tags.len) return null;
-            const tag = tags[call_ast_node];
+            const call_info = call_utils.resolveCall(tree, self.type_context, call_ast_node, &self.fqn_buffer) orelse return null;
 
-            var call_buf: [1]std.zig.Ast.Node.Index = undefined;
-            const full_call = switch (tag) {
-                .call, .call_comma, .call_one, .call_one_comma => tree.fullCall(&call_buf, @enumFromInt(call_ast_node)),
-                else => return null,
-            } orelse return null;
-
-            const callee_node: u32 = @intFromEnum(full_call.ast.fn_expr);
-            if (callee_node >= tags.len) return null;
-            if (tags[callee_node] != .field_access) return null;
-
-            const field_access_data = datas[callee_node].node_and_token;
-            const base_node = @intFromEnum(field_access_data[0]);
-            const field_token = field_access_data[1];
-            if (field_token >= token_tags.len or token_tags[field_token] != .identifier) return null;
-            const field_name = tree.tokenSlice(field_token);
-
-            const first_arg: ?u32 = if (full_call.ast.params.len > 0)
-                @intFromEnum(full_call.ast.params[0])
+            const first_arg: ?u32 = if (call_info.param_count > 0)
+                call_utils.callParam(tree, call_ast_node, 0)
             else
                 null;
 
@@ -95,14 +77,8 @@ pub fn mixin(comptime _Engine: type) type {
                     }
                 }
 
-                // Extract receiver type from the base expression
-                const receiver_type = call_utils.getReceiverTypeName(self.type_context, tree, base_node);
-
-                // Construct FQN from receiver.method
-                const fqn = call_utils.constructFqn(tree, base_node, field_name, &self.fqn_buffer);
-
                 // Match against config resource models
-                if (config.matchResourceModel(field_name, receiver_type, return_type_str, fqn)) |model_kind| {
+                if (config.matchResourceModel(call_info.method_name, call_info.receiver_type, return_type_str, call_info.fqn)) |model_kind| {
                     const kind: ResourceCallKind = switch (model_kind) {
                         .alloc => .alloc,
                         .free => .free,
@@ -111,8 +87,8 @@ pub fn mixin(comptime _Engine: type) type {
                         .close => .close,
                     };
                     const target_expr: ?u32 = switch (kind) {
-                        .free, .close => first_arg orelse base_node,
-                        .free_owned => base_node,
+                        .free, .close => if (first_arg) |arg| arg else call_info.base_node,
+                        .free_owned => if (call_info.base_node) |base| base else first_arg,
                         else => null,
                     };
                     return .{ .kind = kind, .target_expr = target_expr, .call_node = call_ast_node };
@@ -120,19 +96,21 @@ pub fn mixin(comptime _Engine: type) type {
             }
 
             // Priority 2: Built-in heuristics (allocator methods)
-            if (allocator_utils.isAllocatorExpr(tree, self.type_context, base_node)) {
-                if (std.mem.eql(u8, field_name, "alloc") or
-                    std.mem.eql(u8, field_name, "dupe") or
-                    std.mem.eql(u8, field_name, "create"))
-                {
-                    return .{ .kind = .alloc, .target_expr = null, .call_node = call_ast_node };
-                }
-                if (std.mem.eql(u8, field_name, "free") or std.mem.eql(u8, field_name, "destroy")) {
-                    return .{ .kind = .free, .target_expr = first_arg, .call_node = call_ast_node };
+            if (call_info.base_node) |base_node| {
+                if (allocator_utils.isAllocatorExpr(tree, self.type_context, base_node)) {
+                    if (std.mem.eql(u8, call_info.method_name, "alloc") or
+                        std.mem.eql(u8, call_info.method_name, "dupe") or
+                        std.mem.eql(u8, call_info.method_name, "create"))
+                    {
+                        return .{ .kind = .alloc, .target_expr = null, .call_node = call_ast_node };
+                    }
+                    if (std.mem.eql(u8, call_info.method_name, "free") or std.mem.eql(u8, call_info.method_name, "destroy")) {
+                        return .{ .kind = .free, .target_expr = first_arg, .call_node = call_ast_node };
+                    }
                 }
             }
 
-            if (std.mem.eql(u8, field_name, "allocPrint")) {
+            if (std.mem.eql(u8, call_info.method_name, "allocPrint")) {
                 if (first_arg) |arg_node| {
                     if (allocator_utils.isAllocatorExpr(tree, self.type_context, arg_node)) {
                         return .{ .kind = .alloc, .target_expr = null, .call_node = call_ast_node };
@@ -148,19 +126,21 @@ pub fn mixin(comptime _Engine: type) type {
 
             // Priority 4: Name-based open detection with known base types (only when type info is missing).
             if (type_status == .unknown) {
-                if ((std.mem.eql(u8, field_name, "open") or
-                    std.mem.eql(u8, field_name, "openFile") or
-                    std.mem.eql(u8, field_name, "openDir") or
-                    std.mem.eql(u8, field_name, "openIterableDir") or
-                    std.mem.eql(u8, field_name, "createFile")) and
-                    isKnownOpenBase(self, tree, base_node))
-                {
-                    return .{ .kind = .open, .target_expr = null, .call_node = call_ast_node };
+                if (call_info.base_node) |base_node| {
+                    if ((std.mem.eql(u8, call_info.method_name, "open") or
+                        std.mem.eql(u8, call_info.method_name, "openFile") or
+                        std.mem.eql(u8, call_info.method_name, "openDir") or
+                        std.mem.eql(u8, call_info.method_name, "openIterableDir") or
+                        std.mem.eql(u8, call_info.method_name, "createFile")) and
+                        isKnownOpenBase(self, tree, base_node))
+                    {
+                        return .{ .kind = .open, .target_expr = null, .call_node = call_ast_node };
+                    }
                 }
             }
 
-            if (std.mem.eql(u8, field_name, "close")) {
-                const target_expr = first_arg orelse base_node;
+            if (std.mem.eql(u8, call_info.method_name, "close")) {
+                const target_expr: ?u32 = if (first_arg) |arg| arg else call_info.base_node;
                 return .{ .kind = .close, .target_expr = target_expr, .call_node = call_ast_node };
             }
             return null;

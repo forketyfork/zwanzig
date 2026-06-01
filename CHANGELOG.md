@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- Shared project-aware import and call resolution across resource, stack-escape, sentinel allocation, and cleanup lifecycle checks, improving precision for identifier calls, typed receivers, FQNs, field-chain receivers, and result-location contexts (#92).
+
 ## [0.13.1] - 2026-06-01
 
 ### Added

@@ -116,14 +116,7 @@ pub const StackEscapeEngineChecker = struct {
         }
     };
 
-    const CallInfo = struct {
-        call_node: u32,
-        method_name: []const u8,
-        receiver_type: ?[]const u8,
-        fqn: ?[]const u8,
-        params: []const std.zig.Ast.Node.Index,
-        base_node: ?u32,
-    };
+    const CallInfo = call_utils.CallInfo;
 
     const EscapeMatch = struct {
         param_indices: []const u32,
@@ -751,8 +744,7 @@ pub const StackEscapeEngineChecker = struct {
         }
 
         for (match.param_indices) |param_index| {
-            if (param_index >= call_info.params.len) continue;
-            const param_node = @intFromEnum(call_info.params[param_index]);
+            const param_node = call_utils.callParam(ctx.tree, call_info.call_node, @intCast(param_index)) orelse continue;
             const origin = originOfExpr(ctx, state, param_node, ctx.helper_depth);
             if (origin.kind != .stack) continue;
 
@@ -899,52 +891,7 @@ pub const StackEscapeEngineChecker = struct {
     }
 
     fn resolveCallInfo(ctx: *AnalysisContext, call_node: u32) ?CallInfo {
-        const tree = ctx.tree;
-        const tags = tree.nodes.items(.tag);
-        const datas = tree.nodes.items(.data);
-        const token_tags = tree.tokens.items(.tag);
-
-        if (call_node >= tags.len) return null;
-        if (!call_utils.isCallNode(tags[call_node])) return null;
-
-        var call_buf: [1]std.zig.Ast.Node.Index = undefined;
-        const full_call = tree.fullCall(&call_buf, @enumFromInt(call_node)) orelse return null;
-        const callee_node: u32 = @intFromEnum(full_call.ast.fn_expr);
-        if (callee_node >= tags.len) return null;
-
-        switch (tags[callee_node]) {
-            .identifier => {
-                const token = tree.nodes.items(.main_token)[callee_node];
-                if (token >= token_tags.len or token_tags[token] != .identifier) return null;
-                const name = tree.tokenSlice(token);
-                return .{
-                    .call_node = call_node,
-                    .method_name = name,
-                    .receiver_type = null,
-                    .fqn = name,
-                    .params = full_call.ast.params,
-                    .base_node = null,
-                };
-            },
-            .field_access => {
-                const field_access_data = datas[callee_node].node_and_token;
-                const base_node = @intFromEnum(field_access_data[0]);
-                const field_token = field_access_data[1];
-                if (field_token >= token_tags.len or token_tags[field_token] != .identifier) return null;
-                const field_name = tree.tokenSlice(field_token);
-                const receiver_type = call_utils.getReceiverTypeName(ctx.type_ctx, ctx.tree, base_node);
-                const fqn = call_utils.constructFqn(ctx.tree, base_node, field_name, ctx.fqn_buffer);
-                return .{
-                    .call_node = call_node,
-                    .method_name = field_name,
-                    .receiver_type = receiver_type,
-                    .fqn = fqn,
-                    .params = full_call.ast.params,
-                    .base_node = base_node,
-                };
-            },
-            else => return null,
-        }
+        return call_utils.resolveCall(ctx.tree, ctx.type_ctx, call_node, ctx.fqn_buffer);
     }
 
     fn isThreadSpawnCall(ctx: *AnalysisContext, call_node: u32) bool {
@@ -1268,8 +1215,7 @@ pub const StackEscapeEngineChecker = struct {
 
         if (depth > 0) {
             if (resolveHelperReturnParamIndex(ctx, call_info)) |param_index| {
-                if (param_index < call_info.params.len) {
-                    const arg_node = @intFromEnum(call_info.params[param_index]);
+                if (call_utils.callParam(ctx.tree, call_info.call_node, @intCast(param_index))) |arg_node| {
                     return originOfExpr(ctx, state, arg_node, depth - 1);
                 }
             }
@@ -1288,8 +1234,7 @@ pub const StackEscapeEngineChecker = struct {
         var combined = Origin.unknown();
         var has_any = false;
         for (param_indices) |param_index| {
-            if (param_index >= call_info.params.len) continue;
-            const arg_node = @intFromEnum(call_info.params[param_index]);
+            const arg_node = call_utils.callParam(ctx.tree, call_info.call_node, @intCast(param_index)) orelse continue;
             const origin = originOfExpr(ctx, state, arg_node, depth);
             combined = if (!has_any) origin else mergeOrigin(combined, origin);
             has_any = true;
@@ -2027,8 +1972,7 @@ pub const StackEscapeEngineChecker = struct {
 
     fn isAllocPrintCall(ctx: *AnalysisContext, call_info: CallInfo) bool {
         if (!std.mem.eql(u8, call_info.method_name, "allocPrint")) return false;
-        if (call_info.params.len == 0) return false;
-        const allocator_arg = @intFromEnum(call_info.params[0]);
+        const allocator_arg = call_utils.callParam(ctx.tree, call_info.call_node, 0) orelse return false;
         return allocator_utils.isAllocatorExpr(ctx.tree, ctx.type_ctx, allocator_arg);
     }
 };

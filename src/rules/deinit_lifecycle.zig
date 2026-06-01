@@ -237,13 +237,11 @@ pub const DeinitLifecycleRule = struct {
             const method_token = field_access[1];
 
             if (method_token >= token_tags.len or token_tags[method_token] != .identifier) return null;
-            if (receiver_node == 0 or receiver_node >= self.tags.len or self.tags[receiver_node] != .identifier) return null;
-
-            const receiver_token = self.tree.nodes.items(.main_token)[receiver_node];
-            if (receiver_token >= token_tags.len or token_tags[receiver_token] != .identifier) return null;
+            if (receiver_node == 0 or receiver_node >= self.tags.len) return null;
+            const receiver = call_utils.receiverSourceSlice(self.src.getContent(), self.tree, receiver_node) orelse return null;
 
             return .{
-                .receiver = self.tree.tokenSlice(receiver_token),
+                .receiver = receiver,
                 .method = self.tree.tokenSlice(method_token),
             };
         }
@@ -313,12 +311,10 @@ pub const DeinitLifecycleRule = struct {
             const pair = self.datas[stmt].node_and_node;
             const lhs = @intFromEnum(pair[0]);
             const rhs = @intFromEnum(pair[1]);
-            if (lhs == 0 or lhs >= self.tags.len or self.tags[lhs] != .identifier) return null;
+            if (lhs == 0 or lhs >= self.tags.len) return null;
 
-            const token_tags = self.tree.tokens.items(.tag);
-            const lhs_token = self.tree.nodes.items(.main_token)[lhs];
-            if (lhs_token >= token_tags.len or token_tags[lhs_token] != .identifier) return null;
-            if (!std.mem.eql(u8, self.tree.tokenSlice(lhs_token), receiver)) return null;
+            const lhs_receiver = call_utils.receiverSourceSlice(self.src.getContent(), self.tree, lhs) orelse return null;
+            if (!std.mem.eql(u8, lhs_receiver, receiver)) return null;
 
             if (rhs == 0 or rhs >= self.tags.len) return false;
             return self.tags[rhs] == .@"try";
