@@ -21,7 +21,7 @@ jobs:
     outputs:
       code: ${{ steps.filter.outputs.code }}
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - uses: dorny/paths-filter@v4
         id: filter
         with:
@@ -47,7 +47,7 @@ jobs:
       ZIG_GLOBAL_CACHE_DIR: ${{ github.workspace }}/zwanzig/.zig-cache
       ZIG_LOCAL_CACHE_DIR: ${{ github.workspace }}/zwanzig/.zig-cache/local
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
         with:
           path: zwanzig
 
@@ -58,7 +58,7 @@ jobs:
             experimental-features = nix-command flakes
 
       - name: Cache Zig build cache
-        uses: actions/cache@v5
+        uses: actions/cache@v6
         with:
           path: zwanzig/.zig-cache
           key: zig-${{ runner.os }}-${{ hashFiles('zwanzig/build.zig', 'zwanzig/build.zig.zon', 'zwanzig/src/**', 'zwanzig/test/**', 'zwanzig/flake.lock') }}
