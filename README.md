@@ -6,31 +6,89 @@
 
 Zwanzig is a static analyzer and linter for Zig code, combining fast AST/token rules with CFG-driven analysis built on ZIR output.
 
-## Quick usage
+## Installation and usage
 
-### Local
+### Release binary
+
+Download the archive for your platform from the [latest release](https://github.com/forketyfork/zwanzig/releases/latest):
+
+| Platform | Archive |
+| --- | --- |
+| Linux x86_64 | `zwanzig-vX.Y.Z-linux-x86_64.tar.gz` |
+| macOS ARM64 | `zwanzig-vX.Y.Z-macos-aarch64.tar.gz` |
+| Windows x86_64 | `zwanzig-vX.Y.Z-windows-x86_64.zip` |
+
+Extract the archive and either add its directory to `PATH` or invoke the executable directly:
 
 ```bash
-zig build
-zig build run -- src/
+./zwanzig src/
+```
+
+On Windows, run `.\zwanzig.exe src\` instead.
+
+### Zig build dependency
+
+Pin Zwanzig as a dependency in your Zig project. This command adds the dependency URL and content hash to `build.zig.zon`:
+
+```bash
+zig fetch --save=zwanzig https://github.com/forketyfork/zwanzig/archive/refs/tags/v0.14.0.tar.gz
+```
+
+Add a lint step to `build.zig`:
+
+```zig
+const zwanzig = b.dependency("zwanzig", .{
+    .target = b.graph.host,
+    .optimize = .ReleaseFast,
+});
+const run_zwanzig = b.addRunArtifact(zwanzig.artifact("zwanzig"));
+run_zwanzig.addArgs(&.{"src"});
+
+const lint_step = b.step("lint", "Run Zwanzig");
+lint_step.dependOn(&run_zwanzig.step);
+```
+
+`b.graph.host` builds Zwanzig for the machine running the build, including when your project targets another platform. `ReleaseFast` avoids the substantial overhead of running the analyzer in Debug mode.
+
+Run the new step with:
+
+```bash
+zig build lint
 ```
 
 ### GitHub Actions (SARIF)
+
+Download a pinned release binary before running Zwanzig. The Linux runner is x86_64, so it uses the Linux x86_64 archive:
 
 ```yaml
 permissions:
   contents: read
   security-events: write
 
-- name: Run zwanzig analysis
-  run: |
-    zig build run -- --format sarif src/ > results.sarif || true
+env:
+  ZWANZIG_VERSION: v0.14.0
 
-- name: Upload SARIF results
-  uses: github/codeql-action/upload-sarif@v3
-  with:
-    sarif_file: results.sarif
+steps:
+  - name: Install Zwanzig
+    run: |
+      archive="zwanzig-${ZWANZIG_VERSION}-linux-x86_64.tar.gz"
+      curl --fail --location --silent --show-error \
+        "https://github.com/forketyfork/zwanzig/releases/download/${ZWANZIG_VERSION}/${archive}" \
+        --output "${RUNNER_TEMP}/${archive}"
+      mkdir -p "${RUNNER_TEMP}/zwanzig"
+      tar -xzf "${RUNNER_TEMP}/${archive}" -C "${RUNNER_TEMP}/zwanzig"
+      echo "${RUNNER_TEMP}/zwanzig" >> "${GITHUB_PATH}"
+
+  - name: Run Zwanzig analysis
+    run: zwanzig --format sarif src/ > results.sarif || true
+
+  - name: Upload SARIF results
+    uses: github/codeql-action/upload-sarif@v4
+    with:
+      sarif_file: results.sarif
 ```
+
+Pinning the version keeps CI reproducible. Update `ZWANZIG_VERSION` when you want to adopt a newer release. The `|| true` lets the SARIF upload run when Zwanzig reports diagnostics.
 
 ## Features
 
