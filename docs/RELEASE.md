@@ -1,7 +1,7 @@
 # Release procedure
 
 1. Update `build.zig.zon` to the target version (e.g. `0.3.0`).
-2. Update any README tag references (e.g. the `zig fetch` example).
+2. Update version-pinned examples in `README.md` and `docs/USAGE.md`. Regular CI checks tagged source URLs and `ZWANZIG_VERSION` against `build.zig.zon`.
 3. Run the scripted checklist:
 
    ```bash

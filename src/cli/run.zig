@@ -4,6 +4,7 @@ const Diagnostic = @import("../diagnostic.zig").Diagnostic;
 const file_discovery = @import("../file_discovery.zig");
 const build_options = @import("build_options");
 const config = @import("../config.zig");
+const build_metadata = @import("../build_metadata.zig");
 const args_mod = @import("args.zig");
 const merge_mod = @import("config_merge.zig");
 const registry = @import("registry.zig");
@@ -12,7 +13,9 @@ const Analyzer = analyzer_mod.Analyzer;
 const AnalysisResult = analyzer_mod.AnalysisResult;
 const CliArgs = args_mod.CliArgs;
 const CliError = args_mod.CliError;
+const BuildMetadata = build_metadata.BuildMetadata;
 const MergedConfig = merge_mod.MergedConfig;
+const TargetConfig = build_metadata.TargetConfig;
 const log = std.log.scoped(.zwanzig);
 
 const WorkerContext = struct {
@@ -233,7 +236,13 @@ fn discoverInputFiles(allocator: std.mem.Allocator, cli_args: CliArgs) []const [
     };
 }
 
-fn configureAnalyzer(analyzer: *Analyzer, cli_args: CliArgs, final_config: MergedConfig, allocator: std.mem.Allocator) !void {
+fn configureBuildMetadata(analyzer: *Analyzer, metadata: ?BuildMetadata) !void {
+    if (metadata) |value| {
+        try analyzer.setBuildMetadata(value);
+    }
+}
+
+fn configureAnalyzer(analyzer: *Analyzer, cli_args: CliArgs, final_config: MergedConfig) !void {
     analyzer.setToolVersion(build_options.version);
     try registry.registerDefaults(analyzer);
 
@@ -257,12 +266,7 @@ fn configureAnalyzer(analyzer: *Analyzer, cli_args: CliArgs, final_config: Merge
         });
     }
 
-    if (cli_args.build_metadata) |metadata_const| {
-        var metadata = metadata_const;
-        errdefer metadata.deinit(allocator);
-        try analyzer.setBuildMetadata(metadata);
-        metadata.deinit(allocator);
-    }
+    try configureBuildMetadata(analyzer, cli_args.build_metadata);
 
     if (cli_args.use_cache) {
         try analyzer.enableCache();
@@ -309,7 +313,7 @@ pub fn run() !void {
     var analyzer = Analyzer.init(allocator);
     defer analyzer.deinit();
 
-    try configureAnalyzer(&analyzer, cli_args, final_config, allocator);
+    try configureAnalyzer(&analyzer, cli_args, final_config);
 
     log.info("analyzing with {d} rule(s) using {d} thread(s)", .{ analyzer.totalCheckerCount(), cli_args.thread_count });
     try analyzeFilesParallel(&analyzer, files, cli_args.thread_count, allocator);
@@ -322,4 +326,20 @@ pub fn run() !void {
     if (analyzer.hasDiagnostics()) {
         std.process.exit(1);
     }
+}
+
+test "configureBuildMetadata borrows CLI metadata" {
+    const allocator = std.testing.allocator;
+
+    const target_config = try TargetConfig.fromTriple(allocator, "x86_64-linux-gnu");
+    var metadata = BuildMetadata.init(target_config, null);
+    defer metadata.deinit(allocator);
+
+    var analyzer = Analyzer.init(allocator);
+    defer analyzer.deinit();
+
+    try configureBuildMetadata(&analyzer, metadata);
+
+    try std.testing.expectEqualStrings("gnu", metadata.target.abi.?);
+    try std.testing.expectEqualStrings("gnu", analyzer.getBuildMetadata().?.target.abi.?);
 }

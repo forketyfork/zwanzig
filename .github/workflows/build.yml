@@ -16,6 +16,14 @@ permissions:
   security-events: write
 
 jobs:
+  documentation-versions:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Check documented versions
+        run: ./scripts/check-doc-versions.sh
+
   changes:
     runs-on: ubuntu-latest
     outputs:
@@ -88,12 +96,16 @@ jobs:
 
   build:
     name: build
-    needs: [changes, build-matrix]
+    needs: [documentation-versions, changes, build-matrix]
     if: always()
     runs-on: ubuntu-latest
     steps:
       - name: Check result
         run: |
+          if [[ "${{ needs.documentation-versions.result }}" != "success" ]]; then
+            echo "Documentation version check failed"
+            exit 1
+          fi
           if [[ "${{ needs.changes.outputs.code }}" == "false" ]]; then
             echo "Documentation-only change, skipping build"
             exit 0
