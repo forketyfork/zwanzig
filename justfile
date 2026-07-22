@@ -25,6 +25,7 @@ lint:
         shellcheck validate.sh
     fi
     shellcheck scripts/*.sh
+    ./scripts/check-doc-versions.sh
 
     zig fmt --check src/
 

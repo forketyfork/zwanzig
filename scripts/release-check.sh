@@ -23,43 +23,7 @@ if [ -n "$(git status --porcelain)" ]; then
     exit 1
 fi
 
-version_line=$(grep -nE "^[[:space:]]*\\.version[[:space:]]*=" build.zig.zon | head -n1 || true)
-if [ -z "$version_line" ]; then
-    echo "Failed to locate .version in build.zig.zon" >&2
-    exit 1
-fi
-
-version=$(printf '%s' "$version_line" | sed -E 's/.*"([^"]+)".*/\1/')
-if [ -z "$version" ]; then
-    echo "Failed to parse version from build.zig.zon" >&2
-    exit 1
-fi
-
-if [ "v$version" != "$tag" ]; then
-    echo "Version mismatch: build.zig.zon has $version but tag is $tag" >&2
-    exit 1
-fi
-
-check_doc_tags() {
-    local file="$1"
-    local found
-    found=$(grep -oE "refs/tags/v[0-9]+\.[0-9]+\.[0-9]+" "$file" || true)
-    if [ -z "$found" ]; then
-        echo "Warning: no tag references found in $file" >&2
-        return 0
-    fi
-    local uniq_tags
-    mapfile -t uniq_tags < <(printf '%s\n' "$found" | sed 's#.*refs/tags/##' | sort -u)
-    for found_tag in "${uniq_tags[@]}"; do
-        if [ "$found_tag" != "$tag" ]; then
-            echo "$file tag mismatch: found $found_tag, expected $tag" >&2
-            return 1
-        fi
-    done
-}
-
-check_doc_tags README.md
-check_doc_tags docs/USAGE.md
+./scripts/check-doc-versions.sh "$tag"
 
 if command -v just >/dev/null 2>&1; then
     just ci
