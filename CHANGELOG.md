@@ -11,6 +11,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - README installation instructions now cover release binaries, Zig build dependencies, and GitHub Actions usage. (PR #103)
 
+### Fixed
+
+- `--target` no longer crashes after successful analysis when the target triple contains an ABI. (PR #103)
+
 ## [0.14.0] - 2026-06-01
 
 ### Changed
