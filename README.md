@@ -61,6 +61,12 @@ zig build lint
 Download a pinned release binary before running Zwanzig. The Linux runner is x86_64, so it uses the Linux x86_64 archive:
 
 ```yaml
+name: Zwanzig
+
+on:
+  push:
+  pull_request:
+
 permissions:
   contents: read
   security-events: write
@@ -68,24 +74,29 @@ permissions:
 env:
   ZWANZIG_VERSION: v0.14.0
 
-steps:
-  - name: Install Zwanzig
-    run: |
-      archive="zwanzig-${ZWANZIG_VERSION}-linux-x86_64.tar.gz"
-      curl --fail --location --silent --show-error \
-        "https://github.com/forketyfork/zwanzig/releases/download/${ZWANZIG_VERSION}/${archive}" \
-        --output "${RUNNER_TEMP}/${archive}"
-      mkdir -p "${RUNNER_TEMP}/zwanzig"
-      tar -xzf "${RUNNER_TEMP}/${archive}" -C "${RUNNER_TEMP}/zwanzig"
-      echo "${RUNNER_TEMP}/zwanzig" >> "${GITHUB_PATH}"
+jobs:
+  analyze:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
 
-  - name: Run Zwanzig analysis
-    run: zwanzig --format sarif src/ > results.sarif || true
+      - name: Install Zwanzig
+        run: |
+          archive="zwanzig-${ZWANZIG_VERSION}-linux-x86_64.tar.gz"
+          curl --fail --location --silent --show-error \
+            "https://github.com/forketyfork/zwanzig/releases/download/${ZWANZIG_VERSION}/${archive}" \
+            --output "${RUNNER_TEMP}/${archive}"
+          mkdir -p "${RUNNER_TEMP}/zwanzig"
+          tar -xzf "${RUNNER_TEMP}/${archive}" -C "${RUNNER_TEMP}/zwanzig"
+          echo "${RUNNER_TEMP}/zwanzig" >> "${GITHUB_PATH}"
 
-  - name: Upload SARIF results
-    uses: github/codeql-action/upload-sarif@v4
-    with:
-      sarif_file: results.sarif
+      - name: Run Zwanzig analysis
+        run: zwanzig --format sarif src/ > results.sarif || true
+
+      - name: Upload SARIF results
+        uses: github/codeql-action/upload-sarif@v4
+        with:
+          sarif_file: results.sarif
 ```
 
 Pinning the version keeps CI reproducible. Update `ZWANZIG_VERSION` when you want to adopt a newer release. The `|| true` lets the SARIF upload run when Zwanzig reports diagnostics.
