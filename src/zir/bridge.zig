@@ -69,10 +69,12 @@ pub const ZirBridge = struct {
         // AstGen.generate only errors on OOM; language errors are recorded
         // inside the Zir and must be checked explicitly, otherwise a frontend/
         // language mismatch yields silently incomplete type information.
-        self.zir = try AstGen.generate(self.allocator, tree.*);
-        if (self.zir.?.hasCompileErrors()) {
+        var zir = try AstGen.generate(self.allocator, tree.*);
+        if (zir.hasCompileErrors()) {
+            zir.deinit(self.allocator);
             return error.AstGenFailed;
         }
+        self.zir = zir;
 
         try self.extractDeclarations();
     }
@@ -1223,6 +1225,7 @@ test "ZirBridge rejects source with AstGen compile errors" {
 
     const result = bridge.loadFromSource(&source);
     try std.testing.expectError(error.AstGenFailed, result);
+    try std.testing.expect(!bridge.hasZir());
 }
 
 test "ZirBridge reuse clears previous state" {

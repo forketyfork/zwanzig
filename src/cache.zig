@@ -329,9 +329,13 @@ test "CacheKey version hash includes the embedded Zig frontend version" {
     // Regression guard: if version_hash were derived from the tool version
     // alone, two binaries embedding different Zig frontends would share
     // incompatible typed-analysis cache entries.
-    var tool_version_only: [32]u8 = undefined;
-    std.crypto.hash.sha2.Sha256.hash("1.0.0", &tool_version_only, .{});
-    try std.testing.expect(!std.mem.eql(u8, &key.version_hash, &tool_version_only));
+    var expected_version_hash: [32]u8 = undefined;
+    var version_hasher = std.crypto.hash.sha2.Sha256.init(.{});
+    version_hasher.update("1.0.0");
+    version_hasher.update("\x00");
+    version_hasher.update(builtin.zig_version_string);
+    version_hasher.final(&expected_version_hash);
+    try std.testing.expectEqual(expected_version_hash, key.version_hash);
 }
 
 test "CacheKey: config changes invalidate" {

@@ -9,7 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-- `--version` now reports the embedded Zig frontend version.
+- `--version` now reports the embedded Zig frontend version. (PR #109)
 
 ### Changed
 
@@ -18,8 +18,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Fixed
 
 - `--target` no longer crashes after successful analysis when the target triple contains an ABI. (PR #103)
-- Typed (ZIR-based) analysis is now explicitly disabled for files the embedded Zig frontend cannot compile, instead of silently producing incomplete type information.
-- Analysis cache entries are no longer shared between zwanzig binaries embedding different Zig frontend versions.
+- Typed (ZIR-based) analysis is now explicitly disabled for files the embedded Zig frontend cannot compile, instead of silently producing incomplete type information. (PR #109)
+- Analysis cache entries are no longer shared between zwanzig binaries embedding different Zig frontend versions. (PR #109)
 
 ## [0.14.0] - 2026-06-01
 
