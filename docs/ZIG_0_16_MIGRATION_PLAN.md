@@ -399,7 +399,7 @@ git commit -m "feat: reject untested Zig toolchains at compile time"
 **Interfaces:**
 - Produces: `nix develop .#zig016` — a shell with Zig 0.16.0, `just`, and `shellcheck`, used by Task 6 and later by CI.
 
-- [ ] **Step 1: Add the shell.** In `flake.nix`, after the `devShells.default` attribute (line 63), add:
+- [x] **Step 1: Add the shell.** In `flake.nix`, after the `devShells.default` attribute (line 63), add:
 
 ```nix
         # Zig 0.16.0 shell for the dual-frontend migration
@@ -417,14 +417,14 @@ If the overlay doesn't know 0.16.0 yet, run `nix flake update zig` first (zig-ov
 
 Deliberately *without* the macOS SDK workaround: it exists for a 0.15.2 linker limitation ([ziglang/zig#31756](https://codeberg.org/ziglang/zig/issues/31756)); Task 6 determines whether 0.16.0 still needs it.
 
-- [ ] **Step 2: Verify both shells**
+- [x] **Step 2: Verify both shells**
 
 Run: `nix develop .#zig016 -c zig version`
 Expected: `0.16.0`
 Run: `nix develop -c zig version`
 Expected: `0.15.2` (default shell untouched).
 
-- [ ] **Step 3: Commit**
+- [x] **Step 3: Commit**
 
 ```bash
 git add flake.nix flake.lock
@@ -441,18 +441,18 @@ Everything in Phases 2–4 is sized from this inventory. The spike happens on a 
 - Create: `docs/internal/ZIG_0_16_INVENTORY.md` (the only merged artifact)
 - Throwaway branch edits: `src/compat.zig`, `build.zig`
 
-- [ ] **Step 1: Confirm the Task 4 gate fires (negative test).** On branch `spike/zig-0.16-inventory`:
+- [x] **Step 1: Confirm the Task 4 gate fires (negative test).** On branch `spike/zig-0.16-inventory`:
 
 Run: `nix develop .#zig016 -c zig build test 2>&1 | head -20`
 Expected: compile error containing "zwanzig does not support Zig 0.16.0". Record PASS/FAIL in the inventory. (If the build instead fails earlier inside `build.zig` at the `std.fs.cwd()` calls on lines 87/132 — before `src/compat.zig` is analyzed — record that as the gate's known limitation: `build.zig` runs first, so the gate only protects `src/`.)
 
-- [ ] **Step 2: Unblock compilation minimally.** On the spike branch only: add `.{ .major = 0, .minor = 16, .patch = 0 }` to `supported_zig_versions`, and patch the two `std.fs.cwd()` calls in `build.zig` (lines 87 and 132) just enough to compile under 0.16 — per the 0.16 release notes, `fs.cwd` moved to `std.Io.Dir.cwd`; check how upstream 0.16 `init` templates and the build-system release notes obtain a directory handle in `build.zig`, and note the idiom in the inventory (it becomes the model for the real Phase 2 change).
+- [x] **Step 2: Unblock compilation minimally.** On the spike branch only: add `.{ .major = 0, .minor = 16, .patch = 0 }` to `supported_zig_versions`, and patch the two `std.fs.cwd()` calls in `build.zig` (lines 87 and 132) just enough to compile under 0.16 — per the 0.16 release notes, `fs.cwd` moved to `std.Io.Dir.cwd`; check how upstream 0.16 `init` templates and the build-system release notes obtain a directory handle in `build.zig`, and note the idiom in the inventory (it becomes the model for the real Phase 2 change).
 
-- [ ] **Step 3: Capture the full error inventory**
+- [x] **Step 3: Capture the full error inventory**
 
 Run: `nix develop .#zig016 -c zig build test 2>&1 | tee .tmp/zig016-inventory.txt` (repeat with `zig build` alone if `test` stops early; iterate past blocking errors with minimal throwaway patches where needed to expose the next layer).
 
-- [ ] **Step 4: Write `docs/internal/ZIG_0_16_INVENTORY.md`** categorizing every error:
+- [x] **Step 4: Write `docs/internal/ZIG_0_16_INVENTORY.md`** categorizing every error:
   - I/O (`std.fs`/`std.process`/`std.time` requiring `Io`) — expected across ~15 files (finding 8)
   - Concurrency (`Thread.Pool`/`WaitGroup`/`Mutex` in `src/cli/run.zig`, `src/cache.zig`)
   - ZIR decoding (`declIterator` and payload layouts in `src/zir/bridge.zig`)
@@ -461,7 +461,7 @@ Run: `nix develop .#zig016 -c zig build test 2>&1 | tee .tmp/zig016-inventory.tx
 
   Also record: whether the macOS SDK workaround is needed for 0.16.0, the `build.zig` directory-handle idiom from Step 2, and whether the external probe's 19+7 error count was accurate.
 
-- [ ] **Step 5: Merge only the inventory**
+- [x] **Step 5: Merge only the inventory**
 
 ```bash
 git checkout main && git checkout spike/zig-0.16-inventory -- docs/internal/ZIG_0_16_INVENTORY.md
