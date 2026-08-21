@@ -66,8 +66,14 @@ pub const ZirBridge = struct {
             return error.ParseError;
         }
 
-        const zir_result = AstGen.generate(self.allocator, tree.*);
-        const zir = zir_result catch return error.AstGenFailed;
+        // AstGen.generate only errors on OOM; language errors are recorded
+        // inside the Zir and must be checked explicitly, otherwise a frontend/
+        // language mismatch yields silently incomplete type information.
+        var zir = try AstGen.generate(self.allocator, tree.*);
+        if (zir.hasCompileErrors()) {
+            zir.deinit(self.allocator);
+            return error.AstGenFailed;
+        }
         self.zir = zir;
 
         try self.extractDeclarations();
@@ -1201,6 +1207,25 @@ test "ZirBridge parse error handling" {
 
     const result = bridge.loadFromSource(&source);
     try std.testing.expectError(error.ParseError, result);
+}
+
+test "ZirBridge rejects source with AstGen compile errors" {
+    const allocator = std.testing.allocator;
+
+    // `@Int` is a Zig 0.16 builtin; the 0.15.2 frontend parses it fine but
+    // AstGen records "invalid builtin function" inside the Zir instead of
+    // returning an error. Without the hasCompileErrors guard, loadFromSource
+    // would succeed with incomplete type information.
+    const code: [:0]const u8 = "const T = @Int(.signed, 8);";
+    var source = Source.init(allocator, "test.zig", code);
+    defer source.deinit();
+
+    var bridge = ZirBridge.init(allocator);
+    defer bridge.deinit();
+
+    const result = bridge.loadFromSource(&source);
+    try std.testing.expectError(error.AstGenFailed, result);
+    try std.testing.expect(!bridge.hasZir());
 }
 
 test "ZirBridge reuse clears previous state" {

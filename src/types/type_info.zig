@@ -88,12 +88,7 @@ pub const TypeInfo = struct {
         return .{ .kind = .function };
     }
 
-    pub fn format(
-        self: TypeInfo,
-        comptime _: []const u8,
-        _: std.fmt.FormatOptions,
-        writer: anytype,
-    ) !void {
+    pub fn format(self: TypeInfo, writer: *std.Io.Writer) std.Io.Writer.Error!void {
         switch (self.kind) {
             .unknown => try writer.writeAll("unknown"),
             .void_type => try writer.writeAll("void"),
@@ -117,22 +112,21 @@ pub const TypeInfo = struct {
 
 test "TypeInfo formatting" {
     var buf: [64]u8 = undefined;
-    var fbs = std.io.fixedBufferStream(&buf);
-    const writer = fbs.writer();
+    var writer: std.Io.Writer = .fixed(&buf);
 
     const int_type = TypeInfo.initInt(32, true);
-    try int_type.format("", .{}, writer);
-    try std.testing.expectEqualStrings("i32", fbs.getWritten());
+    try int_type.format(&writer);
+    try std.testing.expectEqualStrings("i32", writer.buffered());
 
-    fbs.reset();
+    writer.end = 0;
     const uint_type = TypeInfo.initInt(64, false);
-    try uint_type.format("", .{}, writer);
-    try std.testing.expectEqualStrings("u64", fbs.getWritten());
+    try uint_type.format(&writer);
+    try std.testing.expectEqualStrings("u64", writer.buffered());
 
-    fbs.reset();
+    writer.end = 0;
     const void_type = TypeInfo.initVoid();
-    try void_type.format("", .{}, writer);
-    try std.testing.expectEqualStrings("void", fbs.getWritten());
+    try void_type.format(&writer);
+    try std.testing.expectEqualStrings("void", writer.buffered());
 }
 
 test "TypeInfo hasSentinel handles sentinel presence" {

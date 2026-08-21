@@ -6,6 +6,10 @@ pub const config = @import("config.zig");
 pub const analyzer = @import("analyzer.zig");
 pub const rule_filter = @import("rule_filter.zig");
 
+comptime {
+    _ = @import("compat.zig");
+}
+
 pub const Source = source.Source;
 pub const Diagnostic = diagnostic.Diagnostic;
 pub const Severity = diagnostic.Severity;

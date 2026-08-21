@@ -26,7 +26,7 @@ pub const SarifFormatter = struct {
     }
 
     pub fn write(self: *SarifFormatter, output_writer: anytype) !void {
-        var alloc_writer: std.io.Writer.Allocating = .init(self.allocator);
+        var alloc_writer: std.Io.Writer.Allocating = .init(self.allocator);
         defer alloc_writer.deinit();
 
         var jw: std.json.Stringify = .{

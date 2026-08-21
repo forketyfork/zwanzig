@@ -1,4 +1,5 @@
 const std = @import("std");
+const builtin = @import("builtin");
 const analyzer_mod = @import("../analyzer.zig");
 const Diagnostic = @import("../diagnostic.zig").Diagnostic;
 const file_discovery = @import("../file_discovery.zig");
@@ -138,8 +139,12 @@ fn printUsage() !void {
 }
 
 fn printVersion() !void {
-    var buffer: [64]u8 = undefined;
-    const message = try std.fmt.bufPrint(&buffer, "zwanzig {s}\n", .{build_options.version});
+    var buffer: [128]u8 = undefined;
+    const message = try std.fmt.bufPrint(
+        &buffer,
+        "zwanzig {s} (Zig frontend {s})\n",
+        .{ build_options.version, builtin.zig_version_string },
+    );
     try std.fs.File.stdout().writeAll(message);
 }
 
