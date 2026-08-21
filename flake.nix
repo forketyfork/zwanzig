@@ -61,6 +61,16 @@
             . "$project_root/scripts/setup-macos-sdk-workaround.sh"
           '');
         };
+
+        # Zig 0.16.0 shell for the dual-frontend migration
+        # (see docs/ZIG_0_16_MIGRATION_PLAN.md).
+        devShells.zig016 = pkgs.mkShell {
+          nativeBuildInputs = with pkgs; [
+            just
+            shellcheck
+            zig.packages.${system}."0.16.0"
+          ];
+        };
       }
     );
 }
