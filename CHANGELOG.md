@@ -10,7 +10,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 
 - `--version` now reports the embedded Zig frontend version. (PR #109)
-- A reproducible Zig 0.16.0 development shell and migration compatibility inventory are now available.
+- A reproducible Zig 0.16.0 development shell and migration compatibility inventory are now available. (PR #110)
 
 ### Changed
 
