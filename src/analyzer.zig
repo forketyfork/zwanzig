@@ -473,7 +473,7 @@ pub const Analyzer = struct {
     }
 
     fn printJsonResults(self: *Analyzer, writer: anytype) !void {
-        var alloc_writer: std.io.Writer.Allocating = .init(self.allocator);
+        var alloc_writer: std.Io.Writer.Allocating = .init(self.allocator);
         defer alloc_writer.deinit();
 
         var jw: std.json.Stringify = .{
@@ -538,10 +538,10 @@ test "Analyzer JSON output format" {
     try analyzer.diagnostics.append(allocator, diag2);
 
     var buffer: [1024]u8 = undefined;
-    var stream = std.io.fixedBufferStream(&buffer);
-    try analyzer.printJsonResults(stream.writer());
+    var writer: std.Io.Writer = .fixed(&buffer);
+    try analyzer.printJsonResults(&writer);
 
-    const output = stream.getWritten();
+    const output = writer.buffered();
     try testing.expect(std.mem.indexOf(u8, output, "\"diagnostics\":") != null);
     try testing.expect(std.mem.indexOf(u8, output, "\"total\": 2") != null);
     try testing.expect(std.mem.indexOf(u8, output, "test1.zig") != null);
@@ -627,11 +627,11 @@ test "Analyzer text output format" {
     try analyzer.diagnostics.append(allocator, diag);
 
     var buffer: [512]u8 = undefined;
-    var stream = std.io.fixedBufferStream(&buffer);
+    var writer: std.Io.Writer = .fixed(&buffer);
     var formatter = ConsoleFormatter.init(allocator);
-    try formatter.write(stream.writer(), analyzer.diagnostics.items);
+    try formatter.write(&writer, analyzer.diagnostics.items);
 
-    const output = stream.getWritten();
+    const output = writer.buffered();
     try testing.expect(std.mem.indexOf(u8, output, "Found 1 issue(s):") != null);
     try testing.expect(std.mem.indexOf(u8, output, "test.zig:1:1") != null);
 }

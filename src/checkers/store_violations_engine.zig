@@ -283,11 +283,11 @@ test "store_violations_engine detects config-driven resource model" {
     const code: [:0]const u8 =
         \\const std = @import("std");
         \\const MyPool = struct {
-        \\    fn acquire(_: *MyPool) i32 { return 42; }
+        \\    fn acquire(_: *const MyPool) i32 { return 42; }
         \\};
         \\fn foo() void {
-        \\    var pool = MyPool{};
-        \\    var res = pool.acquire();
+        \\    const pool = MyPool{};
+        \\    const res = pool.acquire();
         \\    // Missing pool.release(res) - should detect as leak based on config model
         \\    _ = res;
         \\}

@@ -1,6 +1,7 @@
 const std = @import("std");
 const diagnostic = @import("diagnostic.zig");
 const zir_bridge_mod = @import("zir_bridge.zig");
+const log = std.log.scoped(.source);
 
 pub const Location = diagnostic.Location;
 pub const SourceRange = diagnostic.SourceRange;
@@ -113,8 +114,11 @@ pub const Source = struct {
     /// Force loading of ZIR bridge (internal use).
     fn loadZirBridge(self: *Source) void {
         var bridge = ZirBridge.init(self.allocator);
-        bridge.loadFromSource(self) catch {
-            // ZIR generation failed - this is expected for files with parse errors
+        bridge.loadFromSource(self) catch |err| {
+            // Expected for files with parse errors or syntax this binary's
+            // embedded Zig frontend does not support; typed analysis is
+            // disabled for this file and AST/token rules still run.
+            log.debug("ZIR bridge unavailable for {s}: {s}", .{ self.file_path, @errorName(err) });
             bridge.deinit();
             return;
         };

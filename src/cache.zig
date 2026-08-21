@@ -1,4 +1,5 @@
 const std = @import("std");
+const builtin = @import("builtin");
 const log = std.log.scoped(.cache);
 const BuildMetadata = @import("build_metadata.zig").BuildMetadata;
 
@@ -44,7 +45,11 @@ pub const CacheKey = struct {
             @memset(&key.target_hash, 0);
         }
 
-        std.crypto.hash.sha2.Sha256.hash(tool_version, &key.version_hash, .{});
+        var version_hasher = std.crypto.hash.sha2.Sha256.init(.{});
+        version_hasher.update(tool_version);
+        version_hasher.update("\x00");
+        version_hasher.update(builtin.zig_version_string);
+        version_hasher.final(&key.version_hash);
 
         var config_hasher = std.crypto.hash.sha2.Sha256.init(.{});
         config_hasher.update(&[_]u8{if (type_info_available) 1 else 0});
@@ -55,24 +60,6 @@ pub const CacheKey = struct {
         config_hasher.final(&key.config_hash);
 
         return key;
-    }
-
-    pub fn format(self: CacheKey, comptime _: []const u8, _: std.fmt.FormatOptions, writer: anytype) !void {
-        for (self.file_hash) |byte| {
-            try writer.print("{x:0>2}", .{byte});
-        }
-        try writer.writeByte('_');
-        for (self.target_hash) |byte| {
-            try writer.print("{x:0>2}", .{byte});
-        }
-        try writer.writeByte('_');
-        for (self.version_hash) |byte| {
-            try writer.print("{x:0>2}", .{byte});
-        }
-        try writer.writeByte('_');
-        for (self.config_hash) |byte| {
-            try writer.print("{x:0>2}", .{byte});
-        }
     }
 
     pub fn eql(self: CacheKey, other: CacheKey) bool {
@@ -295,7 +282,7 @@ pub const Cache = struct {
     }
 };
 
-test "CacheKey: init and format" {
+test "CacheKey: init and cache path" {
     const target = BuildMetadata{
         .target = .{
             .arch = .x86_64,
@@ -333,6 +320,18 @@ test "CacheKey: version changes invalidate" {
     const key2 = CacheKey.init("test", null, "1.0.1", false, &rules);
 
     try std.testing.expect(!key1.eql(key2));
+}
+
+test "CacheKey version hash includes the embedded Zig frontend version" {
+    const rules = [_][]const u8{};
+    const key = CacheKey.init("test", null, "1.0.0", false, &rules);
+
+    // Regression guard: if version_hash were derived from the tool version
+    // alone, two binaries embedding different Zig frontends would share
+    // incompatible typed-analysis cache entries.
+    var tool_version_only: [32]u8 = undefined;
+    std.crypto.hash.sha2.Sha256.hash("1.0.0", &tool_version_only, .{});
+    try std.testing.expect(!std.mem.eql(u8, &key.version_hash, &tool_version_only));
 }
 
 test "CacheKey: config changes invalidate" {

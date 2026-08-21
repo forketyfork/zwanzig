@@ -147,7 +147,7 @@ Speed up repeated runs with `--cache`:
 zwanzig --cache src/
 ```
 
-Cache lives in `.zwanzig-cache/`, keyed by file content hash, target platform, zwanzig version, type-info availability, and enabled rules. The cache invalidates automatically when any of these change.
+Cache lives in `.zwanzig-cache/`, keyed by file content hash, target platform, zwanzig version, embedded Zig frontend version, type-info availability, and enabled rules. The cache invalidates automatically when any of these change.
 
 The cache stores metadata (e.g., whether type info was loaded) and cached CFGs to speed up repeated runs, but it never skips analysis.
 

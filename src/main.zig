@@ -2,6 +2,10 @@ const std = @import("std");
 const build_options = @import("build_options");
 const cli_run = @import("cli/run.zig");
 
+comptime {
+    _ = @import("compat.zig");
+}
+
 pub const std_options = std.Options{
     .log_level = @enumFromInt(@intFromEnum(build_options.log_level)),
 };

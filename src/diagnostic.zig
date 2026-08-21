@@ -429,11 +429,11 @@ test "Diagnostic formatting" {
     defer diag.deinit(testing.allocator);
 
     var buffer: [256]u8 = undefined;
-    var stream = std.io.fixedBufferStream(&buffer);
-    try diag.format(stream.writer());
+    var writer: std.Io.Writer = .fixed(&buffer);
+    try diag.format(&writer);
 
     const expected = "test.zig:5:10: error: [empty-catch] Empty catch block detected\n";
-    try testing.expectEqualStrings(expected, stream.getWritten());
+    try testing.expectEqualStrings(expected, writer.buffered());
 }
 
 test "Diagnostic initAtLocation" {
@@ -556,7 +556,7 @@ test "Diagnostic writeJson" {
     );
     defer diag.deinit(allocator);
 
-    var alloc_writer: std.io.Writer.Allocating = .init(allocator);
+    var alloc_writer: std.Io.Writer.Allocating = .init(allocator);
     defer alloc_writer.deinit();
     var jw: std.json.Stringify = .{
         .writer = &alloc_writer.writer,
@@ -621,7 +621,7 @@ test "Diagnostic writeJson with special characters" {
     );
     defer diag.deinit(allocator);
 
-    var alloc_writer: std.io.Writer.Allocating = .init(allocator);
+    var alloc_writer: std.Io.Writer.Allocating = .init(allocator);
     defer alloc_writer.deinit();
     var jw: std.json.Stringify = .{
         .writer = &alloc_writer.writer,
