@@ -1,13 +1,16 @@
 const std = @import("std");
+const compat = @import("../compat.zig");
 const Diagnostic = @import("../rule.zig").Diagnostic;
 
 pub const ConsoleFormatter = struct {
     allocator: std.mem.Allocator,
+    io_context: *compat.Context,
     file_cache: std.StringHashMap([]const u8),
 
-    pub fn init(allocator: std.mem.Allocator) ConsoleFormatter {
+    pub fn init(allocator: std.mem.Allocator, io_context: *compat.Context) ConsoleFormatter {
         return .{
             .allocator = allocator,
+            .io_context = io_context,
             .file_cache = std.StringHashMap([]const u8).init(allocator),
         };
     }
@@ -15,7 +18,7 @@ pub const ConsoleFormatter = struct {
     pub fn deinit(self: *ConsoleFormatter) void {
         var value_iter = self.file_cache.valueIterator();
         while (value_iter.next()) |value| {
-            self.allocator.free(value.*);
+            self.allocator.free(value.*.ptr[0 .. value.*.len + 1]);
         }
         self.file_cache.deinit();
     }
@@ -76,24 +79,12 @@ pub const ConsoleFormatter = struct {
             return cached;
         }
 
-        const file = if (std.fs.path.isAbsolute(file_path))
-            std.fs.openFileAbsolute(file_path, .{})
-        else
-            std.fs.cwd().openFile(file_path, .{});
-        const opened_file = file catch return null;
-        defer opened_file.close();
-
         const max_size = 10 * 1024 * 1024;
-        const loaded = opened_file.readToEndAllocOptions(
-            self.allocator,
-            max_size,
-            null,
-            std.mem.Alignment.of(u8),
-            null,
-        ) catch return null;
+        const loaded_with_sentinel = compat.readFileAlloc(self.io_context, self.allocator, file_path, max_size) catch return null;
+        const loaded = loaded_with_sentinel[0..loaded_with_sentinel.len];
 
         self.file_cache.put(file_path, loaded) catch {
-            self.allocator.free(loaded);
+            self.allocator.free(loaded_with_sentinel);
             return null;
         };
         return loaded;

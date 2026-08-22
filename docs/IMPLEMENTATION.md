@@ -17,6 +17,17 @@ Larger subsystems are split into focused submodules with thin facades:
 - `src/zir/` + `src/types/` - ZIR bridge implementation and shared type info (facade: `src/zir_bridge.zig`)
 - `src/lib.zig` - Public library exports for embedding
 
+#### Zig frontend compatibility
+
+Zwanzig supports the exact Zig 0.15.2 and 0.16.0 toolchains. `src/compat.zig`
+enforces that support boundary and selects the matching adapter at compile time.
+The I/O adapter carries the application context through file discovery,
+analysis, caching, formatting, and DOT output, while the executor and mutex
+adapters preserve parallel-analysis behavior across the two standard-library
+concurrency APIs. ZIR declaration and switch decoding is isolated in the
+version-specific adapters under `src/compat/`, so the analyzer and checkers
+operate on the shared type-information model.
+
 ### Core components
 
 #### Source parsing cache

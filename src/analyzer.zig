@@ -1,4 +1,5 @@
 const std = @import("std");
+const compat = @import("compat.zig");
 const Rule = @import("rule.zig").Rule;
 const Diagnostic = @import("rule.zig").Diagnostic;
 const Source = @import("source.zig").Source;
@@ -41,6 +42,7 @@ pub const Analyzer = struct {
     dump_exploded_graph_dir: ?[]const u8 = null,
     dump_annotated_cfg_dir: ?[]const u8 = null,
     dump_path_trace_dir: ?[]const u8 = null,
+    io_context: ?*compat.Context = null,
 
     pub fn init(allocator: std.mem.Allocator) Analyzer {
         return Analyzer{
@@ -49,6 +51,20 @@ pub const Analyzer = struct {
             .diagnostics = .empty,
             .rule_filter = .none,
         };
+    }
+
+    pub fn initWithContext(allocator: std.mem.Allocator, io_context: *compat.Context) Analyzer {
+        var analyzer = init(allocator);
+        analyzer.io_context = io_context;
+        return analyzer;
+    }
+
+    pub fn setIoContext(self: *Analyzer, io_context: *compat.Context) void {
+        self.io_context = io_context;
+    }
+
+    pub fn getIoContext(self: *Analyzer) *compat.Context {
+        return self.io_context orelse compat.defaultContext();
     }
 
     pub fn deinit(self: *Analyzer) void {
@@ -70,7 +86,7 @@ pub const Analyzer = struct {
     pub fn enableCache(self: *Analyzer) !void {
         self.use_cache = true;
         if (self.cache == null) {
-            self.cache = try Cache.init(self.allocator);
+            self.cache = try Cache.init(self.allocator, self.getIoContext());
         }
     }
 
@@ -213,7 +229,7 @@ pub const Analyzer = struct {
 
     pub fn analyzeProjectUnusedDecls(self: *Analyzer, files: []const []const u8) !void {
         if (!self.shouldRunProjectUnusedDecls()) return;
-        try project_unused_decl.analyze(self.allocator, files, &self.diagnostics);
+        try project_unused_decl.analyze(self.getIoContext(), self.allocator, files, &self.diagnostics);
         std.mem.sort(Diagnostic, self.diagnostics.items, {}, Diagnostic.lessThan);
     }
 
@@ -257,19 +273,10 @@ pub const Analyzer = struct {
     ) !AnalysisResult {
         log.debug("analyzeResult: start {s}", .{file_path});
 
-        const file = try std.fs.cwd().openFile(file_path, .{});
-        defer file.close();
-
         const max_size = 10 * 1024 * 1024;
         // Sentinel needed for Source.init; free accounts for sentinel byte below
         // zwanzig-disable-next-line: sentinel-alloc
-        const content = try file.readToEndAllocOptions(
-            scratch_allocator,
-            max_size,
-            null,
-            std.mem.Alignment.of(u8),
-            0,
-        );
+        const content = try compat.readFileAlloc(self.getIoContext(), scratch_allocator, file_path, max_size);
         defer scratch_allocator.free(content.ptr[0 .. content.len + 1]);
 
         var source = Source.init(scratch_allocator, file_path, content);
@@ -424,6 +431,7 @@ pub const Analyzer = struct {
             .dump_exploded_graph_dir = self.dump_exploded_graph_dir,
             .dump_annotated_cfg_dir = self.dump_annotated_cfg_dir,
             .dump_path_trace_dir = self.dump_path_trace_dir,
+            .io_context = self.getIoContext(),
         };
 
         // Run native checkers
@@ -452,13 +460,16 @@ pub const Analyzer = struct {
     };
 
     pub fn printResults(self: *Analyzer, format: OutputFormat) !void {
-        const stdout = std.fs.File.stdout().deprecatedWriter();
+        var stdout: compat.OutputWriter = undefined;
+        stdout.init(self.getIoContext(), false);
+        defer stdout.deinit();
+        const writer = stdout.writer();
 
         switch (format) {
-            .json => try self.printJsonResults(stdout),
+            .json => try self.printJsonResults(writer),
             .text => {
-                var formatter = ConsoleFormatter.init(self.allocator);
-                try formatter.write(stdout, self.diagnostics.items);
+                var formatter = ConsoleFormatter.init(self.allocator, self.getIoContext());
+                try formatter.write(writer, self.diagnostics.items);
             },
             .sarif => {
                 var formatter = SarifFormatter.init(
@@ -467,12 +478,13 @@ pub const Analyzer = struct {
                     self.tool_version,
                     self.diagnostics.items,
                 );
-                try formatter.write(stdout);
+                try formatter.write(writer);
             },
         }
+        try stdout.flush();
     }
 
-    fn printJsonResults(self: *Analyzer, writer: anytype) !void {
+    fn printJsonResults(self: *Analyzer, writer: *std.Io.Writer) !void {
         var alloc_writer: std.Io.Writer.Allocating = .init(self.allocator);
         defer alloc_writer.deinit();
 
@@ -628,7 +640,7 @@ test "Analyzer text output format" {
 
     var buffer: [512]u8 = undefined;
     var writer: std.Io.Writer = .fixed(&buffer);
-    var formatter = ConsoleFormatter.init(allocator);
+    var formatter = ConsoleFormatter.init(allocator, analyzer.getIoContext());
     try formatter.write(&writer, analyzer.diagnostics.items);
 
     const output = writer.buffered();
@@ -667,12 +679,12 @@ test "Analyzer SARIF output format" {
     try analyzer.diagnostics.append(allocator, diag1);
     try analyzer.diagnostics.append(allocator, diag2);
 
-    var output: std.ArrayList(u8) = .empty;
-    defer output.deinit(allocator);
+    var output: std.Io.Writer.Allocating = .init(allocator);
+    defer output.deinit();
     var formatter = SarifFormatter.init(allocator, &analyzer.checker_manager, analyzer.tool_version, analyzer.diagnostics.items);
-    try formatter.write(output.writer(allocator));
+    try formatter.write(&output.writer);
 
-    const result = output.items;
+    const result = output.written();
     try testing.expect(std.mem.indexOf(u8, result, "\"version\": \"2.1.0\"") != null);
     try testing.expect(std.mem.indexOf(u8, result, "\"$schema\":") != null);
     try testing.expect(std.mem.indexOf(u8, result, "\"runs\":") != null);
@@ -691,15 +703,14 @@ test "Analyzer cache enabled" {
     const testing = std.testing;
     const allocator = testing.allocator;
 
-    var cache_dir = try std.fs.cwd().makeOpenPath("test-analyzer-cache", .{});
-    defer {
-        cache_dir.close();
-        std.fs.cwd().deleteTree("test-analyzer-cache") catch |err| {
-            log.warn("failed to clean up test directory: {}", .{err});
-        };
-    }
+    var io_context = try compat.Context.init(allocator, 1);
+    defer io_context.deinit();
+    try compat.makePath(&io_context, ".zwanzig-cache");
+    defer compat.deleteTree(&io_context, ".zwanzig-cache") catch |err| {
+        log.warn("failed to clean up test directory: {}", .{err});
+    };
 
-    var analyzer = Analyzer.init(allocator);
+    var analyzer = Analyzer.initWithContext(allocator, &io_context);
     defer analyzer.deinit();
 
     try analyzer.enableCache();
@@ -712,7 +723,9 @@ test "Analyzer cache hit still produces diagnostics" {
     const allocator = testing.allocator;
     const DupeImportRule = @import("rules/dupe_import.zig").DupeImportRule;
 
-    var tmp_dir = testing.tmpDir(.{});
+    var io_context = try compat.Context.init(allocator, 1);
+    defer io_context.deinit();
+    var tmp_dir = compat.TestDir.init();
     defer tmp_dir.cleanup();
 
     // File with duplicate imports to trigger a diagnostic
@@ -720,18 +733,16 @@ test "Analyzer cache hit still produces diagnostics" {
         \\const std = @import("std");
         \\const std2 = @import("std");
     ;
-    const test_file = try tmp_dir.dir.createFile("test.zig", .{});
-    try test_file.writeAll(test_file_content);
-    test_file.close();
+    try tmp_dir.writeFile("test.zig", test_file_content);
 
     var path_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const test_file_path = try tmp_dir.dir.realpath("test.zig", &path_buf);
+    const test_file_path = try std.fmt.bufPrint(&path_buf, "{s}/test.zig", .{tmp_dir.path()});
 
     var first_run_diag_count: usize = 0;
 
     // First run - populates cache
     {
-        var analyzer1 = Analyzer.init(allocator);
+        var analyzer1 = Analyzer.initWithContext(allocator, &io_context);
         defer analyzer1.deinit();
         try analyzer1.enableCache();
         try analyzer1.registerRule(&DupeImportRule.rule);
@@ -743,7 +754,7 @@ test "Analyzer cache hit still produces diagnostics" {
 
     // Second run - should hit cache but still produce same diagnostics
     {
-        var analyzer2 = Analyzer.init(allocator);
+        var analyzer2 = Analyzer.initWithContext(allocator, &io_context);
         defer analyzer2.deinit();
         try analyzer2.enableCache();
         try analyzer2.registerRule(&DupeImportRule.rule);

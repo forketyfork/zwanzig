@@ -5,6 +5,7 @@ pub const checker = @import("checker.zig");
 pub const config = @import("config.zig");
 pub const analyzer = @import("analyzer.zig");
 pub const rule_filter = @import("rule_filter.zig");
+pub const compat = @import("compat.zig");
 
 comptime {
     _ = @import("compat.zig");

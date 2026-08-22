@@ -1,4 +1,5 @@
 const std = @import("std");
+const compat = @import("compat.zig");
 const Source = @import("source.zig").Source;
 const diagnostic_mod = @import("diagnostic.zig");
 pub const Diagnostic = diagnostic_mod.Diagnostic;
@@ -100,6 +101,7 @@ pub const CheckerContext = struct {
     /// Directory to dump path trace DOT files.
     /// Shows paths to violations with state evolution.
     dump_path_trace_dir: ?[]const u8 = null,
+    io_context: *compat.Context = compat.defaultContext(),
 
     /// Check if type information is available.
     pub fn hasTypeInfo(self: *const CheckerContext) bool {
@@ -143,6 +145,7 @@ pub const CheckerContext = struct {
     pub fn createCfgBuilder(self: *const CheckerContext, allocator: std.mem.Allocator) CfgBuilder {
         var builder = CfgBuilder.init(allocator);
         builder.setDumpCfgDir(self.dump_cfg_dir);
+        builder.setIoContext(self.io_context);
         builder.setTypeContext(self.type_context);
         return builder;
     }

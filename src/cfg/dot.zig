@@ -1,4 +1,5 @@
 const std = @import("std");
+const compat = @import("../compat.zig");
 const graph = @import("graph.zig");
 const Cfg = graph.Cfg;
 const ids = @import("../ids.zig");
@@ -10,10 +11,9 @@ const log = std.log.scoped(.cfg_dot);
 /// The output can be rendered with Graphviz: `dot -Tpng file.dot -o file.png`
 /// or viewed at online tools like edotor.net or viz-js.com
 fn generate(cfg: *const Cfg, allocator: std.mem.Allocator) ![]const u8 {
-    var buffer: std.ArrayList(u8) = .empty;
-    errdefer buffer.deinit(allocator);
-
-    const writer = buffer.writer(allocator);
+    var output: std.Io.Writer.Allocating = .init(allocator);
+    errdefer output.deinit();
+    const writer = &output.writer;
 
     // Header
     try writer.writeAll("digraph CFG {\n");
@@ -68,7 +68,7 @@ fn generate(cfg: *const Cfg, allocator: std.mem.Allocator) ![]const u8 {
 
     try writer.writeAll("}\n");
 
-    return buffer.toOwnedSlice(allocator);
+    return output.toOwnedSlice();
 }
 
 /// Write a CFG to a DOT file.
@@ -77,6 +77,7 @@ pub fn writeToFile(
     cfg: *const Cfg,
     dir: []const u8,
     source_path: []const u8,
+    io_context: *compat.Context,
     allocator: std.mem.Allocator,
 ) void {
     const dot = generate(cfg, allocator) catch |err| {
@@ -97,7 +98,7 @@ pub fn writeToFile(
         return;
     };
 
-    dot_helpers.writeDotFile(dir, file_path, dot) catch |err| {
+    dot_helpers.writeDotFile(io_context, dir, file_path, dot) catch |err| {
         log.warn("failed to write CFG DOT file {s}: {}", .{ file_path, err });
         return;
     };

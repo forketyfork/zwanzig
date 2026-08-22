@@ -1,4 +1,5 @@
 const std = @import("std");
+const compat = @import("compat.zig");
 const cfg_graph = @import("cfg/graph.zig");
 
 const EdgeKind = cfg_graph.EdgeKind;
@@ -22,11 +23,7 @@ pub fn stemFromPath(source_path: []const u8) []const u8 {
     return if (std.mem.lastIndexOf(u8, basename, ".")) |idx| basename[0..idx] else basename;
 }
 
-pub fn writeDotFile(dir: []const u8, file_path: []const u8, dot: []const u8) !void {
-    try std.fs.cwd().makePath(dir);
-
-    const file = try std.fs.cwd().createFile(file_path, .{});
-    defer file.close();
-
-    try file.writeAll(dot);
+pub fn writeDotFile(io_context: *compat.Context, dir: []const u8, file_path: []const u8, dot: []const u8) !void {
+    try compat.makePath(io_context, dir);
+    try compat.writeFile(io_context, file_path, dot);
 }

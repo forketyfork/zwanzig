@@ -26,6 +26,10 @@ Show the version:
 zwanzig --version
 ```
 
+### Zig frontend compatibility
+
+Zwanzig embeds the Zig frontend used to build it, so frontend-specific syntax is interpreted according to that embedded version. Source builds support exactly Zig 0.15.2 and Zig 0.16.0. The selected frontend is included in `--version`; when analyzing code that uses version-specific language features, use a Zwanzig binary built with the matching frontend.
+
 ### Files and directories
 
 ```bash

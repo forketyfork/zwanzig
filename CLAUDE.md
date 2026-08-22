@@ -55,9 +55,16 @@ When asked to release: create a PR for the version bump, wait for required check
 
 ## Development Environment
 
-Uses Nix flakes for reproducible dev environment (Zig 0.15.2). Enter with:
+Uses Nix flakes for reproducible dev environments. The default shell uses Zig 0.15.2:
+
 ```bash
 nix develop
+```
+
+Use the Zig 0.16.0 shell to validate the alternate embedded frontend:
+
+```bash
+nix develop .#zig016
 ```
 
 ## Infrastructure

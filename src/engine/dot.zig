@@ -1,4 +1,5 @@
 const std = @import("std");
+const compat = @import("../compat.zig");
 const graph_mod = @import("graph.zig");
 const ExplodedGraph = graph_mod.ExplodedGraph;
 const state_mod = @import("state.zig");
@@ -21,9 +22,9 @@ fn generateExplodedGraph(
     graph: *const ExplodedGraph,
     allocator: std.mem.Allocator,
 ) ![]const u8 {
-    var buffer: std.ArrayList(u8) = .empty;
-    errdefer buffer.deinit(allocator);
-    const writer = buffer.writer(allocator);
+    var output: std.Io.Writer.Allocating = .init(allocator);
+    errdefer output.deinit();
+    const writer = &output.writer;
 
     try writer.writeAll("digraph ExplodedGraph {\n");
     try writer.writeAll("  rankdir=TB;\n");
@@ -75,12 +76,13 @@ fn generateExplodedGraph(
     }
 
     try writer.writeAll("}\n");
-    return buffer.toOwnedSlice(allocator);
+    return output.toOwnedSlice();
 }
 
 /// Write exploded graph to a DOT file.
 pub fn writeExplodedGraphToFile(
     graph: *const ExplodedGraph,
+    io_context: *compat.Context,
     dir: []const u8,
     source_path: []const u8,
     fn_name: ?[]const u8,
@@ -92,7 +94,7 @@ pub fn writeExplodedGraphToFile(
     };
     defer allocator.free(dot);
 
-    writeToFile(dot, dir, source_path, fn_name, "exploded", allocator);
+    writeToFile(dot, io_context, dir, source_path, fn_name, "exploded", allocator);
 }
 
 // ============================================================================
@@ -105,9 +107,9 @@ fn generateAnnotatedCfg(
     graph: *const ExplodedGraph,
     allocator: std.mem.Allocator,
 ) ![]const u8 {
-    var buffer: std.ArrayList(u8) = .empty;
-    errdefer buffer.deinit(allocator);
-    const writer = buffer.writer(allocator);
+    var output: std.Io.Writer.Allocating = .init(allocator);
+    errdefer output.deinit();
+    const writer = &output.writer;
 
     const cfg = graph.cfg;
 
@@ -191,12 +193,13 @@ fn generateAnnotatedCfg(
     }
 
     try writer.writeAll("}\n");
-    return buffer.toOwnedSlice(allocator);
+    return output.toOwnedSlice();
 }
 
 /// Write annotated CFG to a DOT file.
 pub fn writeAnnotatedCfgToFile(
     graph: *const ExplodedGraph,
+    io_context: *compat.Context,
     dir: []const u8,
     source_path: []const u8,
     fn_name: ?[]const u8,
@@ -208,7 +211,7 @@ pub fn writeAnnotatedCfgToFile(
     };
     defer allocator.free(dot);
 
-    writeToFile(dot, dir, source_path, fn_name, "annotated", allocator);
+    writeToFile(dot, io_context, dir, source_path, fn_name, "annotated", allocator);
 }
 
 // ============================================================================
@@ -221,9 +224,9 @@ fn generatePathTraces(
     graph: *const ExplodedGraph,
     allocator: std.mem.Allocator,
 ) ![]const u8 {
-    var buffer: std.ArrayList(u8) = .empty;
-    errdefer buffer.deinit(allocator);
-    const writer = buffer.writer(allocator);
+    var output: std.Io.Writer.Allocating = .init(allocator);
+    errdefer output.deinit();
+    const writer = &output.writer;
 
     var violation_nodes: std.ArrayList(u32) = .empty;
     defer violation_nodes.deinit(allocator);
@@ -297,12 +300,13 @@ fn generatePathTraces(
     }
 
     try writer.writeAll("}\n");
-    return buffer.toOwnedSlice(allocator);
+    return output.toOwnedSlice();
 }
 
 /// Write path traces to a DOT file.
 pub fn writePathTracesToFile(
     graph: *const ExplodedGraph,
+    io_context: *compat.Context,
     dir: []const u8,
     source_path: []const u8,
     fn_name: ?[]const u8,
@@ -314,7 +318,7 @@ pub fn writePathTracesToFile(
     };
     defer allocator.free(dot);
 
-    writeToFile(dot, dir, source_path, fn_name, "traces", allocator);
+    writeToFile(dot, io_context, dir, source_path, fn_name, "traces", allocator);
 }
 
 // ============================================================================
@@ -355,6 +359,7 @@ fn reconstructPath(
 /// Write DOT content to a file in the specified directory.
 fn writeToFile(
     dot: []const u8,
+    io_context: *compat.Context,
     dir: []const u8,
     source_path: []const u8,
     fn_name: ?[]const u8,
@@ -370,7 +375,7 @@ fn writeToFile(
     };
     defer allocator.free(file_path);
 
-    dot_helpers.writeDotFile(dir, file_path, dot) catch |err| {
+    dot_helpers.writeDotFile(io_context, dir, file_path, dot) catch |err| {
         log.warn("failed to write DOT file {s}: {}", .{ file_path, err });
         return;
     };

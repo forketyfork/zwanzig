@@ -1,6 +1,6 @@
 const std = @import("std");
 const builtin = @import("builtin");
-const log = std.log.scoped(.cache);
+const compat = @import("compat.zig");
 const BuildMetadata = @import("build_metadata.zig").BuildMetadata;
 
 const CacheError = error{
@@ -76,18 +76,19 @@ const CacheEntry = struct {
     timestamp: i64,
     data_len: u32,
 
-    pub fn init(key: CacheKey, data_len: u32) CacheEntry {
+    const header_len = 144;
+
+    pub fn init(key: CacheKey, data_len: u32, timestamp: i64) CacheEntry {
         return CacheEntry{
             .version = cache_version,
             .key = key,
-            .timestamp = std.time.timestamp(),
+            .timestamp = timestamp,
             .data_len = data_len,
         };
     }
 
-    pub fn writeToFile(self: CacheEntry, file: std.fs.File) !void {
-        // Header: version(4) + file_hash(32) + target_hash(32) + version_hash(32) + config_hash(32) + timestamp(8) + data_len(4) = 144 bytes
-        var buf: [4 + 32 + 32 + 32 + 32 + 8 + 4]u8 = undefined;
+    pub fn encode(self: CacheEntry) [header_len]u8 {
+        var buf: [header_len]u8 = undefined;
         std.mem.writeInt(u32, buf[0..4], self.version, .little);
         @memcpy(buf[4..36], &self.key.file_hash);
         @memcpy(buf[36..68], &self.key.target_hash);
@@ -95,16 +96,12 @@ const CacheEntry = struct {
         @memcpy(buf[100..132], &self.key.config_hash);
         std.mem.writeInt(i64, buf[132..140], self.timestamp, .little);
         std.mem.writeInt(u32, buf[140..144], self.data_len, .little);
-        try file.writeAll(&buf);
+        // Returning the header by value copies the local array to the caller.
+        // zwanzig-disable-next-line: stack-escape-engine
+        return buf;
     }
 
-    pub fn readFromFile(file: std.fs.File) !CacheEntry {
-        var buf: [4 + 32 + 32 + 32 + 32 + 8 + 4]u8 = undefined;
-        const bytes_read = try file.readAll(&buf);
-        if (bytes_read != buf.len) {
-            return CacheError.CacheCorrupted;
-        }
-
+    pub fn decode(buf: *const [header_len]u8) !CacheEntry {
         const version = std.mem.readInt(u32, buf[0..4], .little);
         if (version != cache_version) {
             return CacheError.VersionMismatch;
@@ -125,14 +122,20 @@ const CacheEntry = struct {
 
 pub const Cache = struct {
     allocator: std.mem.Allocator,
-    cache_dir: ?std.fs.Dir,
-    mutex: std.Thread.Mutex = .{},
+    io_context: *compat.Context,
+    cache_dir: ?[]u8,
+    mutex: compat.Mutex = compat.initMutex(),
 
-    pub fn init(allocator: std.mem.Allocator) !Cache {
-        const cache_dir = std.fs.cwd().makeOpenPath(cache_dir_name, .{ .iterate = true }) catch |err| {
+    pub fn init(allocator: std.mem.Allocator, io_context: *compat.Context) !Cache {
+        return initAt(allocator, io_context, cache_dir_name);
+    }
+
+    pub fn initAt(allocator: std.mem.Allocator, io_context: *compat.Context, cache_dir_path: []const u8) !Cache {
+        compat.makePath(io_context, cache_dir_path) catch |err| {
             switch (err) {
                 error.AccessDenied => return Cache{
                     .allocator = allocator,
+                    .io_context = io_context,
                     .cache_dir = null,
                 },
                 else => return err,
@@ -141,13 +144,14 @@ pub const Cache = struct {
 
         return Cache{
             .allocator = allocator,
-            .cache_dir = cache_dir,
+            .io_context = io_context,
+            .cache_dir = try allocator.dupe(u8, cache_dir_path),
         };
     }
 
     pub fn deinit(self: *Cache) void {
-        if (self.cache_dir) |*dir| {
-            dir.close();
+        if (self.cache_dir) |dir| {
+            self.allocator.free(dir);
         }
     }
 
@@ -175,22 +179,26 @@ pub const Cache = struct {
             return null;
         }
 
-        self.mutex.lock();
-        defer self.mutex.unlock();
+        try compat.lockMutex(&self.mutex, self.io_context);
+        defer compat.unlockMutex(&self.mutex, self.io_context);
 
         var path_buf: [256]u8 = undefined;
         const cache_path = try Cache.getCachePath(key, &path_buf);
+        var full_path_buf: [std.fs.max_path_bytes]u8 = undefined;
+        const full_path = try std.fmt.bufPrint(&full_path_buf, "{s}/{s}", .{ self.cache_dir.?, cache_path });
 
-        const file = self.cache_dir.?.openFile(cache_path, .{}) catch |err| {
+        const contents = compat.readFileAlloc(self.io_context, self.allocator, full_path, 10 * 1024 * 1024) catch |err| {
             return switch (err) {
                 error.FileNotFound => null,
                 error.AccessDenied => CacheError.AccessDenied,
                 else => err,
             };
         };
-        defer file.close();
+        defer self.allocator.free(contents.ptr[0 .. contents.len + 1]);
 
-        const entry = CacheEntry.readFromFile(file) catch |err| {
+        if (contents.len < CacheEntry.header_len) return null;
+        const header: *const [CacheEntry.header_len]u8 = @ptrCast(contents.ptr);
+        const entry = CacheEntry.decode(header) catch |err| {
             return switch (err) {
                 error.VersionMismatch, error.CacheCorrupted => null,
                 else => err,
@@ -202,15 +210,12 @@ pub const Cache = struct {
             return null;
         }
 
-        const data = try self.allocator.alloc(u8, entry.data_len);
-        errdefer self.allocator.free(data);
+        const data_start = CacheEntry.header_len;
+        const data_end = std.math.add(usize, data_start, entry.data_len) catch return null;
+        if (data_end > contents.len) return null;
 
-        const bytes_read = try file.readAll(data);
-        if (bytes_read != entry.data_len) {
-            // Incomplete read indicates corruption; treat as cache miss
-            self.allocator.free(data);
-            return null;
-        }
+        const data = try self.allocator.alloc(u8, entry.data_len);
+        @memcpy(data, contents[data_start..data_end]);
 
         return data;
     }
@@ -220,18 +225,21 @@ pub const Cache = struct {
             return;
         }
 
-        self.mutex.lock();
-        defer self.mutex.unlock();
+        try compat.lockMutex(&self.mutex, self.io_context);
+        defer compat.unlockMutex(&self.mutex, self.io_context);
 
         var path_buf: [256]u8 = undefined;
         const cache_path = try Cache.getCachePath(key, &path_buf);
+        var full_path_buf: [std.fs.max_path_bytes]u8 = undefined;
+        const full_path = try std.fmt.bufPrint(&full_path_buf, "{s}/{s}", .{ self.cache_dir.?, cache_path });
 
-        const file = try self.cache_dir.?.createFile(cache_path, .{});
-        defer file.close();
-
-        const entry = CacheEntry.init(key, @intCast(data.len));
-        try entry.writeToFile(file);
-        try file.writeAll(data);
+        const entry = CacheEntry.init(key, @intCast(data.len), compat.timestamp(self.io_context));
+        const header = entry.encode();
+        const contents = try self.allocator.alloc(u8, header.len + data.len);
+        defer self.allocator.free(contents);
+        @memcpy(contents[0..header.len], &header);
+        @memcpy(contents[header.len..], data);
+        try compat.writeFile(self.io_context, full_path, contents);
     }
 
     pub fn invalidate(self: *Cache, key: CacheKey) !void {
@@ -239,13 +247,16 @@ pub const Cache = struct {
             return;
         }
 
-        self.mutex.lock();
-        defer self.mutex.unlock();
+        try compat.lockMutex(&self.mutex, self.io_context);
+        defer compat.unlockMutex(&self.mutex, self.io_context);
 
         var path_buf: [256]u8 = undefined;
         const cache_path = try Cache.getCachePath(key, &path_buf);
 
-        self.cache_dir.?.deleteFile(cache_path) catch |err| {
+        var full_path_buf: [std.fs.max_path_bytes]u8 = undefined;
+        const full_path = try std.fmt.bufPrint(&full_path_buf, "{s}/{s}", .{ self.cache_dir.?, cache_path });
+
+        compat.deleteFile(self.io_context, full_path) catch |err| {
             if (err != error.FileNotFound) {
                 return err;
             }
@@ -257,8 +268,8 @@ pub const Cache = struct {
             return;
         }
 
-        self.mutex.lock();
-        defer self.mutex.unlock();
+        try compat.lockMutex(&self.mutex, self.io_context);
+        defer compat.unlockMutex(&self.mutex, self.io_context);
 
         var files_to_delete: std.ArrayList([]const u8) = .empty;
         defer {
@@ -268,8 +279,10 @@ pub const Cache = struct {
             files_to_delete.deinit(self.allocator);
         }
 
-        var iter = self.cache_dir.?.iterate();
-        while (try iter.next()) |entry| {
+        var directory = try compat.openDir(self.io_context, self.cache_dir.?, true);
+        defer compat.closeDir(self.io_context, &directory);
+
+        while (try compat.nextDir(self.io_context, &directory)) |entry| {
             if (entry.kind == .file and std.mem.endsWith(u8, entry.name, ".cache")) {
                 const name_copy = try self.allocator.dupe(u8, entry.name);
                 try files_to_delete.append(self.allocator, name_copy);
@@ -277,7 +290,9 @@ pub const Cache = struct {
         }
 
         for (files_to_delete.items) |name| {
-            try self.cache_dir.?.deleteFile(name);
+            var full_path_buf: [std.fs.max_path_bytes]u8 = undefined;
+            const full_path = try std.fmt.bufPrint(&full_path_buf, "{s}/{s}", .{ self.cache_dir.?, name });
+            try compat.deleteFile(self.io_context, full_path);
         }
     }
 };
@@ -359,42 +374,27 @@ test "CacheKey: deterministic across runs" {
 }
 
 test "CacheEntry: write and read" {
-    const allocator = std.testing.allocator;
     const rules = [_][]const u8{"rule1"};
     const key = CacheKey.init("test", null, "1.0.0", false, &rules);
-    const entry = CacheEntry.init(key, 42);
-
-    var tmp_dir = std.testing.tmpDir(.{});
-    defer tmp_dir.cleanup();
-
-    const file = try tmp_dir.dir.createFile("test.cache", .{ .read = true });
-    defer file.close();
-
-    try entry.writeToFile(file);
-
-    try file.seekTo(0);
-    const read_entry = try CacheEntry.readFromFile(file);
+    const entry = CacheEntry.init(key, 42, 123);
+    const encoded = entry.encode();
+    const read_entry = try CacheEntry.decode(&encoded);
 
     try std.testing.expectEqual(entry.version, read_entry.version);
     try std.testing.expectEqual(entry.data_len, read_entry.data_len);
     try std.testing.expect(entry.key.eql(read_entry.key));
-    _ = allocator;
+    try std.testing.expectEqual(entry.timestamp, read_entry.timestamp);
 }
 
 test "Cache: put and get" {
     const allocator = std.testing.allocator;
 
-    const cache_dir = try std.fs.cwd().makeOpenPath("test-cache-tmp", .{ .iterate = true });
-    defer {
-        std.fs.cwd().deleteTree("test-cache-tmp") catch |err| {
-            log.warn("failed to clean up test directory: {}", .{err});
-        };
-    }
+    var io_context = try compat.Context.init(allocator, 1);
+    defer io_context.deinit();
+    var temp_dir = compat.TestDir.init();
+    defer temp_dir.cleanup();
 
-    var cache = Cache{
-        .allocator = allocator,
-        .cache_dir = cache_dir,
-    };
+    var cache = try Cache.initAt(allocator, &io_context, temp_dir.path());
     defer cache.deinit();
 
     const rules = [_][]const u8{"rule1"};
@@ -415,8 +415,11 @@ test "Cache: put and get" {
 test "Cache: get non-existent key returns null" {
     const allocator = std.testing.allocator;
 
+    var io_context = try compat.Context.init(allocator, 1);
+    defer io_context.deinit();
     var cache = Cache{
         .allocator = allocator,
+        .io_context = &io_context,
         .cache_dir = null,
     };
     defer cache.deinit();
@@ -431,17 +434,12 @@ test "Cache: get non-existent key returns null" {
 test "Cache: invalidate removes entry" {
     const allocator = std.testing.allocator;
 
-    const cache_dir = try std.fs.cwd().makeOpenPath("test-cache-tmp2", .{ .iterate = true });
-    defer {
-        std.fs.cwd().deleteTree("test-cache-tmp2") catch |err| {
-            log.warn("failed to clean up test directory: {}", .{err});
-        };
-    }
+    var io_context = try compat.Context.init(allocator, 1);
+    defer io_context.deinit();
+    var temp_dir = compat.TestDir.init();
+    defer temp_dir.cleanup();
 
-    var cache = Cache{
-        .allocator = allocator,
-        .cache_dir = cache_dir,
-    };
+    var cache = try Cache.initAt(allocator, &io_context, temp_dir.path());
     defer cache.deinit();
 
     const rules = [_][]const u8{"rule1"};
@@ -457,17 +455,12 @@ test "Cache: invalidate removes entry" {
 test "Cache: clear removes all entries" {
     const allocator = std.testing.allocator;
 
-    const cache_dir = try std.fs.cwd().makeOpenPath("test-cache-tmp3", .{ .iterate = true });
-    defer {
-        std.fs.cwd().deleteTree("test-cache-tmp3") catch |err| {
-            log.warn("failed to clean up test directory: {}", .{err});
-        };
-    }
+    var io_context = try compat.Context.init(allocator, 1);
+    defer io_context.deinit();
+    var temp_dir = compat.TestDir.init();
+    defer temp_dir.cleanup();
 
-    var cache = Cache{
-        .allocator = allocator,
-        .cache_dir = cache_dir,
-    };
+    var cache = try Cache.initAt(allocator, &io_context, temp_dir.path());
     defer cache.deinit();
 
     const rules = [_][]const u8{"rule1"};
@@ -489,8 +482,11 @@ test "Cache: clear removes all entries" {
 test "Cache: handles access denied gracefully" {
     const allocator = std.testing.allocator;
 
+    var io_context = try compat.Context.init(allocator, 1);
+    defer io_context.deinit();
     var cache = Cache{
         .allocator = allocator,
+        .io_context = &io_context,
         .cache_dir = null,
     };
     defer cache.deinit();

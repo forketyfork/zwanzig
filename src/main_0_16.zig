@@ -12,6 +12,19 @@ pub const std_options = std.Options{
     .log_level = @enumFromInt(@intFromEnum(build_options.log_level)),
 };
 
+pub fn main(init: std.process.Init) !void {
+    const allocator = init.gpa;
+    const args: []const []const u8 = try init.minimal.args.toSlice(init.arena.allocator());
+
+    const cli_args = cli_run.parseCliArgs(compat.defaultContext(), allocator, args);
+    defer args_mod.freeCliArgs(allocator, cli_args);
+
+    var io_context = try compat.Context.init(allocator, cli_args.thread_count);
+    defer io_context.deinit();
+
+    try cli_run.runParsed(allocator, cli_args, &io_context);
+}
+
 test {
     _ = @import("ir.zig");
     _ = @import("cfg.zig");
@@ -30,21 +43,4 @@ test {
     _ = @import("cli/config_merge.zig");
     _ = @import("cli/registry.zig");
     _ = @import("cli/run.zig");
-}
-
-pub fn main() !void {
-    var gpa = std.heap.GeneralPurposeAllocator(.{ .thread_safe = true }){};
-    defer _ = gpa.deinit();
-    const allocator = gpa.allocator();
-
-    const args = try std.process.argsAlloc(allocator);
-    defer std.process.argsFree(allocator, args);
-
-    const cli_args = cli_run.parseCliArgs(compat.defaultContext(), allocator, args);
-    defer args_mod.freeCliArgs(allocator, cli_args);
-
-    var io_context = try compat.Context.init(allocator, cli_args.thread_count);
-    defer io_context.deinit();
-
-    try cli_run.runParsed(allocator, cli_args, &io_context);
 }

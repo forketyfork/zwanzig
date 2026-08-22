@@ -1,5 +1,21 @@
 # Development notes
 
+## Zig toolchains
+
+The default development shell uses Zig 0.15.2:
+
+```bash
+nix develop
+```
+
+The migration shell uses Zig 0.16.0:
+
+```bash
+nix develop .#zig016
+```
+
+Run `just test` and `just lint` in both shells when changing code that touches the embedded frontend or its compatibility adapters.
+
 ## macOS SDK workaround
 
 On macOS 26.x hosts the active `MacOSX.sdk/usr/lib/libSystem.tbd` only advertises `arm64e-macos`, so Zig 0.15.2 cannot link the build runner and emits a long list of undefined libSystem symbols (`__availability_version_check`, `_realpath$DARWIN_EXTSN`, etc.). Upstream tracker: <https://codeberg.org/ziglang/zig/issues/31756>.
