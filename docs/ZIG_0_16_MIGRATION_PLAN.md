@@ -653,13 +653,13 @@ one canonical Code Scanning upload.
 
 #### Acceptance criteria
 
-- [ ] A code-changing pull request shows two build legs, one for each pinned
+- [x] A code-changing pull request shows two build legs, one for each pinned
   frontend, and the aggregate job fails if either leg fails.
-- [ ] Both legs execute `just test` and `just lint`; the canonical leg uploads
+- [x] Both legs execute `just test` and `just lint`; the canonical leg uploads
   exactly one SARIF file.
-- [ ] The cache key contains the frontend identity and no 0.15.2 cache path is
+- [x] The cache key contains the frontend identity and no 0.15.2 cache path is
   restored for a 0.16.0 job.
-- [ ] The workflow YAML remains valid, and the local equivalents
+- [x] The workflow YAML remains valid, and the local equivalents
   `nix develop -c just ci` and `nix develop .#zig016 -c just ci` pass.
 
 ---

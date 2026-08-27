@@ -50,7 +50,18 @@ jobs:
   build-matrix:
     needs: changes
     if: needs.changes.outputs.code == 'true'
+    name: build (${{ matrix.zig_version }})
     runs-on: ubuntu-latest
+    # Zig 0.15.2 is the canonical formatter and SARIF producer; both legs
+    # still run the complete `just ci` suite against their embedded frontend.
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - zig_version: '0.15.2'
+            nix_flake: '.'
+          - zig_version: '0.16.0'
+            nix_flake: '.#zig016'
     env:
       ZIG_GLOBAL_CACHE_DIR: ${{ github.workspace }}/zwanzig/.zig-cache
       ZIG_LOCAL_CACHE_DIR: ${{ github.workspace }}/zwanzig/.zig-cache/local
@@ -69,9 +80,17 @@ jobs:
         uses: actions/cache@v6
         with:
           path: zwanzig/.zig-cache
-          key: zig-${{ runner.os }}-${{ hashFiles('zwanzig/build.zig', 'zwanzig/build.zig.zon', 'zwanzig/src/**', 'zwanzig/test/**', 'zwanzig/flake.lock') }}
+          key: >-
+            zig-${{ runner.os }}-${{ matrix.zig_version }}-${{
+            hashFiles(
+              'zwanzig/build.zig',
+              'zwanzig/build.zig.zon',
+              'zwanzig/src/**',
+              'zwanzig/test/**',
+              'zwanzig/flake.lock'
+            ) }}
           restore-keys: |
-            zig-${{ runner.os }}-
+            zig-${{ runner.os }}-${{ matrix.zig_version }}-
 
       - name: Cache Nix store
         uses: cachix/cachix-action@v17
@@ -82,14 +101,15 @@ jobs:
       - name: Build, test, lint
         run: |
           for i in 1 2 3; do
-            nix develop --accept-flake-config --command just ci && break
+            nix develop "${{ matrix.nix_flake }}" \
+              --accept-flake-config --command just ci && break
             if [ $i -eq 3 ]; then exit 1; fi
             sleep 5
           done
         working-directory: zwanzig
 
       - name: Upload SARIF results
-        if: always()
+        if: always() && matrix.zig_version == '0.15.2'
         uses: github/codeql-action/upload-sarif@v4.37.7
         with:
           sarif_file: zwanzig/results.sarif
@@ -102,7 +122,8 @@ jobs:
     steps:
       - name: Check result
         run: |
-          if [[ "${{ needs.documentation-versions.result }}" != "success" ]]; then
+          documentation_result="${{ needs.documentation-versions.result }}"
+          if [[ "$documentation_result" != "success" ]]; then
             echo "Documentation version check failed"
             exit 1
           fi
