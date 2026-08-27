@@ -1,4 +1,5 @@
 const std = @import("std");
+const compat = @import("../compat.zig");
 const args_mod = @import("args.zig");
 const config = @import("../config.zig");
 const RuleFilter = @import("../rule_filter.zig").RuleFilter;
@@ -22,10 +23,10 @@ fn defaultRuleFilter(allocator: std.mem.Allocator) !RuleFilter {
     return .{ .blocklist = rule_names };
 }
 
-pub fn mergeConfig(allocator: std.mem.Allocator, cli_args: CliArgs) !MergedConfig {
+pub fn mergeConfig(io_context: *compat.Context, allocator: std.mem.Allocator, cli_args: CliArgs) !MergedConfig {
     const config_path = cli_args.config_path orelse ".zwanzig.json";
 
-    var loaded_config = config.loadConfig(allocator, config_path) catch |err| {
+    var loaded_config = config.loadConfig(io_context, allocator, config_path) catch |err| {
         if (err == config.ConfigError.FileNotFound and cli_args.config_path == null) {
             const rule_filter = switch (cli_args.rule_filter) {
                 .none => try defaultRuleFilter(allocator),
@@ -147,12 +148,13 @@ pub fn freeMergedConfig(allocator: std.mem.Allocator, cli_args: CliArgs, merged:
 
 test "mergeConfig: CLI overrides config allowlist" {
     const allocator = std.testing.allocator;
+    const io_context = compat.defaultContext();
 
-    var tmp_dir = std.testing.tmpDir(.{});
+    var tmp_dir = compat.TestDir.init();
     defer tmp_dir.cleanup();
 
     var tmp_path_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const tmp_path = try tmp_dir.dir.realpath(".", &tmp_path_buf);
+    const tmp_path = try std.fmt.bufPrint(&tmp_path_buf, "{s}", .{tmp_dir.path()});
 
     var config_path_buf: [std.fs.max_path_bytes]u8 = undefined;
     const config_path = try std.fmt.bufPrint(&config_path_buf, "{s}/.zwanzig.json", .{tmp_path});
@@ -162,7 +164,7 @@ test "mergeConfig: CLI overrides config allowlist" {
         \\  "enabled_rules": ["empty-catch"]
         \\}
     ;
-    try tmp_dir.dir.writeFile(.{ .sub_path = ".zwanzig.json", .data = config_content });
+    try tmp_dir.writeFile(".zwanzig.json", config_content);
 
     const cli_allowlist = [_][]const u8{"dupe-import"};
     const cli_args = CliArgs{
@@ -182,7 +184,7 @@ test "mergeConfig: CLI overrides config allowlist" {
         .thread_count = 1,
     };
 
-    const result = try mergeConfig(allocator, cli_args);
+    const result = try mergeConfig(io_context, allocator, cli_args);
     defer freeMergedConfig(allocator, cli_args, result);
 
     switch (result.rule_filter) {
@@ -196,12 +198,13 @@ test "mergeConfig: CLI overrides config allowlist" {
 
 test "mergeConfig: uses config when no CLI filter" {
     const allocator = std.testing.allocator;
+    const io_context = compat.defaultContext();
 
-    var tmp_dir = std.testing.tmpDir(.{});
+    var tmp_dir = compat.TestDir.init();
     defer tmp_dir.cleanup();
 
     var tmp_path_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const tmp_path = try tmp_dir.dir.realpath(".", &tmp_path_buf);
+    const tmp_path = try std.fmt.bufPrint(&tmp_path_buf, "{s}", .{tmp_dir.path()});
 
     var config_path_buf: [std.fs.max_path_bytes]u8 = undefined;
     const config_path = try std.fmt.bufPrint(&config_path_buf, "{s}/.zwanzig.json", .{tmp_path});
@@ -211,7 +214,7 @@ test "mergeConfig: uses config when no CLI filter" {
         \\  "disabled_rules": ["todo"]
         \\}
     ;
-    try tmp_dir.dir.writeFile(.{ .sub_path = ".zwanzig.json", .data = config_content });
+    try tmp_dir.writeFile(".zwanzig.json", config_content);
 
     const cli_args = CliArgs{
         .paths = &.{},
@@ -230,7 +233,7 @@ test "mergeConfig: uses config when no CLI filter" {
         .thread_count = 1,
     };
 
-    const result = try mergeConfig(allocator, cli_args);
+    const result = try mergeConfig(io_context, allocator, cli_args);
     defer freeMergedConfig(allocator, cli_args, result);
 
     switch (result.rule_filter) {

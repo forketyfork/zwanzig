@@ -1,4 +1,6 @@
 const std = @import("std");
+const builtin = @import("builtin");
+const compat = @import("../compat.zig");
 const source_mod = @import("../source.zig");
 const type_info_mod = @import("../types/type_info.zig");
 const decls_mod = @import("decls.zig");
@@ -305,10 +307,7 @@ pub const ZirBridge = struct {
         var pending: std.ArrayList(Zir.Inst.Index) = .empty;
         defer pending.deinit(allocator);
 
-        var root_iter = zir.declIterator(.main_struct_inst);
-        while (root_iter.next()) |decl_inst| {
-            pending.append(allocator, decl_inst) catch return null;
-        }
+        compat.zir.appendDecls(allocator, zir, .main_struct_inst, &pending) catch return null;
 
         var contents: Zir.DeclContents = .init;
         defer contents.deinit(allocator);
@@ -325,10 +324,7 @@ pub const ZirBridge = struct {
 
             zir.findTrackable(allocator, &contents, decl_inst) catch return null;
             for (contents.explicit_types.items) |type_inst| {
-                var type_iter = zir.declIterator(type_inst);
-                while (type_iter.next()) |nested_decl| {
-                    pending.append(allocator, nested_decl) catch return null;
-                }
+                compat.zir.appendDecls(allocator, zir, type_inst, &pending) catch return null;
             }
         }
 
@@ -593,7 +589,7 @@ pub const ZirBridge = struct {
                     break :blk decls_len;
                 } else 0;
                 extra_index += captures_len * 2;
-                if (small.has_backing_int) {
+                if (compat.zir.structDeclHasBackingInt(small)) {
                     const backing_int_body_len = zir.extra[extra_index];
                     extra_index += 1;
                     if (backing_int_body_len == 0) {
@@ -656,13 +652,13 @@ pub const ZirBridge = struct {
                 const small: Zir.Inst.UnionDecl.Small = @bitCast(extended.small);
                 const extra = zir.extraData(Zir.Inst.UnionDecl, extended.operand);
                 var extra_index = extra.end;
-                extra_index += @intFromBool(small.has_tag_type);
+                extra_index += @intFromBool(compat.zir.unionDeclHasTagType(small));
                 const captures_len = if (small.has_captures_len) blk: {
                     const captures_len = zir.extra[extra_index];
                     extra_index += 1;
                     break :blk captures_len;
                 } else 0;
-                const body_len = if (small.has_body_len) blk: {
+                const body_len = if (compat.zir.unionDeclHasArgTypeBody(small)) blk: {
                     const body_len = zir.extra[extra_index];
                     extra_index += 1;
                     break :blk body_len;
@@ -682,13 +678,13 @@ pub const ZirBridge = struct {
                 const small: Zir.Inst.EnumDecl.Small = @bitCast(extended.small);
                 const extra = zir.extraData(Zir.Inst.EnumDecl, extended.operand);
                 var extra_index = extra.end;
-                extra_index += @intFromBool(small.has_tag_type);
+                extra_index += @intFromBool(compat.zir.enumDeclHasTagType(small));
                 const captures_len = if (small.has_captures_len) blk: {
                     const captures_len = zir.extra[extra_index];
                     extra_index += 1;
                     break :blk captures_len;
                 } else 0;
-                const body_len = if (small.has_body_len) blk: {
+                const body_len = if (compat.zir.enumDeclHasBodyLen(small)) blk: {
                     const body_len = zir.extra[extra_index];
                     extra_index += 1;
                     break :blk body_len;
@@ -714,103 +710,14 @@ pub const ZirBridge = struct {
         target_offset: Ast.Node.Offset,
         inst: Zir.Inst.Index,
         defers: *std.AutoHashMapUnmanaged(u32, void),
-        comptime kind: enum { normal, err_union },
+        comptime _: enum { normal, err_union },
     ) ?u32 {
-        const inst_data = zir.instructions.items(.data)[@intFromEnum(inst)].pl_node;
-        const extra = zir.extraData(switch (kind) {
-            .normal => Zir.Inst.SwitchBlock,
-            .err_union => Zir.Inst.SwitchBlockErrUnion,
-        }, inst_data.payload_index);
-
-        var extra_index: usize = extra.end;
-
-        const multi_cases_len = if (extra.data.bits.has_multi_cases) blk: {
-            const len = zir.extra[extra_index];
-            extra_index += 1;
-            break :blk len;
-        } else 0;
-
-        if (switch (kind) {
-            .normal => extra.data.bits.any_has_tag_capture,
-            .err_union => extra.data.bits.any_uses_err_capture,
-        }) {
-            extra_index += 1;
-        }
-
-        const has_special = switch (kind) {
-            .normal => extra.data.bits.special_prongs != .none,
-            .err_union => has_special: {
-                const prong_info: Zir.Inst.SwitchBlock.ProngInfo = @bitCast(zir.extra[extra_index]);
-                extra_index += 1;
-                const body = zir.bodySlice(extra_index, prong_info.body_len);
-                extra_index += body.len;
-                if (findZirInstForNodeInBody(allocator, zir, target_offset, body, defers)) |found| return found;
-                break :has_special extra.data.bits.has_else;
-            },
-        };
-
-        if (has_special) {
-            const has_else = if (kind == .normal)
-                extra.data.bits.special_prongs.hasElse()
-            else
-                true;
-            if (has_else) {
-                const prong_info: Zir.Inst.SwitchBlock.ProngInfo = @bitCast(zir.extra[extra_index]);
-                extra_index += 1;
-                const body = zir.bodySlice(extra_index, prong_info.body_len);
-                extra_index += body.len;
-                if (findZirInstForNodeInBody(allocator, zir, target_offset, body, defers)) |found| return found;
-            }
-            if (kind == .normal) {
-                const special_prongs = extra.data.bits.special_prongs;
-                if (special_prongs.hasUnder()) {
-                    var trailing_items_len: u32 = 0;
-                    if (special_prongs.hasOneAdditionalItem()) {
-                        extra_index += 1;
-                    } else if (special_prongs.hasManyAdditionalItems()) {
-                        const items_len = zir.extra[extra_index];
-                        extra_index += 1;
-                        const ranges_len = zir.extra[extra_index];
-                        extra_index += 1;
-                        trailing_items_len = items_len + ranges_len * 2;
-                    }
-                    const prong_info: Zir.Inst.SwitchBlock.ProngInfo = @bitCast(zir.extra[extra_index]);
-                    extra_index += 1 + trailing_items_len;
-                    const body = zir.bodySlice(extra_index, prong_info.body_len);
-                    extra_index += body.len;
-                    if (findZirInstForNodeInBody(allocator, zir, target_offset, body, defers)) |found| return found;
-                }
-            }
-        }
-
-        {
-            const scalar_cases_len = extra.data.bits.scalar_cases_len;
-            for (0..scalar_cases_len) |_| {
-                extra_index += 1;
-                const prong_info: Zir.Inst.SwitchBlock.ProngInfo = @bitCast(zir.extra[extra_index]);
-                extra_index += 1;
-                const body = zir.bodySlice(extra_index, prong_info.body_len);
-                extra_index += body.len;
-                if (findZirInstForNodeInBody(allocator, zir, target_offset, body, defers)) |found| return found;
-            }
-        }
-
-        for (0..multi_cases_len) |_| {
-            const items_len = zir.extra[extra_index];
-            extra_index += 1;
-            const ranges_len = zir.extra[extra_index];
-            extra_index += 1;
-            const prong_info: Zir.Inst.SwitchBlock.ProngInfo = @bitCast(zir.extra[extra_index]);
-            extra_index += 1;
-
-            extra_index += items_len + ranges_len * 2;
-
-            const body = zir.bodySlice(extra_index, prong_info.body_len);
-            extra_index += body.len;
-
+        var bodies: std.ArrayList([]const Zir.Inst.Index) = .empty;
+        defer bodies.deinit(allocator);
+        compat.zir.appendSwitchBodies(allocator, zir, inst, &bodies) catch return null;
+        for (bodies.items) |body| {
             if (findZirInstForNodeInBody(allocator, zir, target_offset, body, defers)) |found| return found;
         }
-
         return null;
     }
 
@@ -1012,12 +919,12 @@ pub const ZirBridge = struct {
                 const token = main_tokens[type_node];
                 if (token >= token_tags.len or token_tags[token] != .identifier) return null;
                 const type_name = extractIdentifier(source, token_starts[token]);
-                const builtin = parseBuiltinType(type_name, zir);
+                const builtin_type = parseBuiltinType(type_name, zir);
                 // If not a builtin type, preserve the type name as type_str
-                if (builtin.kind == .unknown) {
+                if (builtin_type.kind == .unknown) {
                     return .{ .kind = .unknown, .type_str = type_name };
                 }
-                return builtin;
+                return builtin_type;
             },
             .error_union => {
                 // Error union type: T!E or anyerror!T
@@ -1212,11 +1119,13 @@ test "ZirBridge parse error handling" {
 test "ZirBridge rejects source with AstGen compile errors" {
     const allocator = std.testing.allocator;
 
-    // `@Int` is a Zig 0.16 builtin; the 0.15.2 frontend parses it fine but
-    // AstGen records "invalid builtin function" inside the Zir instead of
-    // returning an error. Without the hasCompileErrors guard, loadFromSource
-    // would succeed with incomplete type information.
-    const code: [:0]const u8 = "const T = @Int(.signed, 8);";
+    // Each frontend rejects a builtin introduced by the other frontend. The
+    // parser accepts both spellings, so the error is recorded in ZIR and must
+    // be checked explicitly rather than mistaken for valid type information.
+    const code: [:0]const u8 = if (builtin.zig_version.minor == 16)
+        "const T = @Type(.{});"
+    else
+        "const T = @Int(.signed, 8);";
     var source = Source.init(allocator, "test.zig", code);
     defer source.deinit();
 

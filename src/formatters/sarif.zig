@@ -137,12 +137,12 @@ test "SarifFormatter produces valid JSON" {
 
     var formatter = SarifFormatter.init(allocator, &manager, "1.0.0", &diagnostics);
 
-    var output: std.ArrayList(u8) = .empty;
-    defer output.deinit(allocator);
+    var output: std.Io.Writer.Allocating = .init(allocator);
+    defer output.deinit();
 
-    try formatter.write(output.writer(allocator));
+    try formatter.write(&output.writer);
 
-    const result = output.items;
+    const result = output.written();
     try testing.expect(std.mem.indexOf(u8, result, "\"version\": \"2.1.0\"") != null);
     try testing.expect(std.mem.indexOf(u8, result, "\"name\": \"Zwanzig\"") != null);
     try testing.expect(std.mem.indexOf(u8, result, "\"results\":") != null);
@@ -170,12 +170,12 @@ test "SarifFormatter escapes special characters" {
 
     var formatter = SarifFormatter.init(allocator, &manager, "1.0.0", &diagnostics);
 
-    var output: std.ArrayList(u8) = .empty;
-    defer output.deinit(allocator);
+    var output: std.Io.Writer.Allocating = .init(allocator);
+    defer output.deinit();
 
-    try formatter.write(output.writer(allocator));
+    try formatter.write(&output.writer);
 
-    const result = output.items;
+    const result = output.written();
     // Check that quotes and newlines are properly escaped
     try testing.expect(std.mem.indexOf(u8, result, "\\\"quotes\\\"") != null);
     try testing.expect(std.mem.indexOf(u8, result, "\\n") != null);

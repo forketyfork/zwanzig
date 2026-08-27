@@ -1,4 +1,5 @@
 const std = @import("std");
+const compat = @import("compat.zig");
 const log = std.log.scoped(.file_discovery);
 
 pub const FileDiscoveryError = error{
@@ -16,7 +17,11 @@ const ignored_dirs = [_][]const u8{
     ".gyro",
 };
 
-pub fn discoverFiles(allocator: std.mem.Allocator, paths: []const []const u8) FileDiscoveryError![]const []const u8 {
+pub fn discoverFiles(
+    io_context: *compat.Context,
+    allocator: std.mem.Allocator,
+    paths: []const []const u8,
+) FileDiscoveryError![]const []const u8 {
     var files: std.ArrayList([]const u8) = .empty;
     errdefer {
         for (files.items) |file| {
@@ -27,20 +32,20 @@ pub fn discoverFiles(allocator: std.mem.Allocator, paths: []const []const u8) Fi
 
     if (paths.len == 0) {
         log.debug("discover: walking current directory", .{});
-        try walkDirectory(allocator, &files, ".");
+        try walkDirectory(io_context, allocator, &files, ".");
     } else {
         for (paths) |path| {
             log.debug("discover: input path {s}", .{path});
-            const stat = std.fs.cwd().statFile(path) catch |err| switch (err) {
+            const stat = compat.stat(io_context, path) catch |err| switch (err) {
                 error.FileNotFound => return FileDiscoveryError.FileNotFound,
                 error.AccessDenied => return FileDiscoveryError.AccessDenied,
                 error.NotDir => return FileDiscoveryError.NotDir,
                 else => return FileDiscoveryError.AccessDenied,
             };
 
-            if (stat.kind == .directory) {
+            if (stat == .directory) {
                 log.debug("discover: walking directory {s}", .{path});
-                try walkDirectory(allocator, &files, path);
+                try walkDirectory(io_context, allocator, &files, path);
             } else if (isZigFile(path)) {
                 log.debug("discover: adding file {s}", .{path});
                 const owned = try allocator.dupe(u8, path);
@@ -52,11 +57,17 @@ pub fn discoverFiles(allocator: std.mem.Allocator, paths: []const []const u8) Fi
     return files.toOwnedSlice(allocator);
 }
 
-fn walkDirectory(allocator: std.mem.Allocator, files: *std.ArrayList([]const u8), base_path: []const u8) FileDiscoveryError!void {
-    try walkDirectoryRecursive(allocator, files, base_path, null);
+fn walkDirectory(
+    io_context: *compat.Context,
+    allocator: std.mem.Allocator,
+    files: *std.ArrayList([]const u8),
+    base_path: []const u8,
+) FileDiscoveryError!void {
+    try walkDirectoryRecursive(io_context, allocator, files, base_path, null);
 }
 
 fn walkDirectoryRecursive(
+    io_context: *compat.Context,
     allocator: std.mem.Allocator,
     files: *std.ArrayList([]const u8),
     base_path: []const u8,
@@ -71,17 +82,16 @@ fn walkDirectoryRecursive(
     const dir_to_open = open_path orelse base_path;
     log.debug("walk: open dir {s}", .{dir_to_open});
 
-    var dir = std.fs.cwd().openDir(dir_to_open, .{ .iterate = true }) catch |err| switch (err) {
+    var dir = compat.openDir(io_context, dir_to_open, true) catch |err| switch (err) {
         error.AccessDenied => return FileDiscoveryError.AccessDenied,
         error.FileNotFound => return FileDiscoveryError.FileNotFound,
         error.NotDir => return FileDiscoveryError.NotDir,
         else => return FileDiscoveryError.AccessDenied,
     };
-    defer dir.close();
+    defer compat.closeDir(io_context, &dir);
 
-    var iter = dir.iterate();
     while (true) {
-        const entry = iter.next() catch return FileDiscoveryError.AccessDenied;
+        const entry = compat.nextDir(io_context, &dir) catch return FileDiscoveryError.AccessDenied;
         if (entry) |e| {
             if (e.kind == .directory) {
                 if (shouldIgnoreDir(e.name)) {
@@ -95,7 +105,7 @@ fn walkDirectoryRecursive(
                 defer allocator.free(new_relative);
 
                 log.debug("walk: enter dir {s}", .{new_relative});
-                try walkDirectoryRecursive(allocator, files, base_path, new_relative);
+                try walkDirectoryRecursive(io_context, allocator, files, base_path, new_relative);
             } else if (e.kind == .file and isZigFile(e.name)) {
                 const full_path = if (relative_path) |rel|
                     std.fmt.allocPrint(allocator, "{s}/{s}/{s}", .{ base_path, rel, e.name }) catch return FileDiscoveryError.OutOfMemory
@@ -167,9 +177,10 @@ test "shouldIgnoreDir" {
 
 test "discoverFiles: explicit files" {
     const allocator = std.testing.allocator;
+    const io_context = compat.defaultContext();
 
     const paths = [_][]const u8{"src/main.zig"};
-    const files = try discoverFiles(allocator, &paths);
+    const files = try discoverFiles(io_context, allocator, &paths);
     defer freeDiscoveredFiles(allocator, files);
 
     try std.testing.expectEqual(@as(usize, 1), files.len);
@@ -178,9 +189,10 @@ test "discoverFiles: explicit files" {
 
 test "discoverFiles: walks directory" {
     const allocator = std.testing.allocator;
+    const io_context = compat.defaultContext();
 
     const paths = [_][]const u8{"src"};
-    const files = try discoverFiles(allocator, &paths);
+    const files = try discoverFiles(io_context, allocator, &paths);
     defer freeDiscoveredFiles(allocator, files);
 
     try std.testing.expect(files.len > 0);
@@ -197,9 +209,10 @@ test "discoverFiles: walks directory" {
 
 test "discoverFiles: empty paths walks current directory" {
     const allocator = std.testing.allocator;
+    const io_context = compat.defaultContext();
 
     const paths = [_][]const u8{};
-    const files = try discoverFiles(allocator, &paths);
+    const files = try discoverFiles(io_context, allocator, &paths);
     defer freeDiscoveredFiles(allocator, files);
 
     try std.testing.expect(files.len > 0);
@@ -207,9 +220,10 @@ test "discoverFiles: empty paths walks current directory" {
 
 test "discoverFiles: non-zig files filtered" {
     const allocator = std.testing.allocator;
+    const io_context = compat.defaultContext();
 
     const paths = [_][]const u8{"."};
-    const files = try discoverFiles(allocator, &paths);
+    const files = try discoverFiles(io_context, allocator, &paths);
     defer freeDiscoveredFiles(allocator, files);
 
     for (files) |f| {

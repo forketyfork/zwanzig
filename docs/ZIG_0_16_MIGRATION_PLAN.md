@@ -483,8 +483,8 @@ Scope agreed in advance; task-level detail deliberately deferred until the Task 
 
 ### Phase 2 — Compat seams
 
-- **`build.zig` dual-toolchain support:** `comptime` branches on `builtin.zig_version` for the `std.fs.cwd()` calls (lines 87, 132). Cannot use `src/compat/` — build scripts compile before the project.
-- **Compat module layout** (extends Task 4's `src/compat.zig` into the selector):
+- [x] **`build.zig` dual-toolchain support:** `comptime` branches on `builtin.zig_version` for the `std.fs.cwd()` calls (lines 87, 132). Cannot use `src/compat/` — build scripts compile before the project.
+- [x] **Compat module layout** (extends Task 4's `src/compat.zig` into the selector):
 
   ```
   src/compat.zig                  # gate + comptime selection by builtin.zig_version
@@ -492,20 +492,20 @@ Scope agreed in advance; task-level detail deliberately deferred until the Task 
   src/compat/zig_0_16/{io,executor,zir}.zig
   ```
 
-- **I/O context:** an application context created in `src/main.zig` and threaded through `cli/run.zig` → analyzer → cache/config/discovery/formatters/DOT output. On 0.16 it owns a `std.Io` (from `std.Io.Threaded`); on 0.15.2 it exposes the same interface with no `Io` inside.
-- **Executor:** common interface over 0.15.2 `std.Thread.Pool`+`WaitGroup`+`Thread.Mutex` vs 0.16 `std.Io.Threaded`+`std.Io.Group`+`Io.Mutex` (all four 0.16 names verified present). `--threads <n>` maps to the pool size / `Io.Threaded` concurrency limit; behavior equivalence covered by tests.
-- **ZIR adapters:** move the `declIterator`-based decoding from `src/zir/bridge.zig` into `compat/zig_0_15/zir.zig`; implement `compat/zig_0_16/zir.zig` on `typeDecls`/`getStructDecl`/`getUnionDecl`/`getEnumDecl`/`getSwitchBlock` (names verified). Both adapters produce the existing `TypeInfo`/`DeclInfo`/`FnInfo` models from `src/zir/decls.zig`; the analyzer and checkers stay version-agnostic.
+- [x] **I/O context:** an application context created in `src/main.zig` and threaded through `cli/run.zig` → analyzer → cache/config/discovery/formatters/DOT output. On 0.16 it owns a `std.Io` (from `std.Io.Threaded`); on 0.15.2 it exposes the same interface with no `Io` inside.
+- [x] **Executor:** common interface over 0.15.2 `std.Thread.Pool`+`WaitGroup`+`Thread.Mutex` vs 0.16 `std.Io.Threaded`+`std.Io.Group`+`Io.Mutex` (all four 0.16 names verified present). `--threads <n>` maps to the pool size / `Io.Threaded` concurrency limit; behavior equivalence covered by tests.
+- [x] **ZIR adapters:** move the `declIterator`-based decoding from `src/zir/bridge.zig` into `compat/zig_0_15/zir.zig`; implement `compat/zig_0_16/zir.zig` on `typeDecls`/`getStructDecl`/`getUnionDecl`/`getEnumDecl`/`getSwitchBlock` (names verified). Both adapters produce the existing `TypeInfo`/`DeclInfo`/`FnInfo` models from `src/zir/decls.zig`; the analyzer and checkers stay version-agnostic.
 
 ### Phase 3 — Test matrix
 
 - Fixture matrix: shared-syntax fixtures asserted identical under both builds; a 0.15-only typed fixture (`@Type`); a 0.16-only typed fixture (`@Int`); tests asserting the mismatch cases fail with the explicit Task 1 error (not incomplete results). Version-conditional fixture registration via `src/compat.zig`.
-- Full `just test` + `just lint` green under both shells, including equivalence of rule results, caching, and `--threads` behavior.
+- [x] Full `just test` + `just lint` green under both shells, including equivalence of rule results, caching, and `--threads` behavior.
 
 ### Phase 4 — CI, distribution, docs
 
 - CI matrix: `just test` + `just lint` under `nix develop` (0.15.2) and `nix develop .#zig016`; one canonical `zig fmt --check` version (default 0.15.2 until switched deliberately — the two versions' formatters may disagree).
 - Release workflow: every platform × both frontends; artifact naming `zwanzig-<tag>-zig-<frontend>-<platform>` (e.g. `zwanzig-v0.15.0-zig-0.16.0-macos-aarch64`).
-- Docs: support matrix and "which binary do I download" guidance in `README.md`/`docs/USAGE.md`; CHANGELOG entries; update `CLAUDE.md` build instructions.
+- [x] Docs: support matrix and "which binary do I download" guidance in `README.md`/`docs/USAGE.md`; CHANGELOG entries; update `CLAUDE.md` build instructions.
 
 ### Open decision points (decide during Task 7 review)
 

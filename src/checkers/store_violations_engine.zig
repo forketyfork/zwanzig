@@ -91,13 +91,13 @@ pub const StoreViolationsEngineChecker = struct {
 
         // Dump visualizations if requested
         if (context.dump_exploded_graph_dir) |dir| {
-            engine_mod.dot.writeExplodedGraphToFile(engine.getGraph(), dir, src.getFilePath(), cfg_handle.cfg.fn_name, allocator);
+            engine_mod.dot.writeExplodedGraphToFile(engine.getGraph(), context.io_context, dir, src.getFilePath(), cfg_handle.cfg.fn_name, allocator);
         }
         if (context.dump_annotated_cfg_dir) |dir| {
-            engine_mod.dot.writeAnnotatedCfgToFile(engine.getGraph(), dir, src.getFilePath(), cfg_handle.cfg.fn_name, allocator);
+            engine_mod.dot.writeAnnotatedCfgToFile(engine.getGraph(), context.io_context, dir, src.getFilePath(), cfg_handle.cfg.fn_name, allocator);
         }
         if (context.dump_path_trace_dir) |dir| {
-            engine_mod.dot.writePathTracesToFile(engine.getGraph(), dir, src.getFilePath(), cfg_handle.cfg.fn_name, allocator);
+            engine_mod.dot.writePathTracesToFile(engine.getGraph(), context.io_context, dir, src.getFilePath(), cfg_handle.cfg.fn_name, allocator);
         }
 
         if (!run_ok) return;

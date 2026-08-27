@@ -1,4 +1,5 @@
 const std = @import("std");
+const compat = @import("../compat.zig");
 const graph = @import("graph.zig");
 const dot = @import("dot.zig");
 const builder_control_flow = @import("builder/control_flow.zig");
@@ -30,6 +31,7 @@ pub const CfgBuilder = struct {
     type_context: ?*TypeContext = null,
     /// Optional directory to dump CFG DOT files for visualization.
     dump_cfg_dir: ?[]const u8 = null,
+    io_context: *compat.Context = compat.defaultContext(),
     pub const type_annotation = builder_type_annotation.mixin(@This());
     pub const statements = builder_statements.mixin(@This());
     pub const control_flow = builder_control_flow.mixin(@This());
@@ -67,6 +69,10 @@ pub const CfgBuilder = struct {
     /// When set, buildFromFn automatically writes DOT files after building CFGs.
     pub fn setDumpCfgDir(self: *CfgBuilder, dir: ?[]const u8) void {
         self.dump_cfg_dir = dir;
+    }
+
+    pub fn setIoContext(self: *CfgBuilder, io_context: *compat.Context) void {
+        self.io_context = io_context;
     }
 
     /// Build CFG for a function body starting at the given AST node.
@@ -160,7 +166,7 @@ pub const CfgBuilder = struct {
 
         // Auto-dump CFG if configured
         if (self.dump_cfg_dir) |dir| {
-            dot.writeToFile(&cfg, dir, source.getFilePath(), self.allocator);
+            dot.writeToFile(&cfg, dir, source.getFilePath(), self.io_context, self.allocator);
         }
 
         return cfg;

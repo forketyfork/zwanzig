@@ -26,6 +26,10 @@ Extract the archive and either add its directory to `PATH` or invoke the executa
 
 On Windows, run `.\zwanzig.exe src\` instead.
 
+### Zig frontend compatibility
+
+Zwanzig embeds the Zig frontend used to build it. Source builds support Zig 0.15.2 and Zig 0.16.0, and select the matching compatibility layer automatically. Run `zwanzig --version` to see which frontend a binary contains; use a binary built with the frontend version that matches the Zig language version used by your project.
+
 ### Zig build dependency
 
 Pin Zwanzig as a dependency in your Zig project. This command adds the dependency URL and content hash to `build.zig.zon`:

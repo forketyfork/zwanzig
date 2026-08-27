@@ -1,5 +1,6 @@
 const std = @import("std");
 const src = @import("src");
+const compat = src.compat;
 const Source = src.Source;
 const Diagnostic = src.Diagnostic;
 const Severity = src.Severity;
@@ -338,24 +339,20 @@ pub fn runCheckerFixturesInDir(
     checker: *const Checker,
     dir_path: []const u8,
 ) !void {
-    var dir = std.fs.cwd().openDir(dir_path, .{ .iterate = true }) catch |err| {
+    const io_context = compat.defaultContext();
+    var dir = compat.openDir(io_context, dir_path, true) catch |err| {
         std.debug.print("Failed to open fixture directory: {s}: {}\n", .{ dir_path, err });
         return err;
     };
-    defer dir.close();
+    defer compat.closeDir(io_context, &dir);
 
-    var iter = dir.iterate();
-    while (try iter.next()) |entry| {
-        if (entry.kind != .file) continue;
-        if (!std.mem.endsWith(u8, entry.name, ".zig")) continue;
+    while (try compat.nextDir(io_context, &dir)) |entry| {
+        if (entry.kind != .file or !std.mem.endsWith(u8, entry.name, ".zig")) continue;
 
         const fixture_path = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ dir_path, entry.name });
         defer allocator.free(fixture_path);
 
-        const file = try dir.openFile(entry.name, .{});
-        defer file.close();
-
-        const content = try file.readToEndAllocOptions(allocator, 1024 * 1024, null, .of(u8), 0);
+        const content = try compat.readFileAlloc(io_context, allocator, fixture_path, 1024 * 1024);
         defer allocator.free(content);
 
         try runCheckerFixture(allocator, checker, fixture_path, content);
@@ -368,24 +365,20 @@ pub fn runFixturesInDir(
     rule: *const Rule,
     dir_path: []const u8,
 ) !void {
-    var dir = std.fs.cwd().openDir(dir_path, .{ .iterate = true }) catch |err| {
+    const io_context = compat.defaultContext();
+    var dir = compat.openDir(io_context, dir_path, true) catch |err| {
         std.debug.print("Failed to open fixture directory: {s}: {}\n", .{ dir_path, err });
         return err;
     };
-    defer dir.close();
+    defer compat.closeDir(io_context, &dir);
 
-    var iter = dir.iterate();
-    while (try iter.next()) |entry| {
-        if (entry.kind != .file) continue;
-        if (!std.mem.endsWith(u8, entry.name, ".zig")) continue;
+    while (try compat.nextDir(io_context, &dir)) |entry| {
+        if (entry.kind != .file or !std.mem.endsWith(u8, entry.name, ".zig")) continue;
 
         const fixture_path = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ dir_path, entry.name });
         defer allocator.free(fixture_path);
 
-        const file = try dir.openFile(entry.name, .{});
-        defer file.close();
-
-        const content = try file.readToEndAllocOptions(allocator, 1024 * 1024, null, .of(u8), 0);
+        const content = try compat.readFileAlloc(io_context, allocator, fixture_path, 1024 * 1024);
         defer allocator.free(content);
 
         try runFixture(allocator, rule, fixture_path, content);

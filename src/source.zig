@@ -98,7 +98,7 @@ pub const Source = struct {
 
     /// Attempt to load ZIR-based type information for this source.
     /// This is a lazy operation - ZIR is only generated on first access.
-    /// Returns null if ZIR generation fails (e.g., due to parse errors).
+    /// Returns null if parsing or AstGen fails, including unsupported syntax.
     /// Subsequent calls return the cached result.
     pub fn zirBridge(self: *Source) ?*const ZirBridge {
         if (!self.zir_load_attempted) {

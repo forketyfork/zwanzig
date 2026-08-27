@@ -1,4 +1,5 @@
 const std = @import("std");
+const compat = @import("compat.zig");
 const RuleFilter = @import("rule_filter.zig").RuleFilter;
 
 /// Resource model kind matching store.zig ResourceKind
@@ -195,19 +196,15 @@ pub const ConfigError = error{
     MutuallyExclusiveFields,
 };
 
-pub fn loadConfig(allocator: std.mem.Allocator, path: []const u8) ConfigError!Config {
-    const file = std.fs.cwd().openFile(path, .{}) catch {
-        return ConfigError.FileNotFound;
-    };
-    defer file.close();
-
-    const content = file.readToEndAlloc(allocator, 1024 * 1024) catch |err| {
+pub fn loadConfig(io_context: *compat.Context, allocator: std.mem.Allocator, path: []const u8) ConfigError!Config {
+    const content = compat.readFileAlloc(io_context, allocator, path, 1024 * 1024) catch |err| {
         return switch (err) {
+            error.FileNotFound => ConfigError.FileNotFound,
             error.OutOfMemory => ConfigError.OutOfMemory,
             else => ConfigError.InvalidJson,
         };
     };
-    defer allocator.free(content);
+    defer allocator.free(content.ptr[0 .. content.len + 1]);
 
     return parseConfig(allocator, content);
 }
@@ -696,7 +693,7 @@ test "parseConfig: enabled_rules contains non-string" {
 
 test "loadConfig: file not found" {
     const allocator = std.testing.allocator;
-    const result = loadConfig(allocator, "nonexistent.json");
+    const result = loadConfig(compat.defaultContext(), allocator, "nonexistent.json");
     try std.testing.expectError(ConfigError.FileNotFound, result);
 }
 

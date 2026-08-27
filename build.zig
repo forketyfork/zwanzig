@@ -1,10 +1,15 @@
 const std = @import("std");
+const builtin = @import("builtin");
 
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
     const log_level = b.option(std.log.Level, "log-level", "Set log level") orelse .info;
     const version = readPackageVersion(b);
+    const main_source = if (builtin.zig_version.minor == 16)
+        b.path("src/main_0_16.zig")
+    else
+        b.path("src/main.zig");
 
     const options = b.addOptions();
     options.addOption(std.log.Level, "log_level", log_level);
@@ -17,7 +22,7 @@ pub fn build(b: *std.Build) void {
     });
 
     const exe_module = b.createModule(.{
-        .root_source_file = b.path("src/main.zig"),
+        .root_source_file = main_source,
         .target = target,
         .optimize = optimize,
         .link_libc = true,
@@ -42,7 +47,7 @@ pub fn build(b: *std.Build) void {
     run_step.dependOn(&run_cmd.step);
 
     const test_module = b.createModule(.{
-        .root_source_file = b.path("src/main.zig"),
+        .root_source_file = main_source,
         .target = target,
         .optimize = optimize,
         .link_libc = true,
@@ -84,36 +89,87 @@ pub fn build(b: *std.Build) void {
 
 fn readPackageVersion(b: *std.Build) []const u8 {
     const zon_path = "build.zig.zon";
-    const zon_contents = std.fs.cwd().readFileAllocOptions(
-        b.allocator,
-        zon_path,
-        1024 * 1024,
-        null,
-        .of(u8),
-        0,
-    ) catch |err| {
-        std.debug.panic("failed to read {s}: {s}", .{ zon_path, @errorName(err) });
-    };
+    const zon_contents: [:0]u8 = if (builtin.zig_version.minor == 16)
+        std.Io.Dir.cwd().readFileAllocOptions(
+            b.graph.io,
+            zon_path,
+            b.allocator,
+            std.Io.Limit.limited(1024 * 1024),
+            .of(u8),
+            0,
+        ) catch |err| {
+            std.debug.panic("failed to read {s}: {s}", .{ zon_path, @errorName(err) });
+        }
+    else
+        std.fs.cwd().readFileAllocOptions(
+            b.allocator,
+            zon_path,
+            1024 * 1024,
+            null,
+            .of(u8),
+            0,
+        ) catch |err| {
+            std.debug.panic("failed to read {s}: {s}", .{ zon_path, @errorName(err) });
+        };
+
     defer b.allocator.free(zon_contents);
 
     const PackageMetadata = struct {
         version: []const u8,
     };
 
-    const parsed = std.zon.parse.fromSlice(
-        PackageMetadata,
-        b.allocator,
-        zon_contents,
-        null,
-        .{ .ignore_unknown_fields = true },
-    ) catch |err| {
-        std.debug.panic("failed to parse {s}: {s}", .{ zon_path, @errorName(err) });
-    };
+    const parsed = if (builtin.zig_version.minor == 16)
+        std.zon.parse.fromSliceAlloc(
+            PackageMetadata,
+            b.allocator,
+            zon_contents,
+            null,
+            .{ .ignore_unknown_fields = true },
+        ) catch |err| {
+            std.debug.panic("failed to parse {s}: {s}", .{ zon_path, @errorName(err) });
+        }
+    else
+        std.zon.parse.fromSlice(
+            PackageMetadata,
+            b.allocator,
+            zon_contents,
+            null,
+            .{ .ignore_unknown_fields = true },
+        ) catch |err| {
+            std.debug.panic("failed to parse {s}: {s}", .{ zon_path, @errorName(err) });
+        };
     defer std.zon.parse.free(b.allocator, parsed);
 
     return b.allocator.dupe(u8, parsed.version) catch {
         std.debug.panic("failed to allocate package version", .{});
     };
+}
+
+fn addFixtureCheck(
+    b: *std.Build,
+    step: *std.Build.Step,
+    target: std.Build.ResolvedTarget,
+    optimize: std.builtin.OptimizeMode,
+    dir_path: []const u8,
+    entry_name: []const u8,
+) void {
+    const full_path = b.allocator.alloc(u8, dir_path.len + 1 + entry_name.len) catch return;
+    @memcpy(full_path[0..dir_path.len], dir_path);
+    full_path[dir_path.len] = '/';
+    @memcpy(full_path[dir_path.len + 1 ..], entry_name);
+
+    const check_module = b.createModule(.{
+        .root_source_file = b.path(full_path),
+        .target = target,
+        .optimize = optimize,
+    });
+
+    const check = b.addObject(.{
+        .name = entry_name,
+        .root_module = check_module,
+    });
+
+    step.dependOn(&check.step);
 }
 
 fn addFixtureChecks(b: *std.Build, step: *std.Build.Step, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode) void {
@@ -129,28 +185,26 @@ fn addFixtureChecks(b: *std.Build, step: *std.Build.Step, target: std.Build.Reso
     };
 
     for (fixture_dirs) |dir_path| {
-        var dir = std.fs.cwd().openDir(dir_path, .{ .iterate = true }) catch continue;
-        defer dir.close();
+        if (builtin.zig_version.minor == 16) {
+            var dir = std.Io.Dir.cwd().openDir(b.graph.io, dir_path, .{ .iterate = true }) catch continue;
+            defer dir.close(b.graph.io);
 
-        var iter = dir.iterate();
-        while (iter.next() catch null) |entry| {
-            if (entry.kind != .file) continue;
-            if (!std.mem.endsWith(u8, entry.name, ".zig")) continue;
+            var iter = dir.iterate();
+            while (iter.next(b.graph.io) catch null) |entry| {
+                if (entry.kind != .file) continue;
+                if (!std.mem.endsWith(u8, entry.name, ".zig")) continue;
+                addFixtureCheck(b, step, target, optimize, dir_path, entry.name);
+            }
+        } else {
+            var dir = std.fs.cwd().openDir(dir_path, .{ .iterate = true }) catch continue;
+            defer dir.close();
 
-            const full_path = std.fmt.allocPrint(b.allocator, "{s}/{s}", .{ dir_path, entry.name }) catch continue;
-
-            const check_module = b.createModule(.{
-                .root_source_file = b.path(full_path),
-                .target = target,
-                .optimize = optimize,
-            });
-
-            const check = b.addObject(.{
-                .name = entry.name,
-                .root_module = check_module,
-            });
-
-            step.dependOn(&check.step);
+            var iter = dir.iterate();
+            while (iter.next() catch null) |entry| {
+                if (entry.kind != .file) continue;
+                if (!std.mem.endsWith(u8, entry.name, ".zig")) continue;
+                addFixtureCheck(b, step, target, optimize, dir_path, entry.name);
+            }
         }
     }
 }

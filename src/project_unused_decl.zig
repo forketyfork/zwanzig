@@ -1,4 +1,5 @@
 const std = @import("std");
+const compat = @import("compat.zig");
 const ast_walk = @import("ast_walk.zig");
 const call_resolver = @import("analysis/call_resolver.zig");
 const Diagnostic = @import("diagnostic.zig").Diagnostic;
@@ -60,12 +61,14 @@ const DeclInfo = struct {
 };
 
 const ProjectContext = struct {
+    io_context: *compat.Context,
     allocator: std.mem.Allocator,
     files: []const import_resolver.File,
     api_roots: std.ArrayList(usize) = .empty,
 
-    fn init(allocator: std.mem.Allocator, files: []const import_resolver.File) ProjectContext {
+    fn init(io_context: *compat.Context, allocator: std.mem.Allocator, files: []const import_resolver.File) ProjectContext {
         return .{
+            .io_context = io_context,
             .allocator = allocator,
             .files = files,
         };
@@ -112,19 +115,10 @@ const ProjectContext = struct {
     fn collectExternalBuildRootSourceFiles(self: *ProjectContext, build_path: []const u8) !void {
         if (import_resolver.findFileIndexByPath(self.files, build_path) != null) return;
 
-        const file = std.fs.cwd().openFile(build_path, .{}) catch return;
-        defer file.close();
-
         const max_size = 10 * 1024 * 1024;
         // Sentinel needed for std.zig.Ast.parse; free accounts for sentinel byte below.
         // zwanzig-disable-next-line: sentinel-alloc
-        const content = try file.readToEndAllocOptions(
-            self.allocator,
-            max_size,
-            null,
-            std.mem.Alignment.of(u8),
-            0,
-        );
+        const content = compat.readFileAlloc(self.io_context, self.allocator, build_path, max_size) catch return;
         defer self.allocator.free(content.ptr[0 .. content.len + 1]);
 
         var tree = try std.zig.Ast.parse(self.allocator, content, .zig);
@@ -158,6 +152,7 @@ const ProjectContext = struct {
 };
 
 pub fn analyze(
+    io_context: *compat.Context,
     allocator: std.mem.Allocator,
     file_paths: []const []const u8,
     diagnostics: *std.ArrayList(Diagnostic),
@@ -173,19 +168,10 @@ pub fn analyze(
     for (file_paths) |path| {
         if (containsPath(files.items, path)) continue;
 
-        const file = try std.fs.cwd().openFile(path, .{});
-        defer file.close();
-
         const max_size = 10 * 1024 * 1024;
         // Sentinel needed for std.zig.Ast.parse; free accounts for sentinel byte below.
         // zwanzig-disable-next-line: sentinel-alloc
-        const content = try file.readToEndAllocOptions(
-            allocator,
-            max_size,
-            null,
-            std.mem.Alignment.of(u8),
-            0,
-        );
+        const content = try compat.readFileAlloc(io_context, allocator, path, max_size);
         errdefer allocator.free(content.ptr[0 .. content.len + 1]);
 
         var tree = try std.zig.Ast.parse(allocator, content, .zig);
@@ -207,7 +193,7 @@ pub fn analyze(
     const resolver_files = try makeResolverFiles(allocator, files.items);
     defer allocator.free(resolver_files);
 
-    var project = ProjectContext.init(allocator, resolver_files);
+    var project = ProjectContext.init(io_context, allocator, resolver_files);
     defer project.deinit();
     try project.collectApiRoots();
 

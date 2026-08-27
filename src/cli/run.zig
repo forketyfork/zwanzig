@@ -1,5 +1,6 @@
 const std = @import("std");
 const builtin = @import("builtin");
+const compat = @import("../compat.zig");
 const analyzer_mod = @import("../analyzer.zig");
 const Diagnostic = @import("../diagnostic.zig").Diagnostic;
 const file_discovery = @import("../file_discovery.zig");
@@ -12,7 +13,7 @@ const registry = @import("registry.zig");
 
 const Analyzer = analyzer_mod.Analyzer;
 const AnalysisResult = analyzer_mod.AnalysisResult;
-const CliArgs = args_mod.CliArgs;
+pub const CliArgs = args_mod.CliArgs;
 const CliError = args_mod.CliError;
 const BuildMetadata = build_metadata.BuildMetadata;
 const MergedConfig = merge_mod.MergedConfig;
@@ -43,12 +44,18 @@ fn workerTask(file_index: usize, ctx: *WorkerContext) void {
     }
 }
 
-fn workerTaskWrapper(file_index: usize, ctx: *WorkerContext, wg: *std.Thread.WaitGroup) void {
-    defer wg.finish();
+fn workerTaskAdapter(file_index: usize, context: *anyopaque) void {
+    const ctx: *WorkerContext = @ptrCast(@alignCast(context));
     workerTask(file_index, ctx);
 }
 
-fn analyzeFilesParallel(analyzer: *Analyzer, files: []const []const u8, thread_count: usize, allocator: std.mem.Allocator) !void {
+fn analyzeFilesParallel(
+    analyzer: *Analyzer,
+    files: []const []const u8,
+    thread_count: usize,
+    allocator: std.mem.Allocator,
+    io_context: *compat.Context,
+) !void {
     if (files.len == 0) return;
 
     const results = try allocator.alloc(?AnalysisResult, files.len);
@@ -66,29 +73,13 @@ fn analyzeFilesParallel(analyzer: *Analyzer, files: []const []const u8, thread_c
         .errors = errors,
     };
 
-    var pool: std.Thread.Pool = undefined;
-    try pool.init(.{
-        .allocator = allocator,
-        .n_jobs = @intCast(thread_count),
-    });
-    defer pool.deinit();
+    var executor = try compat.Executor.init(io_context, allocator, thread_count);
+    defer executor.deinit();
 
-    var wg: std.Thread.WaitGroup = .{};
-    var spawn_error: ?anyerror = null;
     for (0..files.len) |i| {
-        wg.start();
-        pool.spawn(workerTaskWrapper, .{ i, &ctx, &wg }) catch |err| {
-            wg.finish();
-            spawn_error = err;
-            break;
-        };
+        try executor.spawn(workerTaskAdapter, i, @ptrCast(&ctx));
     }
-
-    pool.waitAndWork(&wg);
-
-    if (spawn_error) |err| {
-        return err;
-    }
+    try executor.wait();
 
     var first_error: ?anyerror = null;
     for (0..files.len) |i| {
@@ -109,56 +100,76 @@ fn analyzeFilesParallel(analyzer: *Analyzer, files: []const []const u8, thread_c
     }
 }
 
-fn printUsage() !void {
-    const stdout = std.fs.File.stdout().deprecatedWriter();
-    try stdout.writeAll("Usage: zwanzig [options] [path...]\n");
-    try stdout.writeAll("\nA static analyzer for Zig code.\n");
-    try stdout.writeAll("\nOptions:\n");
-    try stdout.writeAll("  -h, --help        Show this help message and exit\n");
-    try stdout.writeAll("  --version         Show version and exit\n");
-    try stdout.writeAll("  --file <path>     Specify a file or directory to analyze (can be repeated)\n");
-    try stdout.writeAll("  --do <rule>       Only run the specified rule (can be repeated)\n");
-    try stdout.writeAll("  --skip <rule>     Skip the specified rule (can be repeated)\n");
-    try stdout.writeAll("  --target <triple> Specify target triple (e.g., x86_64-linux-gnu)\n");
-    try stdout.writeAll("  --config <path>   Path to config file (default: .zwanzig.json)\n");
-    try stdout.writeAll("  --format <format> Output format: 'text', 'json', or 'sarif' (default: text)\n");
-    try stdout.writeAll("  --max-steps <n>   Max worklist steps per engine run\n");
-    try stdout.writeAll("  --max-states-per-point <n> Max unique states per CFG point\n");
-    try stdout.writeAll("  --use-widening    Enable widening for convergence (default: on)\n");
-    try stdout.writeAll("  --cache           Enable incremental caching\n");
-    try stdout.writeAll("  --threads <n>     Number of threads for parallel analysis (default: CPU count)\n");
-    try stdout.writeAll("  --dump-cfg <dir>  Dump CFG DOT files to directory for visualization\n");
-    try stdout.writeAll("  --dump-exploded-graph <dir>  Dump exploded graph (all states) as DOT\n");
-    try stdout.writeAll("  --dump-annotated-cfg <dir>   Dump CFG with state annotations as DOT\n");
-    try stdout.writeAll("  --dump-path-trace <dir>      Dump path traces to violations as DOT\n");
-    try stdout.writeAll("\n  Note: --do and --skip are mutually exclusive and override config file.\n");
-    try stdout.writeAll("\nArguments:\n");
-    try stdout.writeAll("  [path...]         Files or directories to analyze (default: current directory)\n");
-    try stdout.writeAll("\nIgnored directories:\n");
-    try stdout.writeAll("  zig-cache/, zig-out/, .zigmod/, .gyro/\n");
+fn printUsage(io_context: *compat.Context) !void {
+    var stdout: compat.OutputWriter = undefined;
+    stdout.init(io_context, false);
+    defer stdout.deinit();
+    const writer = stdout.writer();
+    try writer.writeAll("Usage: zwanzig [options] [path...]\n");
+    try writer.writeAll("\nA static analyzer for Zig code.\n");
+    try writer.writeAll("\nOptions:\n");
+    try writer.writeAll("  -h, --help        Show this help message and exit\n");
+    try writer.writeAll("  --version         Show version and exit\n");
+    try writer.writeAll("  --file <path>     Specify a file or directory to analyze (can be repeated)\n");
+    try writer.writeAll("  --do <rule>       Only run the specified rule (can be repeated)\n");
+    try writer.writeAll("  --skip <rule>     Skip the specified rule (can be repeated)\n");
+    try writer.writeAll("  --target <triple> Specify target triple (e.g., x86_64-linux-gnu)\n");
+    try writer.writeAll("  --config <path>   Path to config file (default: .zwanzig.json)\n");
+    try writer.writeAll("  --format <format> Output format: 'text', 'json', or 'sarif' (default: text)\n");
+    try writer.writeAll("  --max-steps <n>   Max worklist steps per engine run\n");
+    try writer.writeAll("  --max-states-per-point <n> Max unique states per CFG point\n");
+    try writer.writeAll("  --use-widening    Enable widening for convergence (default: on)\n");
+    try writer.writeAll("  --cache           Enable incremental caching\n");
+    try writer.writeAll("  --threads <n>     Number of threads for parallel analysis (default: CPU count)\n");
+    try writer.writeAll("  --dump-cfg <dir>  Dump CFG DOT files to directory for visualization\n");
+    try writer.writeAll("  --dump-exploded-graph <dir>  Dump exploded graph (all states) as DOT\n");
+    try writer.writeAll("  --dump-annotated-cfg <dir>   Dump CFG with state annotations as DOT\n");
+    try writer.writeAll("  --dump-path-trace <dir>      Dump path traces to violations as DOT\n");
+    try writer.writeAll("\n  Note: --do and --skip are mutually exclusive and override config file.\n");
+    try writer.writeAll("\nArguments:\n");
+    try writer.writeAll("  [path...]         Files or directories to analyze (default: current directory)\n");
+    try writer.writeAll("\nIgnored directories:\n");
+    try writer.writeAll("  zig-cache/, zig-out/, .zigmod/, .gyro/\n");
+    try stdout.flush();
 }
 
-fn printVersion() !void {
+fn printVersion(io_context: *compat.Context) !void {
     var buffer: [128]u8 = undefined;
     const message = try std.fmt.bufPrint(
         &buffer,
         "zwanzig {s} (Zig frontend {s})\n",
         .{ build_options.version, builtin.zig_version_string },
     );
-    try std.fs.File.stdout().writeAll(message);
+    var stdout: compat.OutputWriter = undefined;
+    stdout.init(io_context, false);
+    defer stdout.deinit();
+    try stdout.writer().writeAll(message);
+    try stdout.flush();
 }
 
-fn parseCliArgs(allocator: std.mem.Allocator, args: []const []const u8) CliArgs {
+fn writeError(io_context: *compat.Context, message: []const u8) void {
+    var stderr: compat.OutputWriter = undefined;
+    stderr.init(io_context, true);
+    defer stderr.deinit();
+    // This is already an error-reporting path; preserving the original error
+    // is more useful than replacing it with a failure to write stderr.
+    // zwanzig-disable-next-line: empty-catch-engine
+    stderr.writer().writeAll(message) catch {};
+    // zwanzig-disable-next-line: empty-catch-engine
+    stderr.flush() catch {};
+}
+
+pub fn parseCliArgs(io_context: *compat.Context, allocator: std.mem.Allocator, args: []const []const u8) CliArgs {
     // Check for --help or -h before parsing other arguments
     for (args[1..]) |arg| {
         if (std.mem.eql(u8, arg, "--help") or std.mem.eql(u8, arg, "-h")) {
-            printUsage() catch |err| {
+            printUsage(io_context) catch |err| {
                 std.debug.print("Failed to print usage: {s}\n", .{@errorName(err)});
             };
             std.process.exit(0);
         }
         if (std.mem.eql(u8, arg, "--version")) {
-            printVersion() catch |err| {
+            printVersion(io_context) catch |err| {
                 std.debug.print("Failed to print version: {s}\n", .{@errorName(err)});
             };
             std.process.exit(0);
@@ -166,28 +177,27 @@ fn parseCliArgs(allocator: std.mem.Allocator, args: []const []const u8) CliArgs 
     }
 
     return args_mod.parseArgs(allocator, args) catch |err| {
-        const stderr = std.fs.File.stderr().deprecatedWriter();
         // zwanzig-disable: empty-catch-engine
         // We are on an error-exit path; failing to write to stderr (e.g. closed
         // pipe) must not mask the original error or crash the process.
         switch (err) {
             CliError.MutuallyExclusiveFlags => {
-                stderr.writeAll("Error: --do and --skip are mutually exclusive\n") catch {};
+                writeError(io_context, "Error: --do and --skip are mutually exclusive\n");
             },
             CliError.MissingFlagValue => {
-                stderr.writeAll("Error: Flag requires a value\n") catch {};
+                writeError(io_context, "Error: Flag requires a value\n");
             },
             CliError.OutOfMemory => {
-                stderr.writeAll("Error: Out of memory\n") catch {};
+                writeError(io_context, "Error: Out of memory\n");
             },
             CliError.InvalidTargetTriple => {
-                stderr.writeAll("Error: Invalid target triple format\n") catch {};
+                writeError(io_context, "Error: Invalid target triple format\n");
             },
             CliError.InvalidOutputFormat => {
-                stderr.writeAll("Error: Invalid output format (use 'text', 'json', or 'sarif')\n") catch {};
+                writeError(io_context, "Error: Invalid output format (use 'text', 'json', or 'sarif')\n");
             },
             CliError.InvalidNumericValue => {
-                stderr.writeAll("Error: Invalid numeric value for limit\n") catch {};
+                writeError(io_context, "Error: Invalid numeric value for limit\n");
             },
         }
         // zwanzig-enable: empty-catch-engine
@@ -195,25 +205,24 @@ fn parseCliArgs(allocator: std.mem.Allocator, args: []const []const u8) CliArgs 
     };
 }
 
-fn loadMergedConfig(allocator: std.mem.Allocator, cli_args: CliArgs) MergedConfig {
-    return merge_mod.mergeConfig(allocator, cli_args) catch |err| {
-        const stderr = std.fs.File.stderr().deprecatedWriter();
+fn loadMergedConfig(io_context: *compat.Context, allocator: std.mem.Allocator, cli_args: CliArgs) MergedConfig {
+    return merge_mod.mergeConfig(io_context, allocator, cli_args) catch |err| {
         // zwanzig-disable: empty-catch-engine
         switch (err) {
             config.ConfigError.InvalidJson => {
-                stderr.writeAll("Error: Invalid JSON in config file\n") catch {};
+                writeError(io_context, "Error: Invalid JSON in config file\n");
             },
             config.ConfigError.InvalidConfigFormat => {
-                stderr.writeAll("Error: Invalid config file format\n") catch {};
+                writeError(io_context, "Error: Invalid config file format\n");
             },
             config.ConfigError.MutuallyExclusiveFields => {
-                stderr.writeAll("Error: Config file has both enabled_rules and disabled_rules\n") catch {};
+                writeError(io_context, "Error: Config file has both enabled_rules and disabled_rules\n");
             },
             config.ConfigError.FileNotFound => {
-                stderr.writeAll("Error: Config file not found\n") catch {};
+                writeError(io_context, "Error: Config file not found\n");
             },
             config.ConfigError.OutOfMemory => {
-                stderr.writeAll("Error: Out of memory\n") catch {};
+                writeError(io_context, "Error: Out of memory\n");
             },
         }
         // zwanzig-enable: empty-catch-engine
@@ -221,19 +230,18 @@ fn loadMergedConfig(allocator: std.mem.Allocator, cli_args: CliArgs) MergedConfi
     };
 }
 
-fn discoverInputFiles(allocator: std.mem.Allocator, cli_args: CliArgs) []const []const u8 {
-    return file_discovery.discoverFiles(allocator, cli_args.paths) catch |err| {
-        const stderr = std.fs.File.stderr().deprecatedWriter();
+fn discoverInputFiles(io_context: *compat.Context, allocator: std.mem.Allocator, cli_args: CliArgs) []const []const u8 {
+    return file_discovery.discoverFiles(io_context, allocator, cli_args.paths) catch |err| {
         // zwanzig-disable: empty-catch-engine
         switch (err) {
             file_discovery.FileDiscoveryError.FileNotFound => {
-                stderr.writeAll("Error: File or directory not found\n") catch {};
+                writeError(io_context, "Error: File or directory not found\n");
             },
             file_discovery.FileDiscoveryError.AccessDenied => {
-                stderr.writeAll("Error: Access denied\n") catch {};
+                writeError(io_context, "Error: Access denied\n");
             },
             else => {
-                stderr.writeAll("Error: Failed to discover files\n") catch {};
+                writeError(io_context, "Error: Failed to discover files\n");
             },
         }
         // zwanzig-enable: empty-catch-engine
@@ -291,37 +299,30 @@ fn configureAnalyzer(analyzer: *Analyzer, cli_args: CliArgs, final_config: Merge
     }
 }
 
-pub fn run() !void {
-    var gpa = std.heap.GeneralPurposeAllocator(.{ .thread_safe = true }){};
-    defer _ = gpa.deinit();
-    const allocator = gpa.allocator();
-
-    const args = try std.process.argsAlloc(allocator);
-    defer std.process.argsFree(allocator, args);
-
-    const cli_args = parseCliArgs(allocator, args);
-    defer args_mod.freeCliArgs(allocator, cli_args);
-
-    const final_config = loadMergedConfig(allocator, cli_args);
+pub fn runParsed(allocator: std.mem.Allocator, cli_args: CliArgs, io_context: *compat.Context) !void {
+    const final_config = loadMergedConfig(io_context, allocator, cli_args);
     defer merge_mod.freeMergedConfig(allocator, cli_args, final_config);
 
-    const files = discoverInputFiles(allocator, cli_args);
+    const files = discoverInputFiles(io_context, allocator, cli_args);
     defer file_discovery.freeDiscoveredFiles(allocator, files);
     log.info("discovered {d} file(s)", .{files.len});
 
     if (files.len == 0) {
-        const stderr = std.fs.File.stderr().deprecatedWriter();
-        try stderr.writeAll("No .zig files found.\n");
+        var stderr: compat.OutputWriter = undefined;
+        stderr.init(io_context, true);
+        defer stderr.deinit();
+        try stderr.writer().writeAll("No .zig files found.\n");
+        try stderr.flush();
         return;
     }
 
-    var analyzer = Analyzer.init(allocator);
+    var analyzer = Analyzer.initWithContext(allocator, io_context);
     defer analyzer.deinit();
 
     try configureAnalyzer(&analyzer, cli_args, final_config);
 
     log.info("analyzing with {d} rule(s) using {d} thread(s)", .{ analyzer.totalCheckerCount(), cli_args.thread_count });
-    try analyzeFilesParallel(&analyzer, files, cli_args.thread_count, allocator);
+    try analyzeFilesParallel(&analyzer, files, cli_args.thread_count, allocator, io_context);
     try analyzer.analyzeProjectUnusedDecls(files);
     log.info("analysis complete", .{});
     analyzer.logAnalysisStats();
