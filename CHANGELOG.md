@@ -17,6 +17,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 
 - README installation instructions now cover release binaries, Zig build dependencies, and GitHub Actions usage. (PR #103)
+- Dual-frontend release artifacts are maintained through v0.17.x; v0.18.0 is planned as the first release without a Zig 0.15.2 artifact. (PR #116)
 
 ### Fixed
 
