@@ -31,7 +31,18 @@ else
     echo "just not found; running zig build/test/lint equivalents" >&2
     zig build
     zig build test
-    zig fmt --check src/
+    zig_version="$(zig version)"
+    case "$zig_version" in
+        0.15.2)
+            zig fmt --check src/
+            ;;
+        0.16.0)
+            ;;
+        *)
+            echo "unsupported Zig formatter version: $zig_version" >&2
+            exit 1
+            ;;
+    esac
     zig build run -- src/**/*.zig
 fi
 

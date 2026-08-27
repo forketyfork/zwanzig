@@ -12,8 +12,8 @@ Zwanzig is a static analyzer and linter for Zig. It uses a modular rule-based ar
 zig build              # Build the project
 zig build test         # Run all tests
 zig build run -- <files>  # Run analyzer on files
-zig fmt src            # Format code
-zig fmt --check src/   # Check formatting (lint)
+zig fmt src            # Format code with the canonical Zig 0.15.2 shell
+zig fmt --check src/   # Check canonical formatting
 ```
 
 With `just` (recommended):
@@ -39,7 +39,9 @@ For any code changes, run both tests and linting:
 
 All new rules/checkers must have test fixtures.
 
-All code must be formatted with `zig fmt`.
+All code must be formatted with `zig fmt` from Zig 0.15.2, which is the
+project's sole canonical formatter. The Zig 0.16.0 shell is used to validate
+the alternate embedded frontend; its formatter output is not authoritative.
 
 Any changes or additions to the existing rules/checkers must be documented.
 
@@ -141,7 +143,7 @@ zig build run -- test/fixtures/store_violations_engine/fixture_name.zig
 
 ## Code Style
 
-- Zig standard formatting via `zig fmt`
+- Zig standard formatting via Zig 0.15.2's `zig fmt` (the canonical formatter)
 - Tests colocated with implementation in the same file
 - Rules in `src/rules/` directory, one file per rule
 - **ArrayList initialization**: In Zig 0.15.2, use `.empty` to initialize ArrayLists (e.g., `var list: std.ArrayList(T) = .empty;`). The allocator is passed to methods like `append(allocator, item)` and `deinit(allocator)`. Do NOT use the old `.init(allocator)` pattern.

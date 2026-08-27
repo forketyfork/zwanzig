@@ -103,7 +103,7 @@ Document what your rule checks, why it matters, and show before/after examples.
 
 ## Code style
 
-- Run `zig fmt` before committing
+- Run `nix develop -c just fmt` before committing
 - Write self-documenting code; use comments sparingly
 - Keep functions small and focused
 
@@ -120,7 +120,7 @@ For any user-visible change, add a short entry to the `## [Unreleased]` section 
 1. Fork the repo
 2. Create a branch (`git checkout -b feature/my-rule`)
 3. Make changes
-4. Run `zig build test` and `zig fmt src/`
+4. Run `nix develop -c just test` and `nix develop -c just fmt`
 5. Update `CHANGELOG.md` if your change is user-visible
 6. Commit with a clear message
 7. Open a PR
