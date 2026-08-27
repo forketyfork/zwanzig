@@ -6,6 +6,18 @@
 zig build
 ```
 
+For a reproducible source build with the Zig 0.15.2 frontend, use the default development shell:
+
+```bash
+nix develop -c just build
+```
+
+To build with the Zig 0.16.0 frontend, select the dedicated shell:
+
+```bash
+nix develop .#zig016 -c just build
+```
+
 ## Run the CLI
 
 If `zwanzig` is on your PATH:
@@ -28,7 +40,7 @@ zwanzig --version
 
 ### Zig frontend compatibility
 
-Zwanzig embeds the Zig frontend used to build it, so frontend-specific syntax is interpreted according to that embedded version. Source builds support exactly Zig 0.15.2 and Zig 0.16.0. The selected frontend is included in `--version`; when analyzing code that uses version-specific language features, use a Zwanzig binary built with the matching frontend.
+Zwanzig embeds the Zig frontend used to build it, so frontend-specific syntax is interpreted according to that embedded version. Source builds support exactly Zig 0.15.2 and Zig 0.16.0. Release archive names include the selected frontend: use an archive containing `zig-0.15.2` for a Zig 0.15.2 project and one containing `zig-0.16.0` for a Zig 0.16.0 project. The selected frontend is also included in `--version`; when analyzing code that uses version-specific language features, use a Zwanzig binary built with the matching frontend.
 
 ### Files and directories
 
