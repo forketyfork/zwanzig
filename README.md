@@ -54,7 +54,7 @@ nix develop .#zig016 -c just build
 Pin Zwanzig as a dependency in your Zig project. This command adds the dependency URL and content hash to `build.zig.zon`:
 
 ```bash
-zig fetch --save=zwanzig https://github.com/forketyfork/zwanzig/archive/refs/tags/v0.14.0.tar.gz
+zig fetch --save=zwanzig https://github.com/forketyfork/zwanzig/archive/refs/tags/v0.15.0.tar.gz
 ```
 
 Add a lint step to `build.zig`:
@@ -95,7 +95,7 @@ permissions:
   security-events: write
 
 env:
-  ZWANZIG_VERSION: v0.14.0
+  ZWANZIG_VERSION: v0.15.0
   ZWANZIG_ZIG_FRONTEND: 0.15.2
 
 jobs:

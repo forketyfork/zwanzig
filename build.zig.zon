@@ -1,6 +1,6 @@
 .{
     .name = .zwanzig,
-    .version = "0.14.0",
+    .version = "0.15.0",
     .fingerprint = 0x82777a3c96d925a2,
     .minimum_zig_version = "0.15.2",
     .dependencies = .{},
