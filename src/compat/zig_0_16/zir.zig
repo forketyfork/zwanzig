@@ -19,6 +19,23 @@ pub fn enumDeclHasTagType(small: std.zig.Zir.Inst.EnumDecl.Small) bool {
     return small.has_tag_type;
 }
 
+pub fn enumDeclHasBodyLen(small: std.zig.Zir.Inst.EnumDecl.Small) bool {
+    return small.has_tag_type;
+}
+
+test "enum body length follows tag type" {
+    const small: std.zig.Zir.Inst.EnumDecl.Small = .{
+        .has_captures_len = false,
+        .has_decls_len = false,
+        .has_fields_len = false,
+        .name_strategy = .parent,
+        .has_tag_type = true,
+        .nonexhaustive = false,
+        .any_field_values = false,
+    };
+    try std.testing.expect(enumDeclHasBodyLen(small));
+}
+
 pub fn appendDecls(
     allocator: std.mem.Allocator,
     zir: std.zig.Zir,

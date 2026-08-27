@@ -684,7 +684,7 @@ pub const ZirBridge = struct {
                     extra_index += 1;
                     break :blk captures_len;
                 } else 0;
-                const body_len = if (compat.zir.enumDeclHasTagType(small)) blk: {
+                const body_len = if (compat.zir.enumDeclHasBodyLen(small)) blk: {
                     const body_len = zir.extra[extra_index];
                     extra_index += 1;
                     break :blk body_len;

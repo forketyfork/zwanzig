@@ -18,7 +18,7 @@ pub const ConsoleFormatter = struct {
     pub fn deinit(self: *ConsoleFormatter) void {
         var value_iter = self.file_cache.valueIterator();
         while (value_iter.next()) |value| {
-            self.allocator.free(value.*.ptr[0 .. value.*.len + 1]);
+            freeSentinelContent(self.allocator, value.*);
         }
         self.file_cache.deinit();
     }
@@ -84,12 +84,16 @@ pub const ConsoleFormatter = struct {
         const loaded = loaded_with_sentinel[0..loaded_with_sentinel.len];
 
         self.file_cache.put(file_path, loaded) catch {
-            self.allocator.free(loaded_with_sentinel);
+            freeSentinelContent(self.allocator, loaded_with_sentinel);
             return null;
         };
         return loaded;
     }
 };
+
+fn freeSentinelContent(allocator: std.mem.Allocator, content: []const u8) void {
+    allocator.free(content.ptr[0 .. content.len + 1]);
+}
 
 fn lineSliceFor(content: []const u8, line_number: usize) ?[]const u8 {
     var line_iter = std.mem.splitScalar(u8, content, '\n');
@@ -118,4 +122,9 @@ test "lineSliceFor strips CR from CRLF" {
     const content = "line1\r\nline2\r\n";
     try std.testing.expectEqualStrings("line1", lineSliceFor(content, 1).?);
     try std.testing.expectEqualStrings("line2", lineSliceFor(content, 2).?);
+}
+
+test "freeSentinelContent frees the sentinel byte" {
+    const content = try std.testing.allocator.allocSentinel(u8, 3, 0);
+    freeSentinelContent(std.testing.allocator, content);
 }
