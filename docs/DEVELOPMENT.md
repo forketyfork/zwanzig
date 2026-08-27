@@ -16,6 +16,20 @@ nix develop .#zig016
 
 Run `just test` and `just lint` in both shells when changing code that touches the embedded frontend or its compatibility adapters.
 
+## Formatting
+
+Zig 0.15.2 is the sole canonical formatter. Format and check source files
+from the default shell:
+
+```bash
+nix develop -c zig fmt src
+nix develop -c zig fmt --check src/
+```
+
+The Zig 0.16.0 shell validates the alternate frontend but does not establish
+a competing formatting baseline. Accordingly, `just lint` checks formatting
+in the 0.15.2 shell and runs the remaining lint checks in the 0.16.0 shell.
+
 ## macOS SDK workaround
 
 On macOS 26.x hosts the active `MacOSX.sdk/usr/lib/libSystem.tbd` only advertises `arm64e-macos`, so Zig 0.15.2 cannot link the build runner and emits a long list of undefined libSystem symbols (`__availability_version_check`, `_realpath$DARWIN_EXTSN`, etc.). Upstream tracker: <https://codeberg.org/ziglang/zig/issues/31756>.

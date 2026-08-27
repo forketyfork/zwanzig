@@ -14,7 +14,7 @@
 
 - Default dev toolchain stays **exactly Zig 0.15.2** (`flake.nix` devShell `default`); `build.zig.zon` keeps `.minimum_zig_version = "0.15.2"`. The upper/exact support boundary is enforced by `src/compat.zig`, not by `build.zig.zon`.
 - Every task ends with `just test` and `just lint` green under the default (0.15.2) shell. `just lint` runs zwanzig on its own source.
-- All code formatted with `zig fmt` (0.15.2 is the canonical formatter unless the canonical-formatter decision in Task 7's "Review decisions required" section changes it).
+- All code formatted with `zig fmt` from Zig 0.15.2, the sole canonical formatter; the 0.16.0 CI leg validates the remaining lint checks and analyzer behavior.
 - ArrayList init uses `.empty`, allocator passed to methods (Zig 0.15.2 style, see CLAUDE.md).
 - No silent degradation: a frontend/language mismatch must produce an explicit failure, never incomplete type information (project rule: no speculative fallbacks).
 - User-visible changes get a `CHANGELOG.md` entry under `## [Unreleased]`.
@@ -473,10 +473,10 @@ git commit -m "docs: add Zig 0.16 migration breakage inventory"
 
 ### Task 7 (checkpoint): Expand Phases 2–4 into a detailed plan
 
-**Status: draft awaiting review.** The compat implementation is already present
-on `main` from the work covered by Tasks 1–6. The remaining work is deliberately
-specified below, but must not be started until the open policy decisions are
-reviewed.
+**Status: reviewed and closed.** The compat implementation is present on
+`main` from the work covered by Tasks 1–6. Tasks 8 and 9 are complete. Task 10's
+dual-frontend release workflow and documentation are implemented; its criteria
+that require an actual release tag remain open until that release is run.
 
 #### Status quo
 
@@ -488,15 +488,12 @@ reviewed.
   macOS SDK workaround and that the 15 `check-fixtures` failures are pre-existing
   on both toolchains.
 - The shared fixture suite, cache behavior, executor test, and `just test` /
-  `just lint` checks have already passed in both shells, but there is no
-  dedicated fixture proving matching and mismatching frontend syntax.
-- `.github/workflows/build.yml` runs only `nix develop` (Zig 0.15.2), and
-  `.github/workflows/release.yml` creates one 0.15.2 artifact per platform.
-  `README.md` and `docs/USAGE.md` each already have a "Zig frontend
-  compatibility" section explaining that a binary must match the project's Zig
-  version, and `README.md` has a one-archive-per-platform download table — but
-  the release asset names contain no frontend identity, so the guidance cannot
-  yet point at a concrete artifact.
+  `just lint` checks have passed in both shells, and the fixture matrix proves
+  matching and mismatching frontend syntax.
+- `.github/workflows/build.yml` tests both pinned frontends, and
+  `.github/workflows/release.yml` builds one named artifact per platform and
+  frontend. `README.md` and `docs/USAGE.md` identify the matching artifact;
+  release-tag verification is still pending.
 
 #### Objectives
 
@@ -507,27 +504,27 @@ Complete the migration's remaining user-facing contract:
 2. exercise both shells on every code change;
 3. publish independently selectable 0.15.2 and 0.16.0 binaries for every
    supported platform; and
-4. record the support-lifetime, formatting, and launcher decisions before the
-   release workflow is changed.
+4. record the support-lifetime, formatting, and launcher decisions and keep
+   them aligned with the release workflow and contributor documentation.
 
-#### Review decisions required
+#### Review decisions (adopted)
 
-1. **0.15.2 support lifetime:** keep 0.15.2 artifacts indefinitely, or announce
-   a fixed sunset (the existing proposal is two releases after 0.16 support
-   ships). A sunset reduces release and CI cost but creates a migration deadline
-   for users with 0.15 projects.
-2. **Canonical formatter:** retain Zig 0.15.2 as the sole `zig fmt --check`
-   authority, or switch to 0.16.0. The choice determines whether the second
-   CI leg checks formatting or only runs tests and the analyzer lint.
-3. **Launcher:** keep frontend selection explicit in the artifact name and
-   documentation, or add a launcher that detects the project frontend. The
-   launcher is deferred by default because detection and distribution add a
-   separate compatibility surface; it should be revisited only if user demand
-   shows that filename selection is insufficient.
+1. **0.15.2 support lifetime:** retain both frontend artifacts through the
+   v0.17.x release line, and make v0.18.0 the first release without a 0.15.2
+   artifact. With the current v0.14.0 package as the baseline, this gives the
+   first dual-frontend release and two subsequent release lines for migration.
+   A fixed sunset limits the ongoing release and CI matrix while giving users a
+   specific compatibility window.
+2. **Canonical formatter:** keep Zig 0.15.2 as the sole `zig fmt --check`
+   authority. The 0.16.0 CI leg still runs `just lint`, but its formatter check
+   is skipped so formatter differences cannot redefine the repository baseline.
+   This keeps formatting stable while both frontends are supported.
+3. **Launcher:** defer a frontend-detecting launcher. Artifact names and the
+   usage documentation select the frontend explicitly, avoiding another
+   compatibility and distribution surface. Create a separate launcher plan
+   only if user demand shows that filename selection is insufficient.
 
-Unless the review changes them, the implementation slices below use the
-existing proposal: retain both frontends for two subsequent releases, keep
-0.15.2 canonical for formatting, and defer a launcher.
+These decisions close the policy review for the remaining migration work.
 
 Tasks 8–11 below are the expansion this checkpoint produces. Their acceptance
 criteria use checkbox (`- [ ]`) syntax and are the tracking unit for the
@@ -642,10 +639,10 @@ one canonical Code Scanning upload.
   changes do not spend two build slots.
 - Include the frontend in the Zig cache key. A cache created by one compiler
   must not be reused by the other compiler even when the source hash is equal.
-- Invoke `just ci` in both matrix legs. If the canonical formatter decision
-  (Task 7, "Review decisions required") keeps 0.15.2 authoritative, make that
-  policy explicit in the workflow or Justfile rather than allowing a formatter
-  mismatch to become an unexplained 0.16 failure.
+- Invoke `just ci` in both matrix legs. Task 7 keeps 0.15.2 authoritative for
+  formatting, so the workflow and Justfile must make that policy explicit
+  rather than allowing a formatter mismatch to become an unexplained 0.16
+  failure.
 - Upload SARIF from one designated frontend (the canonical 0.15.2 leg) to avoid
   duplicate findings in GitHub Code Scanning; both legs still run analyzer lint.
 - Keep the aggregate `build` job's result checks correct when either matrix leg
@@ -668,10 +665,10 @@ one canonical Code Scanning upload.
 
 #### Status quo
 
-`.github/workflows/release.yml` validates and builds only with Zig 0.15.2. Its
-platform matrix covers Linux x86_64, macOS aarch64, and Windows x86_64, but the
-asset name contains no frontend identity, so a future 0.16.0 binary would be
-indistinguishable from the existing artifact.
+`.github/workflows/release.yml` validates and builds both Zig 0.15.2 and Zig
+0.16.0. Its platform matrix covers Linux x86_64, macOS aarch64, and Windows
+x86_64, and the asset name includes the embedded frontend. The workflow has not
+yet been exercised by an actual release tag on this migration branch.
 
 #### Objectives
 
@@ -710,7 +707,7 @@ make the embedded language frontend unambiguous before download.
   filename, and the 0.15.2 and 0.16.0 artifacts do not overwrite one another.
 - [ ] Both release validation legs pass `scripts/release-check.sh` before
   upload.
-- [ ] README and usage instructions let a user choose the correct binary
+- [x] README and usage instructions let a user choose the correct binary
   without reading the workflow source.
 
 ---
@@ -719,12 +716,11 @@ make the embedded language frontend unambiguous before download.
 
 #### Status quo
 
-Tasks 1–7 are complete and checked off above; Tasks 8–10 (fixture matrix,
-dual-frontend CI, dual-frontend releases) are specified but not yet
-implemented. The 0.15.2 sunset, canonical formatter, and launcher policies
-remain open — the options, rationales, and the default proposal live in
-Task 7's "Review decisions required" section, which is the single place they
-are argued.
+Tasks 1–9 are complete and checked off above. Task 10's dual-frontend release
+workflow, artifact naming, and user documentation are implemented, while the
+criteria requiring a real release tag remain open. Task 7's support lifetime,
+canonical formatter, and launcher decisions are now adopted and recorded in
+its "Review decisions (adopted)" section.
 
 #### Objectives
 
@@ -742,17 +738,17 @@ actually passed.
   (which currently states no formatter policy), and the CI workflow so
   contributors know which `zig fmt` output is expected.
 - If the launcher remains deferred, retain explicit artifact names and record
-  the closing rationale in Task 7's "Review decisions required" section rather
+  the closing rationale in Task 7's "Review decisions (adopted)" section rather
   than restating it elsewhere; per that section, a launcher becomes a separate
   plan only if user demand shows filename selection is insufficient.
 
 #### Acceptance criteria
 
-- [ ] The three decisions have a durable record with rationale and no
+- [x] The three decisions have a durable record with rationale and no
   contradictory statements in `README.md`, `docs/USAGE.md`, `CLAUDE.md`, or
   `docs/DEVELOPMENT.md`.
-- [ ] The checkboxes in this plan — the Task 1–7 steps and the Task 8–11
+- [x] The checkboxes in this plan — the Task 1–7 steps and the Task 8–11
   acceptance criteria — match the code, CI, and release workflow that actually
   shipped.
-- [ ] The final implementation run ends with `just test` and `just lint` under
+- [x] The final implementation run ends with `just test` and `just lint` under
   both pinned shells.

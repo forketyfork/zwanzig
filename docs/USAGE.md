@@ -42,6 +42,10 @@ zwanzig --version
 
 Zwanzig embeds the Zig frontend used to build it, so frontend-specific syntax is interpreted according to that embedded version. Source builds support exactly Zig 0.15.2 and Zig 0.16.0. Release archive names include the selected frontend: use an archive containing `zig-0.15.2` for a Zig 0.15.2 project and one containing `zig-0.16.0` for a Zig 0.16.0 project. The selected frontend is also included in `--version`; when analyzing code that uses version-specific language features, use a Zwanzig binary built with the matching frontend.
 
+Both frontend artifacts are maintained through the v0.17.x release line.
+v0.18.0 is the first planned release without a Zig 0.15.2 artifact; users on
+Zig 0.15.2 should stay on the latest v0.17.x release.
+
 ### Files and directories
 
 ```bash

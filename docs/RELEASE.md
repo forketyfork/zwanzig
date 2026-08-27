@@ -15,3 +15,14 @@
    ```
 
 4. Tag and publish the release from the checked commit.
+
+## Frontend artifacts
+
+The release workflow builds one archive per supported platform for each
+embedded frontend: Zig 0.15.2 and Zig 0.16.0. The frontend is part of every
+archive name (`zig-0.15.2` or `zig-0.16.0`), and the workflow validates both
+frontends before publishing any assets.
+
+The Zig 0.15.2 artifact is maintained through v0.17.x. v0.18.0 is the first
+planned release that drops it; users who still analyze Zig 0.15.2 projects
+should remain on the latest v0.17.x release.

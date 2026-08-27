@@ -33,6 +33,10 @@ On Windows, run `.\zwanzig.exe src\` instead.
 
 Zwanzig embeds the Zig frontend used to build it. Source builds support Zig 0.15.2 and Zig 0.16.0, and select the matching compatibility layer automatically. Release archive names include the embedded frontend version, so choose the `zig-0.15.2` archive for a Zig 0.15.2 project and the `zig-0.16.0` archive for a Zig 0.16.0 project. Run `zwanzig --version` to verify which frontend a binary contains.
 
+The two frontend artifacts are maintained through the v0.17.x release line.
+v0.18.0 is the first planned release without a Zig 0.15.2 artifact; users on
+Zig 0.15.2 should stay on the latest v0.17.x release.
+
 To build from source with the 0.15.2 frontend, use the default shell:
 
 ```bash
