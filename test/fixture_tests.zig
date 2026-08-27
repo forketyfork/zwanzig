@@ -5,6 +5,7 @@ const runCheckerFixturesInDir = fixture_runner.runCheckerFixturesInDir;
 
 // Import all rules from the src module
 const src = @import("src");
+const compat = src.compat;
 const DupeImportRule = src.rules.dupe_import.DupeImportRule;
 const TodoCommentRule = src.rules.todo_comment.TodoCommentRule;
 const EmptyErrdeferRule = src.rules.empty_errdefer.EmptyErrdeferRule;
@@ -24,6 +25,53 @@ const StoreViolationsEngineChecker = src.checkers.store_violations_engine.StoreV
 const StackEscapeEngineChecker = src.checkers.stack_escape_engine.StackEscapeEngineChecker;
 const DivideByZeroEngineChecker = src.checkers.divide_by_zero_engine.DivideByZeroEngineChecker;
 const SliceBoundsEngineChecker = src.checkers.slice_bounds_engine.SliceBoundsEngineChecker;
+
+fn frontendFixtureName(frontend: compat.Frontend) []const u8 {
+    return switch (frontend) {
+        .zig_0_15 => "zig_0_15.zig",
+        .zig_0_16 => "zig_0_16.zig",
+    };
+}
+
+fn runFrontendTypeInfoFixture(
+    allocator: std.mem.Allocator,
+    fixture_name: []const u8,
+    expected_type_info: bool,
+) !void {
+    const io_context = compat.defaultContext();
+    const fixture_path = try std.fmt.allocPrint(allocator, "test/fixtures/frontend_matrix/{s}", .{fixture_name});
+    defer allocator.free(fixture_path);
+
+    const content = try compat.readFileAlloc(io_context, allocator, fixture_path, 1024 * 1024);
+    defer allocator.free(content);
+
+    var source = src.Source.init(allocator, fixture_path, content);
+    defer source.deinit();
+
+    try std.testing.expectEqual(expected_type_info, source.hasTypeInfo());
+}
+
+test "frontend matrix preserves shared rule diagnostics" {
+    const allocator = std.testing.allocator;
+    const io_context = compat.defaultContext();
+    const fixture_path = "test/fixtures/frontend_matrix/shared.zig";
+    const content = try compat.readFileAlloc(io_context, allocator, fixture_path, 1024 * 1024);
+    defer allocator.free(content);
+
+    try fixture_runner.runFixture(allocator, &TodoCommentRule.rule, fixture_path, content);
+}
+
+test "frontend matrix provides type information only for the matching frontend" {
+    const allocator = std.testing.allocator;
+    const matching_fixture = frontendFixtureName(compat.frontend);
+    const mismatching_fixture = frontendFixtureName(switch (compat.frontend) {
+        .zig_0_15 => .zig_0_16,
+        .zig_0_16 => .zig_0_15,
+    });
+
+    try runFrontendTypeInfoFixture(allocator, matching_fixture, true);
+    try runFrontendTypeInfoFixture(allocator, mismatching_fixture, false);
+}
 
 test "dupe_import fixtures" {
     try runFixturesInDir(std.testing.allocator, &DupeImportRule.rule, "test/fixtures/dupe_import");

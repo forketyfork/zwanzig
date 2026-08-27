@@ -173,6 +173,16 @@ fn addFixtureCheck(
 }
 
 fn addFixtureChecks(b: *std.Build, step: *std.Build.Step, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode) void {
+    addFixtureCheck(b, step, target, optimize, "test/fixtures/frontend_matrix", "shared.zig");
+    addFixtureCheck(
+        b,
+        step,
+        target,
+        optimize,
+        "test/fixtures/frontend_matrix",
+        if (builtin.zig_version.minor == 16) "zig_0_16.zig" else "zig_0_15.zig",
+    );
+
     const fixture_dirs = [_][]const u8{
         "test/fixtures/empty_catch",
         "test/fixtures/dupe_import",
