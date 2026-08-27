@@ -24,6 +24,17 @@ comptime {
     }
 }
 
+pub const Frontend = enum {
+    zig_0_15,
+    zig_0_16,
+};
+
+pub const frontend: Frontend = switch (builtin.zig_version.minor) {
+    15 => .zig_0_15,
+    16 => .zig_0_16,
+    else => unreachable,
+};
+
 pub const io = if (builtin.zig_version.minor == 16)
     @import("compat/zig_0_16/io.zig")
 else

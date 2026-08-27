@@ -604,16 +604,16 @@ the same diagnostic fields under both builds.
 
 #### Acceptance criteria
 
-- [ ] `nix develop -c just test` passes, including the matching and mismatching
+- [x] `nix develop -c just test` passes, including the matching and mismatching
   frontend assertions.
-- [ ] `nix develop .#zig016 -c just test` passes with the inverse fixture
+- [x] `nix develop .#zig016 -c just test` passes with the inverse fixture
   selection.
-- [ ] `nix develop -c zig build check-fixtures` and the equivalent 0.16 command
+- [x] `nix develop -c zig build check-fixtures` and the equivalent 0.16 command
   produce the same baseline failures recorded in
   `docs/internal/ZIG_0_16_INVENTORY.md` (15 at the time of writing) and no new
   failures; the newly added matching fixtures compile successfully. The
   baseline failures remain visible and are not silently filtered.
-- [ ] The shared fixture produces identical expected diagnostic fields in both
+- [x] The shared fixture produces identical expected diagnostic fields in both
   toolchains, and `nix develop -c zig fmt --check test/fixtures/frontend_matrix`
   passes (the canonical 0.15.2 formatter parses the 0.16 fixture too — `@Int`
   fails only at AstGen, not at parse).
