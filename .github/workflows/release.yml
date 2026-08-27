@@ -70,6 +70,19 @@ jobs:
         with:
           version: ${{ matrix.zig_version }}
 
+      - name: Apply Zig 0.15.2 macOS SDK workaround
+        if: runner.os == 'macOS' && matrix.zig_version == '0.15.2'
+        shell: bash
+        run: |
+          unset SDKROOT DEVELOPER_DIR
+          . "$GITHUB_WORKSPACE/scripts/setup-macos-sdk-workaround.sh"
+
+          workaround_root="$GITHUB_WORKSPACE/.tmp/macos-sdk-workaround"
+          if [ -d "$workaround_root/developer" ]; then
+            echo "DEVELOPER_DIR=$workaround_root/developer" >> "$GITHUB_ENV"
+            echo "$workaround_root/bin" >> "$GITHUB_PATH"
+          fi
+
       - name: Build release binary
         run: zig build -Doptimize=ReleaseFast
 
