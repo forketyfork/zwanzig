@@ -12,11 +12,14 @@ Zwanzig is a static analyzer and linter for Zig code, combining fast AST/token r
 
 Download the archive for your platform from the [latest release](https://github.com/forketyfork/zwanzig/releases/latest):
 
-| Platform | Archive |
-| --- | --- |
-| Linux x86_64 | `zwanzig-vX.Y.Z-linux-x86_64.tar.gz` |
-| macOS ARM64 | `zwanzig-vX.Y.Z-macos-aarch64.tar.gz` |
-| Windows x86_64 | `zwanzig-vX.Y.Z-windows-x86_64.zip` |
+| Platform | Embedded frontend | Archive |
+| --- | --- | --- |
+| Linux x86_64 | Zig 0.15.2 | `zwanzig-vX.Y.Z-zig-0.15.2-linux-x86_64.tar.gz` |
+| Linux x86_64 | Zig 0.16.0 | `zwanzig-vX.Y.Z-zig-0.16.0-linux-x86_64.tar.gz` |
+| macOS ARM64 | Zig 0.15.2 | `zwanzig-vX.Y.Z-zig-0.15.2-macos-aarch64.tar.gz` |
+| macOS ARM64 | Zig 0.16.0 | `zwanzig-vX.Y.Z-zig-0.16.0-macos-aarch64.tar.gz` |
+| Windows x86_64 | Zig 0.15.2 | `zwanzig-vX.Y.Z-zig-0.15.2-windows-x86_64.zip` |
+| Windows x86_64 | Zig 0.16.0 | `zwanzig-vX.Y.Z-zig-0.16.0-windows-x86_64.zip` |
 
 Extract the archive and either add its directory to `PATH` or invoke the executable directly:
 
@@ -28,7 +31,19 @@ On Windows, run `.\zwanzig.exe src\` instead.
 
 ### Zig frontend compatibility
 
-Zwanzig embeds the Zig frontend used to build it. Source builds support Zig 0.15.2 and Zig 0.16.0, and select the matching compatibility layer automatically. Run `zwanzig --version` to see which frontend a binary contains; use a binary built with the frontend version that matches the Zig language version used by your project.
+Zwanzig embeds the Zig frontend used to build it. Source builds support Zig 0.15.2 and Zig 0.16.0, and select the matching compatibility layer automatically. Release archive names include the embedded frontend version, so choose the `zig-0.15.2` archive for a Zig 0.15.2 project and the `zig-0.16.0` archive for a Zig 0.16.0 project. Run `zwanzig --version` to verify which frontend a binary contains.
+
+To build from source with the 0.15.2 frontend, use the default shell:
+
+```bash
+nix develop -c just build
+```
+
+To build with the 0.16.0 frontend, select the migration shell:
+
+```bash
+nix develop .#zig016 -c just build
+```
 
 ### Zig build dependency
 
@@ -62,7 +77,7 @@ zig build lint
 
 ### GitHub Actions (SARIF)
 
-Download a pinned release binary before running Zwanzig. The Linux runner is x86_64, so it uses the Linux x86_64 archive:
+Download a pinned release binary before running Zwanzig. The example selects the Zig 0.15.2 frontend; set `ZWANZIG_ZIG_FRONTEND` to `0.16.0` for a Zig 0.16.0 project. The Linux runner is x86_64, so it uses the Linux x86_64 archive:
 
 ```yaml
 name: Zwanzig
@@ -77,6 +92,7 @@ permissions:
 
 env:
   ZWANZIG_VERSION: v0.14.0
+  ZWANZIG_ZIG_FRONTEND: 0.15.2
 
 jobs:
   analyze:
@@ -86,7 +102,7 @@ jobs:
 
       - name: Install Zwanzig
         run: |
-          archive="zwanzig-${ZWANZIG_VERSION}-linux-x86_64.tar.gz"
+          archive="zwanzig-${ZWANZIG_VERSION}-zig-${ZWANZIG_ZIG_FRONTEND}-linux-x86_64.tar.gz"
           curl --fail --location --silent --show-error \
             "https://github.com/forketyfork/zwanzig/releases/download/${ZWANZIG_VERSION}/${archive}" \
             --output "${RUNNER_TEMP}/${archive}"

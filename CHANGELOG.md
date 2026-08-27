@@ -12,6 +12,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `--version` now reports the embedded Zig frontend version. (PR #109)
 - A reproducible Zig 0.16.0 development shell and migration compatibility inventory are now available. (PR #110)
 - Source builds now support both Zig 0.15.2 and Zig 0.16.0 frontends, with the selected frontend reported by `--version`. (PR #111; follow-up to PR #110)
+- Release archives are now published for both Zig 0.15.2 and Zig 0.16.0 frontends, with the frontend version included in each asset name. (PR #115)
 
 ### Changed
 

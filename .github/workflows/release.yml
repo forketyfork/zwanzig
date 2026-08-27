@@ -1,6 +1,7 @@
+---
 name: Release
 
-on:
+'on':
   push:
     tags:
       - "v*"
@@ -10,14 +11,21 @@ permissions:
 
 jobs:
   validate:
+    name: validate (${{ matrix.zig_version }})
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        zig_version:
+          - '0.15.2'
+          - '0.16.0'
     steps:
       - uses: actions/checkout@v7
 
       - name: Install Zig
         uses: mlugg/setup-zig@v2
         with:
-          version: 0.15.2
+          version: ${{ matrix.zig_version }}
 
       - name: Run release checks
         run: ./scripts/release-check.sh "${{ github.ref_name }}"
@@ -30,12 +38,27 @@ jobs:
       matrix:
         include:
           - os: ubuntu-latest
+            zig_version: '0.15.2'
             asset_suffix: linux-x86_64
             archive_ext: tar.gz
           - os: macos-latest
+            zig_version: '0.15.2'
             asset_suffix: macos-aarch64
             archive_ext: tar.gz
           - os: windows-latest
+            zig_version: '0.15.2'
+            asset_suffix: windows-x86_64
+            archive_ext: zip
+          - os: ubuntu-latest
+            zig_version: '0.16.0'
+            asset_suffix: linux-x86_64
+            archive_ext: tar.gz
+          - os: macos-latest
+            zig_version: '0.16.0'
+            asset_suffix: macos-aarch64
+            archive_ext: tar.gz
+          - os: windows-latest
+            zig_version: '0.16.0'
             asset_suffix: windows-x86_64
             archive_ext: zip
 
@@ -45,10 +68,19 @@ jobs:
       - name: Install Zig
         uses: mlugg/setup-zig@v2
         with:
-          version: 0.15.2
+          version: ${{ matrix.zig_version }}
 
       - name: Build release binary
         run: zig build -Doptimize=ReleaseFast
+
+      - name: Set archive name
+        id: archive_name
+        shell: bash
+        run: |
+          archive="zwanzig-${{ github.ref_name }}-zig-${{ matrix.zig_version }}"
+          archive="${archive}-${{ matrix.asset_suffix }}"
+          archive="${archive}.${{ matrix.archive_ext }}"
+          echo "name=$archive" >> "$GITHUB_OUTPUT"
 
       - name: Package artifact (Unix)
         if: runner.os != 'Windows'
@@ -56,7 +88,7 @@ jobs:
           mkdir -p dist
           cp zig-out/bin/zwanzig dist/
           cp LICENSE README.md dist/
-          tar -czf "zwanzig-${{ github.ref_name }}-${{ matrix.asset_suffix }}.${{ matrix.archive_ext }}" -C dist .
+          tar -czf "${{ steps.archive_name.outputs.name }}" -C dist .
 
       - name: Package artifact (Windows)
         if: runner.os == 'Windows'
@@ -65,9 +97,29 @@ jobs:
           New-Item -ItemType Directory -Force -Path dist | Out-Null
           Copy-Item zig-out/bin/zwanzig.exe dist/
           Copy-Item LICENSE, README.md dist/
-          Compress-Archive -Path dist/* -DestinationPath "zwanzig-${{ github.ref_name }}-${{ matrix.asset_suffix }}.${{ matrix.archive_ext }}"
+          $archive = "${{ steps.archive_name.outputs.name }}"
+          Compress-Archive -Path dist/* -DestinationPath $archive
+
+      - name: Upload packaged artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-${{ matrix.zig_version }}-${{ matrix.asset_suffix }}
+          path: ${{ steps.archive_name.outputs.name }}
+          if-no-files-found: error
+
+  publish:
+    name: Publish release assets
+    needs: release
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download packaged artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: release-*
+          path: dist
+          merge-multiple: true
 
       - name: Upload release assets
         uses: softprops/action-gh-release@v3.0.2
         with:
-          files: zwanzig-${{ github.ref_name }}-${{ matrix.asset_suffix }}.${{ matrix.archive_ext }}
+          files: dist/*
