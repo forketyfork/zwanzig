@@ -476,7 +476,7 @@ git commit -m "docs: add Zig 0.16 migration breakage inventory"
 **Status: reviewed and closed.** The compat implementation is present on
 `main` from the work covered by Tasks 1–6. Tasks 8 and 9 are complete. Task 10's
 dual-frontend release workflow and documentation are implemented; its criteria
-that require an actual release tag remain open until that release is run.
+that require a successful release tag remain open until that release completes.
 
 #### Status quo
 
@@ -667,8 +667,9 @@ one canonical Code Scanning upload.
 
 `.github/workflows/release.yml` validates and builds both Zig 0.15.2 and Zig
 0.16.0. Its platform matrix covers Linux x86_64, macOS aarch64, and Windows
-x86_64, and the asset name includes the embedded frontend. The workflow has not
-yet been exercised by an actual release tag on this migration branch.
+x86_64, and the asset name includes the embedded frontend. The v0.15.0 release
+attempt passed both validation legs but failed to link the macOS Zig 0.15.2
+artifact because the release job did not apply the existing SDK workaround.
 
 #### Objectives
 
@@ -718,7 +719,7 @@ make the embedded language frontend unambiguous before download.
 
 Tasks 1–9 are complete and checked off above. Task 10's dual-frontend release
 workflow, artifact naming, and user documentation are implemented, while the
-criteria requiring a real release tag remain open. Task 7's support lifetime,
+criteria requiring a successful release tag remain open. Task 7's support lifetime,
 canonical formatter, and launcher decisions are now adopted and recorded in
 its "Review decisions (adopted)" section.
 

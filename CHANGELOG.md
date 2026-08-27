@@ -5,6 +5,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.15.1]
+
+### Fixed
+
+- macOS ARM64 release builds embedding Zig 0.15.2 now use a compatible SDK. ([ziglang/zig#31756](https://codeberg.org/ziglang/zig/issues/31756))
+
 ## [0.15.0]
 
 ### Added
