@@ -100,7 +100,26 @@ jobs:
           $archive = "${{ steps.archive_name.outputs.name }}"
           Compress-Archive -Path dist/* -DestinationPath $archive
 
+      - name: Upload packaged artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-${{ matrix.zig_version }}-${{ matrix.asset_suffix }}
+          path: ${{ steps.archive_name.outputs.name }}
+          if-no-files-found: error
+
+  publish:
+    name: Publish release assets
+    needs: release
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download packaged artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: release-*
+          path: dist
+          merge-multiple: true
+
       - name: Upload release assets
         uses: softprops/action-gh-release@v3.0.2
         with:
-          files: ${{ steps.archive_name.outputs.name }}
+          files: dist/*
