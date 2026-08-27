@@ -14,7 +14,7 @@
 
 - Default dev toolchain stays **exactly Zig 0.15.2** (`flake.nix` devShell `default`); `build.zig.zon` keeps `.minimum_zig_version = "0.15.2"`. The upper/exact support boundary is enforced by `src/compat.zig`, not by `build.zig.zon`.
 - Every task ends with `just test` and `just lint` green under the default (0.15.2) shell. `just lint` runs zwanzig on its own source.
-- All code formatted with `zig fmt` (0.15.2 is the canonical formatter until Phase 4 decides otherwise).
+- All code formatted with `zig fmt` (0.15.2 is the canonical formatter unless the canonical-formatter decision in Task 7's "Review decisions required" section changes it).
 - ArrayList init uses `.empty`, allocator passed to methods (Zig 0.15.2 style, see CLAUDE.md).
 - No silent degradation: a frontend/language mismatch must produce an explicit failure, never incomplete type information (project rule: no speculative fallbacks).
 - User-visible changes get a `CHANGELOG.md` entry under `## [Unreleased]`.
@@ -44,8 +44,8 @@ Sources: [0.16.0 release notes](https://ziglang.org/download/0.16.0/release-note
 
 - **Phase 0 (Tasks 1–4):** hardening that is correct and shippable on 0.15.2 alone, independent of the migration schedule.
 - **Phase 1 (Tasks 5–6):** 0.16 toolchain availability and a definitive breakage inventory.
-- **Checkpoint (Task 7):** expand Phases 2–4 into a detailed follow-up plan *from the inventory* — their task-level code is deliberately not written here, because writing 0.16-specific code before the inventory exists would be guesswork.
-- **Phases 2–4:** scoped roadmap with the interfaces that are already verified.
+- **Checkpoint (Task 7):** expand Phases 2–4 into a detailed follow-up plan *from the inventory* — Tasks 8–11 below are that expansion; they were deliberately not written before the inventory existed, because writing 0.16-specific code first would have been guesswork.
+- **Phases 2–4 (Tasks 8–11):** the detailed follow-up produced at the Task 7 checkpoint — frontend fixture matrix, dual-frontend CI, dual-frontend releases, and closing the open decisions. The compat seams (the Phase 2 core) are already implemented on `main`.
 
 ---
 
@@ -473,42 +473,286 @@ git commit -m "docs: add Zig 0.16 migration breakage inventory"
 
 ### Task 7 (checkpoint): Expand Phases 2–4 into a detailed plan
 
-With the inventory in hand, write the follow-up implementation plan (same format as this one, task-level code included) for the roadmap below, and review it with the user before execution. Key sizing input: the per-category error counts and the `build.zig` idiom from Task 6.
+**Status: draft awaiting review.** The compat implementation is already present
+on `main` from the work covered by Tasks 1–6. The remaining work is deliberately
+specified below, but must not be started until the open policy decisions are
+reviewed.
+
+#### Status quo
+
+- Phase 2 is implemented: `build.zig` selects the 0.15.2/0.16.0 build-script
+  APIs, `src/compat.zig` selects the I/O and ZIR adapters, and the shared
+  analyzer receives an explicit I/O context.
+- The inventory measured 16 main-target and 8 fixture-target compile errors
+  before the spike fixes. It also established that 0.16.0 does not need the
+  macOS SDK workaround and that the 15 `check-fixtures` failures are pre-existing
+  on both toolchains.
+- The shared fixture suite, cache behavior, executor test, and `just test` /
+  `just lint` checks have already passed in both shells, but there is no
+  dedicated fixture proving matching and mismatching frontend syntax.
+- `.github/workflows/build.yml` runs only `nix develop` (Zig 0.15.2), and
+  `.github/workflows/release.yml` creates one 0.15.2 artifact per platform.
+  `README.md` and `docs/USAGE.md` each already have a "Zig frontend
+  compatibility" section explaining that a binary must match the project's Zig
+  version, and `README.md` has a one-archive-per-platform download table — but
+  the release asset names contain no frontend identity, so the guidance cannot
+  yet point at a concrete artifact.
+
+#### Objectives
+
+Complete the migration's remaining user-facing contract:
+
+1. prove that shared-syntax analysis remains equivalent and that typed analysis
+   succeeds only for the matching embedded frontend;
+2. exercise both shells on every code change;
+3. publish independently selectable 0.15.2 and 0.16.0 binaries for every
+   supported platform; and
+4. record the support-lifetime, formatting, and launcher decisions before the
+   release workflow is changed.
+
+#### Review decisions required
+
+1. **0.15.2 support lifetime:** keep 0.15.2 artifacts indefinitely, or announce
+   a fixed sunset (the existing proposal is two releases after 0.16 support
+   ships). A sunset reduces release and CI cost but creates a migration deadline
+   for users with 0.15 projects.
+2. **Canonical formatter:** retain Zig 0.15.2 as the sole `zig fmt --check`
+   authority, or switch to 0.16.0. The choice determines whether the second
+   CI leg checks formatting or only runs tests and the analyzer lint.
+3. **Launcher:** keep frontend selection explicit in the artifact name and
+   documentation, or add a launcher that detects the project frontend. The
+   launcher is deferred by default because detection and distribution add a
+   separate compatibility surface; it should be revisited only if user demand
+   shows that filename selection is insufficient.
+
+Unless the review changes them, the implementation slices below use the
+existing proposal: retain both frontends for two subsequent releases, keep
+0.15.2 canonical for formatting, and defer a launcher.
+
+Tasks 8–11 below are the expansion this checkpoint produces. Their acceptance
+criteria use checkbox (`- [ ]`) syntax and are the tracking unit for the
+remaining work.
 
 ---
 
-## Phase 2–4 roadmap (to be expanded by Task 7)
+### Task 8: Add the frontend fixture matrix
 
-Scope agreed in advance; task-level detail deliberately deferred until the Task 6 inventory exists.
+#### Status quo
 
-### Phase 2 — Compat seams
+`test/fixture_tests.zig` runs the existing rule and checker fixtures in the
+current build, while `build.zig:addFixtureChecks` compiles a fixed list of
+fixture directories. `src/zir/bridge.zig` has one conditional unit test for the
+opposite frontend builtin, but the fixture suite does not prove the complete
+matching/mismatching contract.
 
-- [x] **`build.zig` dual-toolchain support:** `comptime` branches on `builtin.zig_version` for the `std.fs.cwd()` calls (lines 87, 132). Cannot use `src/compat/` — build scripts compile before the project.
-- [x] **Compat module layout** (extends Task 4's `src/compat.zig` into the selector):
+#### Objectives
 
+Add a small, explicit matrix that exercises one shared fixture, one valid
+0.15.2-only typed fixture using `@Type`, and one valid 0.16.0-only typed fixture
+using `@Int`. In each build, the matching fixture must retain type information
+and the other fixture must report unavailable type information through the
+existing `Source.hasTypeInfo()` degradation path. The shared fixture must assert
+the same diagnostic fields under both builds.
+
+#### Tech Notes
+
+- Create `test/fixtures/frontend_matrix/shared.zig`,
+  `test/fixtures/frontend_matrix/zig_0_15.zig`, and
+  `test/fixtures/frontend_matrix/zig_0_16.zig`. Keep the version-specific
+  expressions at top level so `Source.zirBridge()` is exercised directly.
+- Use the known version-specific forms from the inventory:
+
+  ```zig
+  // zig_0_15.zig — compile this fixture only with Zig 0.15.2
+  const T = @Type(.{ .int = .{ .signedness = .signed, .bits = 8 } });
+
+  // zig_0_16.zig — compile this fixture only with Zig 0.16.0
+  const T = @Int(.signed, 8);
   ```
-  src/compat.zig                  # gate + comptime selection by builtin.zig_version
-  src/compat/zig_0_15/{io,executor,zir}.zig
-  src/compat/zig_0_16/{io,executor,zir}.zig
+
+  Verify the exact `@Type` payload against the pinned 0.15.2 frontend while
+  implementing; the important invariant is that it generates valid ZIR only
+  under 0.15.2.
+- Add a small frontend selector to `src/compat.zig`, for example a public
+  `Frontend` enum and comptime `frontend` value derived from the already-gated
+  `builtin.zig_version`. Use that selector in `test/fixture_tests.zig` to load
+  the matching fixture and its inverse, rather than duplicating version checks
+  in test code.
+- Add a test helper in `test/fixture_tests.zig` that reads both files through
+  `src.compat.readFileAlloc`, constructs `src.Source`, and asserts:
+
+  ```zig
+  try std.testing.expect(matching_source.hasTypeInfo());
+  try std.testing.expect(!mismatching_source.hasTypeInfo());
   ```
 
-- [x] **I/O context:** an application context created in `src/main.zig` and threaded through `cli/run.zig` → analyzer → cache/config/discovery/formatters/DOT output. On 0.16 it owns a `std.Io` (from `std.Io.Threaded`); on 0.15.2 it exposes the same interface with no `Io` inside.
-- [x] **Executor:** common interface over 0.15.2 `std.Thread.Pool`+`WaitGroup`+`Thread.Mutex` vs 0.16 `std.Io.Threaded`+`std.Io.Group`+`Io.Mutex` (all four 0.16 names verified present). `--threads <n>` maps to the pool size / `Io.Threaded` concurrency limit; behavior equivalence covered by tests.
-- [x] **ZIR adapters:** move the `declIterator`-based decoding from `src/zir/bridge.zig` into `compat/zig_0_15/zir.zig`; implement `compat/zig_0_16/zir.zig` on `typeDecls`/`getStructDecl`/`getUnionDecl`/`getEnumDecl`/`getSwitchBlock` (names verified). Both adapters produce the existing `TypeInfo`/`DeclInfo`/`FnInfo` models from `src/zir/decls.zig`; the analyzer and checkers stay version-agnostic.
+  The mismatch assertion is the fixture-level proof of the Task 1 contract;
+  the existing bridge test remains the focused `error.AstGenFailed` check.
+- `build.zig:addFixtureChecks` compiles every `.zig` file in each directory it
+  lists, so do not add `test/fixtures/frontend_matrix` to its `fixture_dirs` —
+  that would compile the intentionally incompatible fixture and break the
+  build. Instead, call the existing single-file helper `addFixtureCheck` for
+  `shared.zig` and for the version-specific fixture selected by a
+  `builtin.zig_version` branch, so the mismatching fixture is never a
+  compilation target.
+- Run the shared fixture through an existing rule (the `todo` rule, implemented
+  in `src/rules/todo_comment.zig`, is sufficient — note the registered rule
+  name is `todo`, not `todo-comment`) with exact expected line/rule/message
+  fields. Running that same
+  assertion in both shells is the parity check; do not compare platform-specific
+  paths or compiler diagnostic text.
 
-### Phase 3 — Test matrix
+#### Acceptance criteria
 
-- Fixture matrix: shared-syntax fixtures asserted identical under both builds; a 0.15-only typed fixture (`@Type`); a 0.16-only typed fixture (`@Int`); tests asserting the mismatch cases fail with the explicit Task 1 error (not incomplete results). Version-conditional fixture registration via `src/compat.zig`.
-- [x] Full `just test` + `just lint` green under both shells, including equivalence of rule results, caching, and `--threads` behavior.
+- [ ] `nix develop -c just test` passes, including the matching and mismatching
+  frontend assertions.
+- [ ] `nix develop .#zig016 -c just test` passes with the inverse fixture
+  selection.
+- [ ] `nix develop -c zig build check-fixtures` and the equivalent 0.16 command
+  produce the same baseline failures recorded in
+  `docs/internal/ZIG_0_16_INVENTORY.md` (15 at the time of writing) and no new
+  failures; the newly added matching fixtures compile successfully. The
+  baseline failures remain visible and are not silently filtered.
+- [ ] The shared fixture produces identical expected diagnostic fields in both
+  toolchains, and `nix develop -c zig fmt --check test/fixtures/frontend_matrix`
+  passes (the canonical 0.15.2 formatter parses the 0.16 fixture too — `@Int`
+  fails only at AstGen, not at parse).
 
-### Phase 4 — CI, distribution, docs
+---
 
-- CI matrix: `just test` + `just lint` under `nix develop` (0.15.2) and `nix develop .#zig016`; one canonical `zig fmt --check` version (default 0.15.2 until switched deliberately — the two versions' formatters may disagree).
-- Release workflow: every platform × both frontends; artifact naming `zwanzig-<tag>-zig-<frontend>-<platform>` (e.g. `zwanzig-v0.15.0-zig-0.16.0-macos-aarch64`).
-- [x] Docs: support matrix and "which binary do I download" guidance in `README.md`/`docs/USAGE.md`; CHANGELOG entries; update `CLAUDE.md` build instructions.
+### Task 9: Make CI test both embedded frontends
 
-### Open decision points (decide during Task 7 review)
+#### Status quo
 
-1. **0.15.2 sunset:** dual-frontend releases double CI time and artifacts indefinitely. Proposal: announce a sunset window (e.g. drop 0.15.2 builds two zwanzig releases after 0.16 support ships) rather than open-ended support.
-2. **Canonical `zig fmt` version** once both toolchains are in CI.
-3. **Launcher binary** (single `zwanzig` command selecting the right engine): deferred — additive, and only worth building if users actually struggle with picking a binary.
+`.github/workflows/build.yml` has one `build-matrix` job that invokes
+`nix develop --command just ci`, caches one Zig build tree, and uploads one
+SARIF result. The 0.16.0 shell exists in `flake.nix` but is not used by CI.
+
+#### Objectives
+
+Turn the build job into a two-entry frontend matrix while preserving the
+existing change filtering, Nix/Cachix setup, deterministic lint behavior, and
+one canonical Code Scanning upload.
+
+#### Tech Notes
+
+- Modify the `build-matrix` strategy in `.github/workflows/build.yml` to carry
+  both the frontend version (`0.15.2`, `0.16.0`) and the corresponding Nix shell
+  (`default`, `.#zig016`). Keep the `changes` dependency so documentation-only
+  changes do not spend two build slots.
+- Include the frontend in the Zig cache key. A cache created by one compiler
+  must not be reused by the other compiler even when the source hash is equal.
+- Invoke `just ci` in both matrix legs. If the canonical formatter decision
+  (Task 7, "Review decisions required") keeps 0.15.2 authoritative, make that
+  policy explicit in the workflow or Justfile rather than allowing a formatter
+  mismatch to become an unexplained 0.16 failure.
+- Upload SARIF from one designated frontend (the canonical 0.15.2 leg) to avoid
+  duplicate findings in GitHub Code Scanning; both legs still run analyzer lint.
+- Keep the aggregate `build` job's result checks correct when either matrix leg
+  fails or when the code path is skipped.
+
+#### Acceptance criteria
+
+- [ ] A code-changing pull request shows two build legs, one for each pinned
+  frontend, and the aggregate job fails if either leg fails.
+- [ ] Both legs execute `just test` and `just lint`; the canonical leg uploads
+  exactly one SARIF file.
+- [ ] The cache key contains the frontend identity and no 0.15.2 cache path is
+  restored for a 0.16.0 job.
+- [ ] The workflow YAML remains valid, and the local equivalents
+  `nix develop -c just ci` and `nix develop .#zig016 -c just ci` pass.
+
+---
+
+### Task 10: Publish release artifacts for both frontends
+
+#### Status quo
+
+`.github/workflows/release.yml` validates and builds only with Zig 0.15.2. Its
+platform matrix covers Linux x86_64, macOS aarch64, and Windows x86_64, but the
+asset name contains no frontend identity, so a future 0.16.0 binary would be
+indistinguishable from the existing artifact.
+
+#### Objectives
+
+Build and upload one archive for every platform/frontend pair, with names that
+make the embedded language frontend unambiguous before download.
+
+#### Tech Notes
+
+- Extend the release matrix with a `zig_version` dimension while retaining the
+  existing platform metadata. Install the matrix-selected version with
+  `mlugg/setup-zig@v2`; `build.zig` already selects the matching entry point.
+- Use the artifact pattern
+  `zwanzig-${{ github.ref_name }}-zig-${{ matrix.zig_version }}-${{ matrix.asset_suffix }}`
+  for both Unix and Windows archives. Preserve the existing archive extensions
+  and include `LICENSE` and `README.md` in each archive.
+- Run `scripts/release-check.sh` under both frontend versions in the validation
+  job. It must continue to verify the release tag, documentation versions, and
+  the full test/lint suite before any upload occurs.
+- Update the platform download table in `README.md` (currently one archive per
+  platform) to list both frontend artifacts, and extend the existing "Zig
+  frontend compatibility" sections in `README.md` and `docs/USAGE.md` — which
+  already explain matching the binary to the project's Zig version — to state
+  that the frontend is encoded in the asset name (a project on Zig 0.15.2
+  downloads the `zig-0.15.2` artifact, and likewise for 0.16.0). `docs/USAGE.md`
+  has no download table; do not add a duplicate of the README one. Keep
+  source-build instructions explicit about selecting `nix develop` versus
+  `nix develop .#zig016`.
+- Add a user-facing `CHANGELOG.md` entry with the issue or PR number when the
+  release workflow lands. Do not add a placeholder number.
+
+#### Acceptance criteria
+
+- [ ] A release tag produces six uniquely named archives: three platforms times
+  two frontend versions.
+- [ ] Each archive's `--version` output identifies the frontend encoded in its
+  filename, and the 0.15.2 and 0.16.0 artifacts do not overwrite one another.
+- [ ] Both release validation legs pass `scripts/release-check.sh` before
+  upload.
+- [ ] README and usage instructions let a user choose the correct binary
+  without reading the workflow source.
+
+---
+
+### Task 11: Close the migration decisions and update the roadmap
+
+#### Status quo
+
+Tasks 1–7 are complete and checked off above; Tasks 8–10 (fixture matrix,
+dual-frontend CI, dual-frontend releases) are specified but not yet
+implemented. The 0.15.2 sunset, canonical formatter, and launcher policies
+remain open — the options, rationales, and the default proposal live in
+Task 7's "Review decisions required" section, which is the single place they
+are argued.
+
+#### Objectives
+
+Record the reviewed choices in this document, update the support and release
+documentation to match them, and mark only the tasks whose acceptance criteria
+actually passed.
+
+#### Tech Notes
+
+- If 0.15.2 is sunset, document the first release that drops its artifact and
+  preserve the old binary-selection guidance until that release. If support is
+  indefinite, state the maintenance commitment instead of leaving an implied
+  deadline.
+- Record the canonical formatter choice in `CLAUDE.md`, `docs/DEVELOPMENT.md`
+  (which currently states no formatter policy), and the CI workflow so
+  contributors know which `zig fmt` output is expected.
+- If the launcher remains deferred, retain explicit artifact names and record
+  the closing rationale in Task 7's "Review decisions required" section rather
+  than restating it elsewhere; per that section, a launcher becomes a separate
+  plan only if user demand shows filename selection is insufficient.
+
+#### Acceptance criteria
+
+- [ ] The three decisions have a durable record with rationale and no
+  contradictory statements in `README.md`, `docs/USAGE.md`, `CLAUDE.md`, or
+  `docs/DEVELOPMENT.md`.
+- [ ] The checkboxes in this plan — the Task 1–7 steps and the Task 8–11
+  acceptance criteria — match the code, CI, and release workflow that actually
+  shipped.
+- [ ] The final implementation run ends with `just test` and `just lint` under
+  both pinned shells.
